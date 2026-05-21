@@ -2,6 +2,6 @@
   "name": "quantum-ia",
   "version": "1.0.0",
   "scripts": {
-    "start": "npx serve 'Portal Del Inversor D' --listen $PORT"
+    "start": "npx serve quantum-ia --listen $PORT"
   }
 }

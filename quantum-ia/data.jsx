@@ -1,4 +1,4 @@
-// data.jsx — mock data and helpers for Portal Del Inversor
+// data.jsx — mock data and helpers for Quantum.ia
 
 const ASSETS = {
   BTC: {

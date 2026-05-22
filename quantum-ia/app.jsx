@@ -5,8 +5,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "theme": "light",
   "density": "regular",
   "accent": "#6B9A6B",
-  "rangeOverlay": true,
-  "chartStyle": "line"
+  "rangeOverlay": true
 }/*EDITMODE-END*/;
 
 const ACCENT_PALETTES = {
@@ -72,7 +71,7 @@ function App() {
         {/* View body — fills both columns when not dashboard */}
         {view === 'dashboard' && (
           <div style={{ gridColumn: '1 / -1' }}>
-            <Dashboard assetId={t.asset} setAssetId={setAssetId} density={t.density} />
+            <Dashboard assetId={t.asset} setAssetId={setAssetId} density={t.density} rangeOverlay={t.rangeOverlay} />
           </div>
         )}
         {view === 'portfolio' && (

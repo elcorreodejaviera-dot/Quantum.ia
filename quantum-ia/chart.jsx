@@ -1,8 +1,9 @@
 // chart.jsx — price chart with optional liquidity range overlay
 
 function PriceChart({ asset, series, range, rangeOverlay = true, dark = true, height = 280 }) {
+  const fluidHeight = height === 'fluid';
   const W = 920;
-  const H = height;
+  const H = fluidHeight ? 280 : height;
   const padL = 8, padR = 60, padT = 14, padB = 30;
   const innerW = W - padL - padR;
   const innerH = H - padT - padB;
@@ -55,7 +56,7 @@ function PriceChart({ asset, series, range, rangeOverlay = true, dark = true, he
   const rangeGradId = `gr-${asset.id}`;
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none" style={{ display: 'block' }}>
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={fluidHeight ? '100%' : H} preserveAspectRatio="none" style={{ display: 'block' }}>
       <defs>
         <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor={stroke} stopOpacity="0.22" />
@@ -126,6 +127,19 @@ function PriceChart({ asset, series, range, rangeOverlay = true, dark = true, he
       {/* area + line */}
       <path d={areaPath} fill={`url(#${gradId})`} />
       <path d={linePath} fill="none" stroke={stroke} strokeWidth="1.6" strokeLinejoin="round" strokeLinecap="round" />
+
+      {/* current price guide */}
+      <line
+        x1={padL} x2={padL + innerW}
+        y1={lastY.toFixed(2)} y2={lastY.toFixed(2)}
+        stroke={stroke} strokeWidth="1" strokeDasharray="2 5" opacity="0.34"
+      />
+      <g transform={`translate(${padL + innerW + 6}, ${lastY - 11})`}>
+        <rect x="0" y="0" width="50" height="20" rx="6" fill={dark ? '#14120E' : '#F4EFE3'} stroke={gridColor} />
+        <text x="25" y="13.5" textAnchor="middle" fill={stroke} fontSize="9.5" fontFamily="Geist Mono, monospace" fontWeight="500">
+          {Math.round(lastV).toLocaleString('en-US')}
+        </text>
+      </g>
 
       {/* last price marker */}
       <g>

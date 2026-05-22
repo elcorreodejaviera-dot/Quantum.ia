@@ -2,7 +2,7 @@
 
 const TF_TABS = ['1 semana', '1 día', '4 horas', '1 hora'];
 
-function Dashboard({ assetId, setAssetId, density }) {
+function Dashboard({ assetId, setAssetId, density, rangeOverlay }) {
   const asset = ASSETS[assetId];
   const series = SERIES[assetId];
   const [tf, setTf] = React.useState(TF_TABS[0]);
@@ -30,6 +30,10 @@ function Dashboard({ assetId, setAssetId, density }) {
     setRangePct([0.15, 0.85]);
   };
 
+  const rangeWidthPct = ((range[1] - range[0]) / asset.price) * 100;
+  const rangeMid = (range[0] + range[1]) / 2;
+  const distanceToMid = ((asset.price - rangeMid) / rangeMid) * 100;
+
   return (
     <>
       {/* Asset switcher */}
@@ -47,7 +51,7 @@ function Dashboard({ assetId, setAssetId, density }) {
         ))}
       </div>
 
-      <div className="shell-inner" style={{ display: 'grid', gridTemplateColumns: '1fr 264px', gap: 'var(--gap-md)' }}>
+      <div className="shell-inner">
         <div className="main">
 
           {/* Asset hero card */}
@@ -91,7 +95,31 @@ function Dashboard({ assetId, setAssetId, density }) {
             </div>
 
             <div className="chart-wrap">
-              <PriceChart asset={asset} series={series} range={range} dark={true} />
+              <PriceChart asset={asset} series={series} range={range} rangeOverlay={rangeOverlay} dark={true} height="fluid" />
+            </div>
+            <div className="chart-summary" aria-label="Resumen del rango">
+              <div>
+                <span className="k">Mínimo</span>
+                <span className="v">${fmt(range[0], 0)}</span>
+              </div>
+              <div>
+                <span className="k">Precio</span>
+                <span className="v live">${fmt(asset.price)}</span>
+              </div>
+              <div>
+                <span className="k">Máximo</span>
+                <span className="v">${fmt(range[1], 0)}</span>
+              </div>
+              <div>
+                <span className="k">Ancho</span>
+                <span className="v">{rangeWidthPct.toFixed(1)}%</span>
+              </div>
+              <div>
+                <span className="k">Centro</span>
+                <span className={`v ${Math.abs(distanceToMid) <= 3 ? 'gain' : 'warn'}`}>
+                  {distanceToMid >= 0 ? '+' : ''}{distanceToMid.toFixed(1)}%
+                </span>
+              </div>
             </div>
           </div>
 

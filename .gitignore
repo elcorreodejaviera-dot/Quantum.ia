@@ -1,3 +1,7 @@
 .claude/
 *.log
 Portal Del Inversor F/
+node_modules/
+.env
+.env.local
+.DS_Store

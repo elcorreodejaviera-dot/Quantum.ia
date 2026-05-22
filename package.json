@@ -1,7 +1,15 @@
 {
   "name": "quantum-ia",
   "version": "1.0.0",
+  "private": true,
+  "description": "Quantum.ia liquidity, spot and hedge bot portal.",
+  "main": "server.js",
   "scripts": {
-    "start": "npx serve quantum-ia --listen $PORT"
+    "start": "node server.js",
+    "dev": "node server.js",
+    "check": "node -c server.js"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

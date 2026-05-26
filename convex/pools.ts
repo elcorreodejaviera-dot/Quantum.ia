@@ -19,6 +19,14 @@ export const updatePool = mutation({
   },
   handler: async (ctx, { id, ...fields }) => {
     await requireAdmin(ctx);
+    const current = await ctx.db.get(id);
+    if (!current) throw new Error("Pool not found");
+
+    const nextMin = fields.minRange ?? current.minRange;
+    const nextMax = fields.maxRange ?? current.maxRange;
+    if (nextMin < 0 || nextMax < 0) throw new Error("Ranges must be non-negative");
+    if (nextMin > nextMax) throw new Error("minRange cannot be greater than maxRange");
+
     const filtered = Object.fromEntries(
       Object.entries(fields).filter(([, v]) => v !== undefined)
     );

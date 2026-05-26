@@ -605,7 +605,7 @@ function SpotPositions() {
   const [positions, setPositions] = React.useState(INITIAL_SPOT_POSITIONS);
 
   React.useEffect(() => {
-    if (positionsFromDb !== undefined && positionsFromDb.length > 0) {
+    if (positionsFromDb !== undefined) {
       setPositions(positionsFromDb.map((p) => ({
         ...p,
         id: p._id,
@@ -860,7 +860,7 @@ function Dashboard({ user, onLogout }) {
 
   function setBotActive(id, active) {
     setLocalBotState((prev) => ({ ...prev, [id]: { ...prev[id], active } }));
-    if (botsFromDb?.find((b) => b._id === id)) toggleBotMutation({ id });
+    if (botsFromDb?.find((b) => b._id === id)) toggleBotMutation({ id, active });
   }
 
   function setBotMode(id, mode) {

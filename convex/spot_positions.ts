@@ -9,7 +9,7 @@ export const listMyPositions = query({
 
     return await ctx.db
       .query("spot_positions")
-      .filter((q) => q.eq(q.field("userId"), identity.subject))
+      .withIndex("by_user_id", (q) => q.eq("userId", identity.subject))
       .collect();
   },
 });
@@ -23,6 +23,8 @@ export const addPosition = mutation({
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new Error("Not authenticated");
+    if (args.amount <= 0) throw new Error("amount must be > 0");
+    if (args.dca <= 0) throw new Error("dca must be > 0");
 
     return await ctx.db.insert("spot_positions", {
       ...args,

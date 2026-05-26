@@ -125,7 +125,9 @@ function Login({ onLogin }) {
 function Summary({ pools, bots }) {
   const totalLiquidity = pools.reduce((sum, pool) => sum + pool.liquidity, 0);
   const fees = pools.reduce((sum, pool) => sum + pool.fees24h, 0);
-  const avgApr = pools.reduce((sum, pool) => sum + pool.apr, 0) / pools.length;
+  const avgApr = pools.length > 0
+    ? pools.reduce((sum, pool) => sum + pool.apr, 0) / pools.length
+    : 0;
   const activeBots = bots.filter((bot) => bot.active).length;
   const walletBalance = WALLETS.reduce((sum, wallet) => sum + wallet.balance, 0);
 
@@ -133,7 +135,11 @@ function Summary({ pools, bots }) {
     <div className="summary-grid">
       <SummaryItem label="Liquidez monitoreada" value={formatUsd(totalLiquidity)} sub={`${pools.length} pools activos`} />
       <SummaryItem label="Fees 24h" value={formatUsd(fees)} sub="Estimado por rango" />
-      <SummaryItem label="APR anual promedio" value={`${avgApr.toFixed(1)}%`} sub={`${(avgApr / 52).toFixed(2)}% semanal`} />
+      <SummaryItem
+        label="APR anual promedio"
+        value={pools.length > 0 ? `${avgApr.toFixed(1)}%` : '—'}
+        sub={pools.length > 0 ? `${(avgApr / 52).toFixed(2)}% semanal` : 'Sin datos'}
+      />
       <SummaryItem label="Wallets monitoreadas" value={`${WALLETS.length}`} sub={`${formatUsd(walletBalance)} total`} />
     </div>
   );
@@ -885,19 +891,30 @@ function Dashboard({ user, onLogout }) {
     }
   }
 
-  function setBotMode(id, mode) {
-    setLocalBotState((prev) => ({ ...prev, [id]: { ...prev[id], mode } }));
-    if (botsFromDb?.find((b) => b._id === id)) updateBotMutation({ id, mode });
+  async function setBotMode(id, mode) {
+    if (!botsFromDb?.find((b) => b._id === id)) return;
+    try {
+      await updateBotMutation({ id, mode });
+      setLocalBotState((prev) => ({ ...prev, [id]: { ...prev[id], mode } }));
+    } catch (error) {
+      console.error('Failed to update bot mode', error);
+    }
   }
 
-  function updateBotConfig(id, patch) {
-    setLocalBotState((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }));
-    if (botsFromDb?.find((b) => b._id === id)) {
-      const schemaFields = ['capitalPerTrade', 'leverage', 'stop', 'simulationMode'];
-      const persistable = Object.fromEntries(
-        Object.entries(patch).filter(([k]) => schemaFields.includes(k))
-      );
-      if (Object.keys(persistable).length > 0) updateBotMutation({ id, ...persistable });
+  async function updateBotConfig(id, patch) {
+    if (!botsFromDb?.find((b) => b._id === id)) return;
+    const schemaFields = ['capitalPerTrade', 'leverage', 'stop', 'simulationMode'];
+    const persistable = Object.fromEntries(
+      Object.entries(patch).filter(([k]) => schemaFields.includes(k))
+    );
+
+    try {
+      if (Object.keys(persistable).length > 0) {
+        await updateBotMutation({ id, ...persistable });
+      }
+      setLocalBotState((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }));
+    } catch (error) {
+      console.error('Failed to update bot config', error);
     }
   }
 

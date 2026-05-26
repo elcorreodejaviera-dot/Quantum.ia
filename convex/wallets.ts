@@ -28,6 +28,10 @@ export const removeWallet = mutation({
   args: { id: v.id("wallets") },
   handler: async (ctx, { id }) => {
     await requireAdmin(ctx);
+    const wallet = await ctx.db.get(id);
+    if (!wallet) {
+      throw new Error("Wallet not found");
+    }
     await ctx.db.delete(id);
   },
 });

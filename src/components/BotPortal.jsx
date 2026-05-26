@@ -858,9 +858,14 @@ function Dashboard({ user, onLogout }) {
     return networkOk && pairOk;
   });
 
-  function setBotActive(id, active) {
-    setLocalBotState((prev) => ({ ...prev, [id]: { ...prev[id], active } }));
-    if (botsFromDb?.find((b) => b._id === id)) toggleBotMutation({ id, active });
+  async function setBotActive(id, active) {
+    if (!botsFromDb?.find((b) => b._id === id)) return;
+    try {
+      await toggleBotMutation({ id, active });
+      setLocalBotState((prev) => ({ ...prev, [id]: { ...prev[id], active } }));
+    } catch (error) {
+      console.error('Failed to update bot active state', error);
+    }
   }
 
   function setBotMode(id, mode) {

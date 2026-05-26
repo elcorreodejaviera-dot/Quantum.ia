@@ -608,10 +608,9 @@ function RiskPanel({ pools }) {
 
 const DEFAULT_PROTECTOR = { active: true, triggerDrop: 4, buySize: 15, maxBuys: 3, capitalReserve: 5000, orderType: 'Trigger por caída', takeProfit: 'Rebajar DCA' };
 
-function SpotPositions() {
+function SpotPositions({ prices, connected }) {
   const positionsFromDb = useQuery(api.spot_positions.listMyPositions);
   const [positions, setPositions] = React.useState(INITIAL_SPOT_POSITIONS);
-  const { prices, connected } = useHyperliquidPrices();
 
   React.useEffect(() => {
     if (positionsFromDb === undefined) return;
@@ -838,7 +837,7 @@ function Dashboard({ user, onLogout }) {
   const toggleBotMutation = useMutation(api.bots.toggleBot);
   const updateBotMutation = useMutation(api.bots.updateBot);
   const poolsFromDb = useQuery(api.pools.listPools);
-  const { prices } = useHyperliquidPrices();
+  const { prices, connected } = useHyperliquidPrices();
   const { funding } = useHyperliquidFunding();
 
   // UI-only state que no persiste en Convex (trading config extendida)
@@ -984,7 +983,7 @@ function Dashboard({ user, onLogout }) {
                 {filteredPools.map((pool) => <PoolCard key={pool.id} pool={pool} />)}
               </div>
             </section>
-            <SpotPositions />
+            <SpotPositions prices={prices} connected={connected} />
           </div>
 
           <aside className="stack">

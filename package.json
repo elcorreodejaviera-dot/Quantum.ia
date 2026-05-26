@@ -3,13 +3,23 @@
   "version": "1.0.0",
   "private": true,
   "description": "Quantum.ia liquidity, spot and hedge bot portal.",
-  "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js",
-    "check": "node -c server.js"
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "node server.js"
   },
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "@clerk/clerk-react": "^5.61.7",
+    "convex": "^1.39.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.3.5"
   }
 }

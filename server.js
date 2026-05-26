@@ -2,7 +2,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
-const root = path.join(__dirname, 'quantum-ia');
+const root = path.join(__dirname, 'dist');
 const port = Number(process.env.PORT || 4173);
 const host = process.env.HOST || '0.0.0.0';
 const displayHost = host === '0.0.0.0' ? '127.0.0.1' : host;
@@ -19,9 +19,21 @@ const contentTypes = {
   '.svg': 'image/svg+xml',
 };
 
+const STATIC_EXTENSIONS = new Set(Object.keys(contentTypes).filter(e => e !== '.html'));
+
 function send(res, status, body, contentType = 'text/plain; charset=utf-8') {
   res.writeHead(status, { 'Content-Type': contentType });
   res.end(body);
+}
+
+function serveFile(res, filePath, status = 200) {
+  fs.readFile(filePath, (err, data) => {
+    if (err) {
+      send(res, 404, 'Not found');
+      return;
+    }
+    send(res, status, data, contentTypes[path.extname(filePath)] || 'application/octet-stream');
+  });
 }
 
 http.createServer((req, res) => {
@@ -38,28 +50,28 @@ http.createServer((req, res) => {
     return;
   }
 
-  if (pathname === '/' || pathname === '/bot-portal.html') pathname = '/index.html';
-
-  const filePath = path.normalize(path.join(root, pathname));
+  const filePath = path.normalize(path.join(root, pathname === '/' ? '/index.html' : pathname));
   if (!filePath.startsWith(root)) {
     send(res, 403, 'Forbidden');
     return;
   }
 
-  fs.readFile(filePath, (error, data) => {
-    if (error) {
-      fs.readFile(path.join(root, '404.html'), (notFoundError, notFoundData) => {
-        if (notFoundError) {
-          send(res, 404, 'Not found');
-          return;
-        }
+  const ext = path.extname(filePath);
 
-        send(res, 404, notFoundData, 'text/html; charset=utf-8');
-      });
+  fs.readFile(filePath, (err, data) => {
+    if (!err) {
+      send(res, 200, data, contentTypes[ext] || 'application/octet-stream');
       return;
     }
 
-    send(res, 200, data, contentTypes[path.extname(filePath)] || 'application/octet-stream');
+    // Archivo estático faltante (js, css, png...) → 404 real
+    if (STATIC_EXTENSIONS.has(ext)) {
+      serveFile(res, path.join(root, '404.html'), 404);
+      return;
+    }
+
+    // SPA fallback: cualquier ruta desconocida → index.html
+    serveFile(res, path.join(root, 'index.html'));
   });
 }).listen(port, host, () => {
   console.log(`Quantum.ia running at http://${displayHost}:${port}/`);

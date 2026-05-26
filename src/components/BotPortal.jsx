@@ -1,5 +1,7 @@
 import React from 'react'
 import { SignedIn, SignedOut, SignIn, useUser, useClerk } from '@clerk/clerk-react'
+import { useQuery, useMutation } from 'convex/react'
+import { api } from '../../convex/_generated/api'
 
 const USERS = [
   { username: 'admin', password: import.meta.env.VITE_ADMIN_PASSWORD, name: 'Operador principal' },
@@ -44,6 +46,17 @@ const INITIAL_SPOT_POSITIONS = [
   { asset: 'BTC', amount: 0.42, dca: 63200, currentPrice: 68420, protector: { active: true, triggerDrop: 4, buySize: 15, maxBuys: 3, capitalReserve: 5000, orderType: 'Trigger por caída', takeProfit: 'Rebajar DCA' } },
   { asset: 'ETH', amount: 8.6, dca: 3420, currentPrice: 3745, protector: { active: true, triggerDrop: 5, buySize: 20, maxBuys: 4, capitalReserve: 3500, orderType: 'Trigger por caída', takeProfit: 'Rebajar DCA' } },
 ];
+
+// Precios de mercado mock hasta que JAV-14 integre Hyperliquid WebSocket
+const PRICE_BY_ASSET = { BTC: 68420, ETH: 3745 };
+
+// Campos UI de bots que no están en el schema de Convex (trading config extendida)
+const DEFAULT_BOT_UI = {
+  hedge: '—', health: '—', poolTokenId: '—',
+  tpSteps: [25, 50, 25], autoLeverage: false, takeProfit: 'Fijo',
+  orderType: 'Trigger por precio', marginMode: 'Isolated', collateral: 'USDC',
+  entryTrigger: 'Fuera de rango', triggerPrice: 0, poolCapitalPercent: 100,
+};
 
 function formatUsd(value) {
   return value.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
@@ -270,8 +283,12 @@ function SubscriptionPanel() {
 }
 
 function WalletPanel() {
-  const botWallets = WALLETS.filter((wallet) => wallet.type === 'Bot');
-  const poolWallets = WALLETS.filter((wallet) => wallet.type === 'Pool');
+  const walletsFromDb = useQuery(api.wallets.listWallets);
+  const wallets = walletsFromDb
+    ? walletsFromDb.map((w) => ({ ...w, id: w._id, owner: w.ownerId ?? '—', balance: 0 }))
+    : WALLETS;
+  const botWallets = wallets.filter((wallet) => wallet.type === 'Bot');
+  const poolWallets = wallets.filter((wallet) => wallet.type === 'Pool');
   const [open, setOpen] = React.useState(false);
 
   return (
@@ -283,7 +300,7 @@ function WalletPanel() {
         </button>
       </div>
       <div className="wallet-summary">
-        <span className="pill">{WALLETS.length} conectadas</span>
+        <span className="pill">{wallets.length} conectadas</span>
         <span className="label">Wallets de bots y pools conectadas al portal.</span>
       </div>
       {open && (
@@ -583,8 +600,22 @@ function RiskPanel({ pools }) {
   );
 }
 
+const DEFAULT_PROTECTOR = { active: true, triggerDrop: 4, buySize: 15, maxBuys: 3, capitalReserve: 5000, orderType: 'Trigger por caída', takeProfit: 'Rebajar DCA' };
+
 function SpotPositions() {
+  const positionsFromDb = useQuery(api.spot_positions.listMyPositions);
   const [positions, setPositions] = React.useState(INITIAL_SPOT_POSITIONS);
+
+  React.useEffect(() => {
+    if (positionsFromDb !== undefined && positionsFromDb.length > 0) {
+      setPositions(positionsFromDb.map((p) => ({
+        ...p,
+        id: p._id,
+        currentPrice: PRICE_BY_ASSET[p.asset] ?? 0,
+        protector: DEFAULT_PROTECTOR,
+      })));
+    }
+  }, [positionsFromDb]);
 
   function updatePosition(asset, patch) {
     setPositions((items) => items.map((item) => item.asset === asset ? { ...item, ...patch } : item));
@@ -786,29 +817,66 @@ function SpotProtectorBot({ asset, protector, onChange }) {
 function Dashboard({ user, onLogout }) {
   const [network, setNetwork] = React.useState('Todas');
   const [pair, setPair] = React.useState('Todos');
-  const [bots, setBots] = React.useState(INITIAL_BOTS);
   const [theme, setTheme] = React.useState('dark');
+
+  const botsFromDb = useQuery(api.bots.listBots);
+  const toggleBotMutation = useMutation(api.bots.toggleBot);
+  const updateBotMutation = useMutation(api.bots.updateBot);
+  const poolsFromDb = useQuery(api.pools.listPools);
+
+  // UI-only state que no persiste en Convex (trading config extendida)
+  const [localBotState, setLocalBotState] = React.useState({});
+
+  const bots = React.useMemo(() => {
+    if (botsFromDb === undefined) return INITIAL_BOTS;
+    if (botsFromDb.length === 0) return [];
+    return botsFromDb.map((b) => ({
+      ...DEFAULT_BOT_UI,
+      ...b,
+      id: b._id,
+      ...(localBotState[b._id] ?? {}),
+    }));
+  }, [botsFromDb, localBotState]);
+
+  // Fusionar config de Convex con campos de mercado mock (hasta JAV-14)
+  const pools = React.useMemo(() => {
+    if (!poolsFromDb || poolsFromDb.length === 0) return POOLS;
+    return poolsFromDb.map((p) => ({
+      ...(POOLS.find((m) => m.pair === p.pair && m.network === p.network) ?? POOLS[0]),
+      ...p,
+      id: p._id,
+    }));
+  }, [poolsFromDb]);
 
   React.useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
 
-  const filteredPools = POOLS.filter((pool) => {
+  const filteredPools = pools.filter((pool) => {
     const networkOk = network === 'Todas' || pool.network === network;
     const pairOk = pair === 'Todos' || pool.pair === pair;
     return networkOk && pairOk;
   });
 
   function setBotActive(id, active) {
-    setBots((items) => items.map((bot) => bot.id === id ? { ...bot, active } : bot));
+    setLocalBotState((prev) => ({ ...prev, [id]: { ...prev[id], active } }));
+    if (botsFromDb?.find((b) => b._id === id)) toggleBotMutation({ id });
   }
 
   function setBotMode(id, mode) {
-    setBots((items) => items.map((bot) => bot.id === id ? { ...bot, mode } : bot));
+    setLocalBotState((prev) => ({ ...prev, [id]: { ...prev[id], mode } }));
+    if (botsFromDb?.find((b) => b._id === id)) updateBotMutation({ id, mode });
   }
 
   function updateBotConfig(id, patch) {
-    setBots((items) => items.map((bot) => bot.id === id ? { ...bot, ...patch } : bot));
+    setLocalBotState((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }));
+    if (botsFromDb?.find((b) => b._id === id)) {
+      const schemaFields = ['capitalPerTrade', 'leverage', 'stop', 'simulationMode'];
+      const persistable = Object.fromEntries(
+        Object.entries(patch).filter(([k]) => schemaFields.includes(k))
+      );
+      if (Object.keys(persistable).length > 0) updateBotMutation({ id, ...persistable });
+    }
   }
 
   return (
@@ -898,7 +966,13 @@ function Dashboard({ user, onLogout }) {
 function DashboardWithClerk() {
   const { user } = useUser();
   const { signOut } = useClerk();
+  const getOrCreateUser = useMutation(api.users.getOrCreateUser);
   const name = user?.firstName || user?.emailAddresses?.[0]?.emailAddress || 'Usuario';
+
+  React.useEffect(() => {
+    getOrCreateUser();
+  }, []);
+
   return <Dashboard user={{ name }} onLogout={() => signOut()} />;
 }
 

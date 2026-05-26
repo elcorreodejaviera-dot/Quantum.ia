@@ -20,12 +20,7 @@ Abrir:
 http://127.0.0.1:4173/
 ```
 
-Credenciales actuales del prototipo:
-
-```text
-Usuario: admin
-Contraseña: Javier1934!
-```
+Credenciales configuradas vía variables de entorno (`.env.local`, no incluido en el repo).
 
 ## Rutas
 

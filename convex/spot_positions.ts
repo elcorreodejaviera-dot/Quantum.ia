@@ -5,7 +5,7 @@ export const listMyPositions = query({
   args: {},
   handler: async (ctx) => {
     const identity = await ctx.auth.getUserIdentity();
-    if (!identity) return [];
+    if (!identity) throw new Error("Not authenticated");
 
     return await ctx.db
       .query("spot_positions")

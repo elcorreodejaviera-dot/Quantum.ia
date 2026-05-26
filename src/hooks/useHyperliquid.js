@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 
 const WS_URL = 'wss://api.hyperliquid.xyz/ws';
+const TRACKED_ASSETS = ['BTC', 'ETH'];
 const MAX_RETRIES = 5;
 
 export function useHyperliquidPrices() {
@@ -40,7 +41,9 @@ export function useHyperliquidPrices() {
             const mids = msg.data.mids;
             setPrices((prev) => {
               const updates = {};
-              for (const [asset, mid] of Object.entries(mids)) {
+              for (const asset of TRACKED_ASSETS) {
+                const mid = mids[asset];
+                if (mid === undefined) continue;
                 const val = parseFloat(mid);
                 if (Number.isFinite(val) && val !== prev[asset]) {
                   updates[asset] = val;

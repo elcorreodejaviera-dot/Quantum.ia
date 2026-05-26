@@ -1,5 +1,5 @@
 import React from 'react'
-import { SignedIn, SignedOut, SignIn, useUser, useClerk } from '@clerk/clerk-react'
+import { useUser, useClerk } from '@clerk/clerk-react'
 import { useConvexAuth, useQuery, useMutation } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useHyperliquidPrices } from '../hooks/useHyperliquid'
@@ -1022,19 +1022,4 @@ function DashboardWithClerk() {
   return <Dashboard user={{ name }} onLogout={() => signOut()} />;
 }
 
-function App() {
-  return (
-    <>
-      <SignedOut>
-        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', background: 'var(--bg, #0a0a0a)' }}>
-          <SignIn />
-        </div>
-      </SignedOut>
-      <SignedIn>
-        <DashboardWithClerk />
-      </SignedIn>
-    </>
-  );
-}
-
-export default App;
+export default DashboardWithClerk;

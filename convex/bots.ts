@@ -21,8 +21,7 @@ function validateBotNumbers(fields: {
 export const listBots = query({
   args: {},
   handler: async (ctx) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) return [];
+    await requireAuth(ctx);
     return await ctx.db.query("bots").collect();
   },
 });

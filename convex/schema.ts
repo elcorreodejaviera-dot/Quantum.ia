@@ -10,6 +10,21 @@ export default defineSchema({
     walletAddress: v.optional(v.string()),
   }).index("by_clerk_id", ["clerkId"]),
 
+  // Permisos dinámicos por usuario — cada fila es un permiso individual.
+  // Permite añadir, revocar o expirar permisos sin tocar el registro de usuario.
+  // Keys válidas: canViewPools, canViewBots, canViewWallets, canViewPositions,
+  //               canManageBots, subscriptionBasic, subscriptionPro
+  user_permissions: defineTable({
+    userId: v.id("users"),
+    permission: v.string(),
+    granted: v.boolean(),
+    grantedAt: v.number(),
+    expiresAt: v.optional(v.number()),
+    grantedBy: v.optional(v.id("users")),
+  })
+    .index("by_user", ["userId"])
+    .index("by_user_permission", ["userId", "permission"]),
+
   pools: defineTable({
     pair: v.string(),
     network: v.string(),

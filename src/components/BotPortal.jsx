@@ -608,15 +608,21 @@ function SpotPositions() {
   const { prices, connected } = useHyperliquidPrices();
 
   React.useEffect(() => {
-    if (positionsFromDb !== undefined) {
-      setPositions(positionsFromDb.map((p) => ({
-        ...p,
-        id: p._id,
-        currentPrice: prices[p.asset] ?? null,
-        protector: DEFAULT_PROTECTOR,
-      })));
-    }
-  }, [positionsFromDb, prices]);
+    if (positionsFromDb === undefined) return;
+    setPositions(positionsFromDb.map((p) => ({
+      ...p,
+      id: p._id,
+      currentPrice: null,
+      protector: DEFAULT_PROTECTOR,
+    })));
+  }, [positionsFromDb]);
+
+  React.useEffect(() => {
+    setPositions((items) => items.map((position) => ({
+      ...position,
+      currentPrice: prices[position.asset] ?? position.currentPrice,
+    })));
+  }, [prices]);
 
   function updatePosition(asset, patch) {
     setPositions((items) => items.map((item) => item.asset === asset ? { ...item, ...patch } : item));
@@ -668,7 +674,7 @@ function SpotPositions() {
                   <span>Precio compra DCA</span>
                   <input
                     type="number"
-                    min="0"
+                    min="0.00000001"
                     step="1"
                     value={position.dca}
                     onChange={(event) => updatePosition(position.asset, { dca: Number(event.target.value) })}

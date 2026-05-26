@@ -2,7 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 
 const WS_URL = 'wss://api.hyperliquid.xyz/ws';
 const HL_REST = 'https://api.hyperliquid.xyz/info';
-const MAX_RETRIES = 5;
+const TRACKED_ASSETS = ['BTC', 'ETH'];
+const MAX_BACKOFF_MS = 30_000;
 
 export function useHyperliquidPrices() {
   const [prices, setPrices] = useState({});
@@ -38,7 +39,9 @@ export function useHyperliquidPrices() {
             const mids = msg.data.mids;
             setPrices((prev) => {
               const updates = {};
-              for (const [asset, mid] of Object.entries(mids)) {
+              for (const asset of TRACKED_ASSETS) {
+                const mid = mids[asset];
+                if (mid === undefined) continue;
                 const val = parseFloat(mid);
                 if (Number.isFinite(val) && val !== prev[asset]) {
                   updates[asset] = val;
@@ -54,11 +57,10 @@ export function useHyperliquidPrices() {
 
       ws.onclose = () => {
         setConnected(false);
-        if (!destroyed && retriesRef.current < MAX_RETRIES) {
-          const delay = Math.pow(2, retriesRef.current) * 1000;
-          retriesRef.current += 1;
-          timeoutRef.current = setTimeout(connect, delay);
-        }
+        if (destroyed) return;
+        const delay = Math.min(Math.pow(2, Math.min(retriesRef.current, 5)) * 1000, MAX_BACKOFF_MS);
+        retriesRef.current += 1;
+        timeoutRef.current = setTimeout(connect, delay);
       };
 
       ws.onerror = () => ws.close();

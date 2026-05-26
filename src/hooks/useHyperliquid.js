@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 
 const WS_URL = 'wss://api.hyperliquid.xyz/ws';
-const TRACKED_ASSETS = ['BTC', 'ETH'];
+const HL_REST = 'https://api.hyperliquid.xyz/info';
 const MAX_RETRIES = 5;
 
 export function useHyperliquidPrices() {
@@ -22,10 +22,7 @@ export function useHyperliquidPrices() {
       wsRef.current = ws;
 
       ws.onopen = () => {
-        if (destroyed) {
-          ws.close();
-          return;
-        }
+        if (destroyed) { ws.close(); return; }
         retriesRef.current = 0;
         setConnected(true);
         ws.send(JSON.stringify({
@@ -41,9 +38,7 @@ export function useHyperliquidPrices() {
             const mids = msg.data.mids;
             setPrices((prev) => {
               const updates = {};
-              for (const asset of TRACKED_ASSETS) {
-                const mid = mids[asset];
-                if (mid === undefined) continue;
+              for (const [asset, mid] of Object.entries(mids)) {
                 const val = parseFloat(mid);
                 if (Number.isFinite(val) && val !== prev[asset]) {
                   updates[asset] = val;
@@ -80,4 +75,37 @@ export function useHyperliquidPrices() {
   }, []);
 
   return { prices, connected, lastUpdate };
+}
+
+export function useHyperliquidFunding() {
+  const [funding, setFunding] = useState({});
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function fetchFunding() {
+      try {
+        const res = await fetch(HL_REST, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'metaAndAssetCtxs' }),
+        });
+        if (!res.ok || cancelled) return;
+        const [meta, ctxs] = await res.json();
+        if (cancelled) return;
+        const result = {};
+        meta.universe.forEach((asset, i) => {
+          const val = parseFloat(ctxs[i]?.funding);
+          if (Number.isFinite(val)) result[asset.name] = val;
+        });
+        setFunding(result);
+      } catch (_) {}
+    }
+
+    fetchFunding();
+    const interval = setInterval(fetchFunding, 60_000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+
+  return { funding };
 }

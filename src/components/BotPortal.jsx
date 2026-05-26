@@ -2,7 +2,7 @@ import React from 'react'
 import { useUser, useClerk } from '@clerk/clerk-react'
 import { useConvexAuth, useQuery, useMutation } from 'convex/react'
 import { api } from '../../convex/_generated/api'
-import { useHyperliquidPrices } from '../hooks/useHyperliquid'
+import { useHyperliquidPrices, useHyperliquidFunding } from '../hooks/useHyperliquid'
 
 const USERS = [
   { username: 'admin', password: import.meta.env.VITE_ADMIN_PASSWORD, name: 'Operador principal' },
@@ -12,12 +12,12 @@ const NETWORKS = ['Todas', 'Arbitrum', 'Base', 'Optimism'];
 const PAIRS = ['Todos', 'BTC/USDC', 'ETH/USDC'];
 
 const POOLS = [
-  { id: 1, pair: 'BTC/USDC', network: 'Arbitrum', price: 68420, min: 63200, max: 72400, liquidity: 86240, fees24h: 118, apr: 42.6, exposure: 0.74, borrowHealth: 82, leverageRevert: 2.4, status: 'En rango' },
-  { id: 2, pair: 'ETH/USDC', network: 'Arbitrum', price: 3745, min: 3420, max: 4020, liquidity: 54110, fees24h: 71, apr: 37.2, exposure: 0.62, borrowHealth: 76, leverageRevert: 1.8, status: 'En rango' },
-  { id: 3, pair: 'BTC/USDC', network: 'Base', price: 68390, min: 64600, max: 70100, liquidity: 39220, fees24h: 64, apr: 51.8, exposure: 0.81, borrowHealth: 58, leverageRevert: 3.6, status: 'Cerca del borde' },
-  { id: 4, pair: 'ETH/USDC', network: 'Base', price: 3748, min: 3600, max: 3880, liquidity: 33680, fees24h: 58, apr: 58.4, exposure: 0.77, borrowHealth: 69, leverageRevert: 2.9, status: 'En rango' },
-  { id: 5, pair: 'BTC/USDC', network: 'Optimism', price: 68480, min: 61500, max: 74200, liquidity: 28400, fees24h: 39, apr: 31.7, exposure: 0.49, borrowHealth: 91, leverageRevert: 1.2, status: 'En rango' },
-  { id: 6, pair: 'ETH/USDC', network: 'Optimism', price: 3739, min: 3860, max: 4240, liquidity: 24560, fees24h: 22, apr: 24.9, exposure: 0.88, borrowHealth: 38, leverageRevert: 5.1, status: 'Fuera de rango' },
+  { id: 1, pair: 'BTC/USDC', network: 'Arbitrum', min: 63200, max: 72400, liquidity: 86240, fees24h: 118, apr: 42.6, exposure: 0.74, borrowHealth: 82, leverageRevert: 2.4, status: 'En rango' },
+  { id: 2, pair: 'ETH/USDC', network: 'Arbitrum', min: 3420, max: 4020, liquidity: 54110, fees24h: 71, apr: 37.2, exposure: 0.62, borrowHealth: 76, leverageRevert: 1.8, status: 'En rango' },
+  { id: 3, pair: 'BTC/USDC', network: 'Base', min: 64600, max: 70100, liquidity: 39220, fees24h: 64, apr: 51.8, exposure: 0.81, borrowHealth: 58, leverageRevert: 3.6, status: 'Cerca del borde' },
+  { id: 4, pair: 'ETH/USDC', network: 'Base', min: 3600, max: 3880, liquidity: 33680, fees24h: 58, apr: 58.4, exposure: 0.77, borrowHealth: 69, leverageRevert: 2.9, status: 'En rango' },
+  { id: 5, pair: 'BTC/USDC', network: 'Optimism', min: 61500, max: 74200, liquidity: 28400, fees24h: 39, apr: 31.7, exposure: 0.49, borrowHealth: 91, leverageRevert: 1.2, status: 'En rango' },
+  { id: 6, pair: 'ETH/USDC', network: 'Optimism', min: 3860, max: 4240, liquidity: 24560, fees24h: 22, apr: 24.9, exposure: 0.88, borrowHealth: 38, leverageRevert: 5.1, status: 'Fuera de rango' },
 ];
 
 const INITIAL_BOTS = [
@@ -186,7 +186,10 @@ function NetworkLiquidity({ pools }) {
 }
 
 function PoolCard({ pool }) {
-  const pos = Math.max(4, Math.min(96, ((pool.price - pool.min) / (pool.max - pool.min)) * 100));
+  const hasPrice = pool.price != null;
+  const pos = hasPrice
+    ? Math.max(4, Math.min(96, ((pool.price - pool.min) / (pool.max - pool.min)) * 100))
+    : 50;
   const parts = aprParts(pool.apr);
   const tone = pool.status === 'Fuera de rango' ? 'red' : pool.status === 'Cerca del borde' ? 'amber' : 'green';
   const borrowTone = pool.borrowHealth < 50 ? 'red' : pool.borrowHealth < 70 ? 'amber' : 'green';
@@ -227,7 +230,7 @@ function PoolCard({ pool }) {
           <div className="range-window"></div>
           <div className="range-price" style={{ bottom: `${pos}%` }}>
             <span>Precio</span>
-            <strong>${formatPrice(pool.pair, pool.price)}</strong>
+            <strong>{hasPrice ? `$${formatPrice(pool.pair, pool.price)}` : '—'}</strong>
           </div>
         </div>
       </div>
@@ -237,6 +240,7 @@ function PoolCard({ pool }) {
         <Metric label="Fees 24h" value={formatUsd(pool.fees24h)} />
         <Metric label="APR promedio" value={`${parts.annual.toFixed(1)}%`} />
         <Metric label="Cobertura" value={`${Math.round(pool.exposure * 100)}%`} />
+        <Metric label="Funding 8h" value={pool.funding != null ? `${(pool.funding * 100).toFixed(4)}%` : '—'} />
       </div>
 
     </article>
@@ -822,6 +826,8 @@ function Dashboard({ user, onLogout }) {
   const toggleBotMutation = useMutation(api.bots.toggleBot);
   const updateBotMutation = useMutation(api.bots.updateBot);
   const poolsFromDb = useQuery(api.pools.listPools);
+  const { prices } = useHyperliquidPrices();
+  const { funding } = useHyperliquidFunding();
 
   // UI-only state que no persiste en Convex (trading config extendida)
   const [localBotState, setLocalBotState] = React.useState({});
@@ -836,18 +842,22 @@ function Dashboard({ user, onLogout }) {
     }));
   }, [botsFromDb, localBotState]);
 
-  // Fusionar config de Convex con campos de mercado mock (precios/APR hasta JAV-14)
-  // POOLS solo se usa como fuente de datos de mercado, no como fuente de la lista.
+  // Fusionar config de Convex con campos mock (liquidez/APR) e inyectar precio y funding en tiempo real
   const pools = React.useMemo(() => {
     if (!poolsFromDb || poolsFromDb.length === 0) return [];
-    return poolsFromDb.map((p) => ({
-      ...(POOLS.find((m) => m.pair === p.pair && m.network === p.network) ?? {}),
-      ...p,
-      id: p._id,
-      min: p.minRange,
-      max: p.maxRange,
-    }));
-  }, [poolsFromDb]);
+    return poolsFromDb.map((p) => {
+      const asset = p.pair?.split('/')[0];
+      return {
+        ...(POOLS.find((m) => m.pair === p.pair && m.network === p.network) ?? {}),
+        ...p,
+        id: p._id,
+        min: p.minRange,
+        max: p.maxRange,
+        price: prices[asset] ?? null,
+        funding: funding[asset] ?? null,
+      };
+    });
+  }, [poolsFromDb, prices, funding]);
 
   React.useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);

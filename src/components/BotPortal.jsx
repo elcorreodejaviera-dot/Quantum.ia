@@ -284,9 +284,7 @@ function SubscriptionPanel() {
 
 function WalletPanel() {
   const walletsFromDb = useQuery(api.wallets.listWallets);
-  const wallets = walletsFromDb
-    ? walletsFromDb.map((w) => ({ ...w, id: w._id, owner: w.ownerId ?? '—', balance: 0 }))
-    : WALLETS;
+  const wallets = (walletsFromDb ?? []).map((w) => ({ ...w, id: w._id, owner: w.ownerId ?? '—', balance: 0 }));
   const botWallets = wallets.filter((wallet) => wallet.type === 'Bot');
   const poolWallets = wallets.filter((wallet) => wallet.type === 'Pool');
   const [open, setOpen] = React.useState(false);
@@ -828,8 +826,7 @@ function Dashboard({ user, onLogout }) {
   const [localBotState, setLocalBotState] = React.useState({});
 
   const bots = React.useMemo(() => {
-    if (botsFromDb === undefined) return INITIAL_BOTS;
-    if (botsFromDb.length === 0) return [];
+    if (!botsFromDb || botsFromDb.length === 0) return [];
     return botsFromDb.map((b) => ({
       ...DEFAULT_BOT_UI,
       ...b,
@@ -838,11 +835,12 @@ function Dashboard({ user, onLogout }) {
     }));
   }, [botsFromDb, localBotState]);
 
-  // Fusionar config de Convex con campos de mercado mock (hasta JAV-14)
+  // Fusionar config de Convex con campos de mercado mock (precios/APR hasta JAV-14)
+  // POOLS solo se usa como fuente de datos de mercado, no como fuente de la lista.
   const pools = React.useMemo(() => {
-    if (!poolsFromDb || poolsFromDb.length === 0) return POOLS;
+    if (!poolsFromDb || poolsFromDb.length === 0) return [];
     return poolsFromDb.map((p) => ({
-      ...(POOLS.find((m) => m.pair === p.pair && m.network === p.network) ?? POOLS[0]),
+      ...(POOLS.find((m) => m.pair === p.pair && m.network === p.network) ?? {}),
       ...p,
       id: p._id,
       min: p.minRange,

@@ -52,7 +52,7 @@ export default defineSchema({
     address: v.string(),
     network: v.string(),
     ownerId: v.optional(v.string()),
-  }),
+  }).index("by_type", ["type"]),
 
   spot_positions: defineTable({
     asset: v.string(),

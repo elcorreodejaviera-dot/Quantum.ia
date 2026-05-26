@@ -1,5 +1,5 @@
 import { mutation } from "./_generated/server";
-import { requireAuth } from "./helpers";
+import { requireAdmin } from "./helpers";
 
 const SEED_POOLS = [
   { pair: "BTC/USDC", network: "Arbitrum", minRange: 63200, maxRange: 72400, status: "En rango" },
@@ -29,7 +29,7 @@ const SEED_WALLETS = [
 export const seedInitialData = mutation({
   args: {},
   handler: async (ctx) => {
-    await requireAuth(ctx);
+    await requireAdmin(ctx);
 
     const existingPools = await ctx.db.query("pools").first();
     if (!existingPools) {

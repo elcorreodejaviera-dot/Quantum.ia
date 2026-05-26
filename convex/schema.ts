@@ -31,6 +31,11 @@ export default defineSchema({
     minRange: v.number(),
     maxRange: v.number(),
     status: v.string(),
+    apy: v.optional(v.number()),
+    tvl: v.optional(v.number()),
+    fees1d: v.optional(v.number()),
+    defillamaId: v.optional(v.string()),
+    apyUpdatedAt: v.optional(v.number()),
   }),
 
   bots: defineTable({

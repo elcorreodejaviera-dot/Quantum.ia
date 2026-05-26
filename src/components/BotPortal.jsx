@@ -125,8 +125,8 @@ function Login({ onLogin }) {
 function Summary({ pools, bots }) {
   const totalLiquidity = pools.reduce((sum, pool) => sum + pool.liquidity, 0);
   const fees = pools.reduce((sum, pool) => sum + pool.fees24h, 0);
-  const avgApr = pools.length > 0
-    ? pools.reduce((sum, pool) => sum + pool.apr, 0) / pools.length
+  const avgApy = pools.length > 0
+    ? pools.reduce((sum, pool) => sum + (pool.apy ?? 0), 0) / pools.length
     : 0;
   const activeBots = bots.filter((bot) => bot.active).length;
   const walletBalance = WALLETS.reduce((sum, wallet) => sum + wallet.balance, 0);
@@ -136,9 +136,9 @@ function Summary({ pools, bots }) {
       <SummaryItem label="Liquidez monitoreada" value={formatUsd(totalLiquidity)} sub={`${pools.length} pools activos`} />
       <SummaryItem label="Fees 24h" value={formatUsd(fees)} sub="Estimado por rango" />
       <SummaryItem
-        label="APR anual promedio"
-        value={pools.length > 0 ? `${avgApr.toFixed(1)}%` : '—'}
-        sub={pools.length > 0 ? `${(avgApr / 52).toFixed(2)}% semanal` : 'Sin datos'}
+        label="APY promedio"
+        value={pools.length > 0 ? `${avgApy.toFixed(1)}%` : '—'}
+        sub={pools.length > 0 ? `${(avgApy / 52).toFixed(2)}% semanal` : 'Sin datos'}
       />
       <SummaryItem label="Wallets monitoreadas" value={`${WALLETS.length}`} sub={`${formatUsd(walletBalance)} total`} />
     </div>
@@ -196,7 +196,8 @@ function PoolCard({ pool }) {
   const pos = hasPrice
     ? Math.max(4, Math.min(96, ((pool.price - pool.min) / (pool.max - pool.min)) * 100))
     : 50;
-  const parts = aprParts(pool.apr);
+  const parts = aprParts(pool.apy ?? 0);
+  const apyLabel = pool.apyUpdatedAt ? 'APY (DeFiLlama)' : 'APY (estimado)';
   const tone = pool.status === 'Fuera de rango' ? 'red' : pool.status === 'Cerca del borde' ? 'amber' : 'green';
   const borrowTone = pool.borrowHealth < 50 ? 'red' : pool.borrowHealth < 70 ? 'amber' : 'green';
   const borrowLabel = pool.borrowHealth < 50 ? 'Riesgo alto' : pool.borrowHealth < 70 ? 'Vigilar' : 'Saludable';
@@ -244,7 +245,7 @@ function PoolCard({ pool }) {
       <div className="pool-meta">
         <Metric label="Liquidez monitoreada" value={formatUsd(pool.liquidity)} />
         <Metric label="Fees 24h" value={formatUsd(pool.fees24h)} />
-        <Metric label="APR promedio" value={`${parts.annual.toFixed(1)}%`} />
+        <Metric label={apyLabel} value={`${parts.annual.toFixed(1)}%`} />
         <Metric label="Cobertura" value={`${Math.round(pool.exposure * 100)}%`} />
         <Metric label="Funding 8h" value={pool.funding != null ? `${(pool.funding * 100).toFixed(4)}%` : '—'} />
       </div>
@@ -853,7 +854,7 @@ function Dashboard({ user, onLogout }) {
     }));
   }, [botsFromDb, localBotState]);
 
-  // Fusionar config de Convex con campos mock (liquidez/APR) e inyectar precio y funding en tiempo real
+  // Fusionar config de Convex con campos mock (liquidez/APR) e inyectar precio, funding y APY en tiempo real
   const pools = React.useMemo(() => {
     if (!poolsFromDb || poolsFromDb.length === 0) return [];
     return poolsFromDb.map((p) => {
@@ -861,7 +862,6 @@ function Dashboard({ user, onLogout }) {
       const mock = POOLS.find((m) => m.pair === p.pair && m.network === p.network) ?? {};
       return {
         liquidity: 0,
-        fees24h: 0,
         apr: 0,
         exposure: 0,
         borrowHealth: 0,
@@ -872,6 +872,8 @@ function Dashboard({ user, onLogout }) {
         id: p._id,
         min: p.minRange,
         max: p.maxRange,
+        apy: p.apy ?? mock.apr ?? 0,
+        fees24h: p.fees1d ?? mock.fees24h ?? 0,
         price: prices[asset] ?? null,
         funding: funding[asset] ?? null,
       };

@@ -1,11 +1,19 @@
-import { mutation, query } from "./_generated/server";
+import { internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
-import { requireAuth, requireAdmin } from "./helpers";
+import { requireAdmin } from "./helpers";
 
 export const listPools = query({
   args: {},
   handler: async (ctx) => {
-    await requireAuth(ctx);
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) return [];
+    return await ctx.db.query("pools").collect();
+  },
+});
+
+export const listPoolsInternal = internalQuery({
+  args: {},
+  handler: async (ctx) => {
     return await ctx.db.query("pools").collect();
   },
 });

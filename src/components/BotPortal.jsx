@@ -859,8 +859,16 @@ function Dashboard({ user, onLogout }) {
     if (!poolsFromDb || poolsFromDb.length === 0) return [];
     return poolsFromDb.map((p) => {
       const asset = p.pair?.split('/')[0];
+      const mock = POOLS.find((m) => m.pair === p.pair && m.network === p.network) ?? {};
       return {
-        ...(POOLS.find((m) => m.pair === p.pair && m.network === p.network) ?? {}),
+        liquidity: 0,
+        fees24h: 0,
+        apr: 0,
+        exposure: 0,
+        borrowHealth: 0,
+        leverageRevert: 0,
+        status: 'Sin datos',
+        ...mock,
         ...p,
         id: p._id,
         min: p.minRange,

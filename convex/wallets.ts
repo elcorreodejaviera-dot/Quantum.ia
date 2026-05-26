@@ -1,12 +1,11 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
+import { requireAuth, requireAdmin } from "./helpers";
 
 export const listWallets = query({
   args: {},
   handler: async (ctx) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error("Not authenticated");
-
+    await requireAuth(ctx);
     return await ctx.db.query("wallets").collect();
   },
 });
@@ -20,9 +19,7 @@ export const addWallet = mutation({
     ownerId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error("Not authenticated");
-
+    await requireAdmin(ctx);
     return await ctx.db.insert("wallets", args);
   },
 });
@@ -30,9 +27,7 @@ export const addWallet = mutation({
 export const removeWallet = mutation({
   args: { id: v.id("wallets") },
   handler: async (ctx, { id }) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error("Not authenticated");
-
+    await requireAdmin(ctx);
     await ctx.db.delete(id);
   },
 });

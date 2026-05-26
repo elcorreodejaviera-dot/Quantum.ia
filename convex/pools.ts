@@ -1,12 +1,11 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
+import { requireAuth, requireAdmin } from "./helpers";
 
 export const listPools = query({
   args: {},
   handler: async (ctx) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error("Not authenticated");
-
+    await requireAuth(ctx);
     return await ctx.db.query("pools").collect();
   },
 });
@@ -19,9 +18,7 @@ export const updatePool = mutation({
     status: v.optional(v.string()),
   },
   handler: async (ctx, { id, ...fields }) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error("Not authenticated");
-
+    await requireAdmin(ctx);
     const filtered = Object.fromEntries(
       Object.entries(fields).filter(([, v]) => v !== undefined)
     );

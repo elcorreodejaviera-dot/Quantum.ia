@@ -1,12 +1,11 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
+import { requireAuth, requireAdmin } from "./helpers";
 
 export const getConfig = query({
   args: { key: v.string() },
   handler: async (ctx, { key }) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error("Not authenticated");
-
+    await requireAuth(ctx);
     return await ctx.db
       .query("system_config")
       .withIndex("by_key", (q) => q.eq("key", key))
@@ -17,14 +16,11 @@ export const getConfig = query({
 export const setTradingEnabled = mutation({
   args: { enabled: v.boolean() },
   handler: async (ctx, { enabled }) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error("Not authenticated");
-
+    await requireAdmin(ctx);
     const existing = await ctx.db
       .query("system_config")
       .withIndex("by_key", (q) => q.eq("key", "tradingEnabled"))
       .first();
-
     if (existing) {
       await ctx.db.patch(existing._id, { value: enabled });
     } else {

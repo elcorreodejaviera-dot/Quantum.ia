@@ -1,12 +1,11 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
+import { requireAuth, requireAdmin } from "./helpers";
 
 export const listBots = query({
   args: {},
   handler: async (ctx) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error("Not authenticated");
-
+    await requireAuth(ctx);
     return await ctx.db.query("bots").collect();
   },
 });
@@ -25,9 +24,7 @@ export const createBot = mutation({
     simulationMode: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error("Not authenticated");
-
+    await requireAdmin(ctx);
     return await ctx.db.insert("bots", args);
   },
 });
@@ -46,9 +43,7 @@ export const updateBot = mutation({
     simulationMode: v.optional(v.boolean()),
   },
   handler: async (ctx, { id, ...fields }) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error("Not authenticated");
-
+    await requireAdmin(ctx);
     const filtered = Object.fromEntries(
       Object.entries(fields).filter(([, v]) => v !== undefined)
     );
@@ -59,12 +54,9 @@ export const updateBot = mutation({
 export const toggleBot = mutation({
   args: { id: v.id("bots") },
   handler: async (ctx, { id }) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error("Not authenticated");
-
+    await requireAdmin(ctx);
     const bot = await ctx.db.get(id);
     if (!bot) throw new Error("Bot not found");
-
     await ctx.db.patch(id, { active: !bot.active });
   },
 });

@@ -845,6 +845,8 @@ function Dashboard({ user, onLogout }) {
       ...(POOLS.find((m) => m.pair === p.pair && m.network === p.network) ?? POOLS[0]),
       ...p,
       id: p._id,
+      min: p.minRange,
+      max: p.maxRange,
     }));
   }, [poolsFromDb]);
 

@@ -1,5 +1,6 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
+import { requireAuth, requireUser } from "./helpers";
 
 export const getOrCreateUser = mutation({
   args: {},
@@ -49,6 +50,20 @@ export const setWalletAddress = mutation({
     if (!user) throw new Error("User not found");
 
     await ctx.db.patch(user._id, { walletAddress });
+  },
+});
+
+export const updateProfile = mutation({
+  args: {
+    name: v.optional(v.string()),
+    email: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx);
+    const filtered = Object.fromEntries(
+      Object.entries(args).filter(([, v]) => v !== undefined)
+    );
+    await ctx.db.patch(user._id, filtered);
   },
 });
 

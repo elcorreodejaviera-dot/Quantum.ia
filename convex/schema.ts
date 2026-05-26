@@ -59,7 +59,28 @@ export default defineSchema({
     amount: v.number(),
     dca: v.number(),
     userId: v.string(),
-  }),
+  }).index("by_user_id", ["userId"]),
+
+  trades_history: defineTable({
+    userId: v.id("users"),
+    action: v.string(),
+    asset: v.string(),
+    amount: v.number(),
+    price: v.number(),
+    simulated: v.boolean(),
+    network: v.string(),
+    timestamp: v.number(),
+  })
+    .index("by_userId", ["userId"])
+    .index("by_timestamp", ["timestamp"]),
+
+  alerts: defineTable({
+    userId: v.id("users"),
+    condition: v.string(),
+    threshold: v.number(),
+    active: v.boolean(),
+  })
+    .index("by_userId", ["userId"]),
 
   system_config: defineTable({
     key: v.string(),

@@ -5,7 +5,8 @@ import { requireAuth, requireAdmin } from "./helpers";
 export const listPools = query({
   args: {},
   handler: async (ctx) => {
-    await requireAuth(ctx);
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) return [];
     return await ctx.db.query("pools").collect();
   },
 });

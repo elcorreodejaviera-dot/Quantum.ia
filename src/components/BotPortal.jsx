@@ -1,7 +1,8 @@
 import React from 'react'
 import { SignedIn, SignedOut, SignIn, useUser, useClerk } from '@clerk/clerk-react'
-import { useQuery, useMutation } from 'convex/react'
+import { useConvexAuth, useQuery, useMutation } from 'convex/react'
 import { api } from '../../convex/_generated/api'
+import { useHyperliquidPrices } from '../hooks/useHyperliquid'
 
 const USERS = [
   { username: 'admin', password: import.meta.env.VITE_ADMIN_PASSWORD, name: 'Operador principal' },
@@ -43,12 +44,9 @@ const SUBSCRIPTIONS = [
 ];
 
 const INITIAL_SPOT_POSITIONS = [
-  { asset: 'BTC', amount: 0.42, dca: 63200, currentPrice: 68420, protector: { active: true, triggerDrop: 4, buySize: 15, maxBuys: 3, capitalReserve: 5000, orderType: 'Trigger por caída', takeProfit: 'Rebajar DCA' } },
-  { asset: 'ETH', amount: 8.6, dca: 3420, currentPrice: 3745, protector: { active: true, triggerDrop: 5, buySize: 20, maxBuys: 4, capitalReserve: 3500, orderType: 'Trigger por caída', takeProfit: 'Rebajar DCA' } },
+  { asset: 'BTC', amount: 0.42, dca: 63200, currentPrice: null, protector: { active: true, triggerDrop: 4, buySize: 15, maxBuys: 3, capitalReserve: 5000, orderType: 'Trigger por caída', takeProfit: 'Rebajar DCA' } },
+  { asset: 'ETH', amount: 8.6, dca: 3420, currentPrice: null, protector: { active: true, triggerDrop: 5, buySize: 20, maxBuys: 4, capitalReserve: 3500, orderType: 'Trigger por caída', takeProfit: 'Rebajar DCA' } },
 ];
-
-// Precios de mercado mock hasta que JAV-14 integre Hyperliquid WebSocket
-const PRICE_BY_ASSET = { BTC: 68420, ETH: 3745 };
 
 // Campos UI de bots que no están en el schema de Convex (trading config extendida)
 const DEFAULT_BOT_UI = {
@@ -603,17 +601,18 @@ const DEFAULT_PROTECTOR = { active: true, triggerDrop: 4, buySize: 15, maxBuys: 
 function SpotPositions() {
   const positionsFromDb = useQuery(api.spot_positions.listMyPositions);
   const [positions, setPositions] = React.useState(INITIAL_SPOT_POSITIONS);
+  const { prices, connected } = useHyperliquidPrices();
 
   React.useEffect(() => {
     if (positionsFromDb !== undefined) {
       setPositions(positionsFromDb.map((p) => ({
         ...p,
         id: p._id,
-        currentPrice: PRICE_BY_ASSET[p.asset] ?? 0,
+        currentPrice: prices[p.asset] ?? null,
         protector: DEFAULT_PROTECTOR,
       })));
     }
-  }, [positionsFromDb]);
+  }, [positionsFromDb, prices]);
 
   function updatePosition(asset, patch) {
     setPositions((items) => items.map((item) => item.asset === asset ? { ...item, ...patch } : item));
@@ -630,23 +629,25 @@ function SpotPositions() {
       <div className="section-head">
         <h2>Posiciones spot</h2>
         <span className="pill">BTC / ETH</span>
+        <span className={`pill${connected ? ' green' : ''}`}>{connected ? 'HL en vivo' : 'Conectando...'}</span>
       </div>
       <div className="spot-list">
         {positions.map((position) => {
+          const hasPrice = position.currentPrice != null;
           const cost = position.amount * position.dca;
-          const value = position.amount * position.currentPrice;
-          const pnl = value - cost;
-          const pnlPct = cost > 0 ? (pnl / cost) * 100 : 0;
-          const tone = pnl >= 0 ? 'green' : 'red';
+          const value = hasPrice ? position.amount * position.currentPrice : null;
+          const pnl = hasPrice ? value - cost : null;
+          const pnlPct = hasPrice && cost > 0 ? (pnl / cost) * 100 : null;
+          const tone = pnl == null ? '' : pnl >= 0 ? 'green' : 'red';
 
           return (
             <article className="spot-card" key={position.asset}>
               <div className="spot-head">
                 <div>
                   <div className="pair">{position.asset} spot</div>
-                  <div className="network">Precio actual ${formatPrice(`${position.asset}/USDC`, position.currentPrice)}</div>
+                  <div className="network">Precio actual {hasPrice ? `$${formatPrice(`${position.asset}/USDC`, position.currentPrice)}` : '—'}</div>
                 </div>
-                <span className={`pill ${tone}`}>{pnl >= 0 ? 'Ganancia' : 'Pérdida'}</span>
+                <span className={`pill ${tone}`}>{pnl == null ? 'Sin precio' : pnl >= 0 ? 'Ganancia' : 'Pérdida'}</span>
               </div>
               <div className="spot-form">
                 <label className="config-field">
@@ -672,9 +673,9 @@ function SpotPositions() {
               </div>
               <div className="spot-metrics">
                 <Metric label="Costo" value={formatUsd(cost)} />
-                <Metric label="Valor actual" value={formatUsd(value)} />
-                <Metric label="PnL" value={formatUsd(pnl)} />
-                <Metric label="PnL %" value={`${pnlPct.toFixed(2)}%`} />
+                <Metric label="Valor actual" value={value != null ? formatUsd(value) : '—'} />
+                <Metric label="PnL" value={pnl != null ? formatUsd(pnl) : '—'} />
+                <Metric label="PnL %" value={pnlPct != null ? `${pnlPct.toFixed(2)}%` : '—'} />
               </div>
               <SpotProtectorBot
                 asset={position.asset}
@@ -971,12 +972,52 @@ function Dashboard({ user, onLogout }) {
 function DashboardWithClerk() {
   const { user } = useUser();
   const { signOut } = useClerk();
+  const { isLoading, isAuthenticated } = useConvexAuth();
   const getOrCreateUser = useMutation(api.users.getOrCreateUser);
   const name = user?.firstName || user?.emailAddresses?.[0]?.emailAddress || 'Usuario';
 
   React.useEffect(() => {
-    getOrCreateUser();
-  }, []);
+    if (!isAuthenticated) return;
+    getOrCreateUser().catch((error) => {
+      console.error('Failed to sync user with Convex', error);
+    });
+  }, [getOrCreateUser, isAuthenticated]);
+
+  if (isLoading) {
+    return (
+      <div className="app-shell">
+        <main className="main">
+          <section className="panel">
+            <div className="section-head">
+              <h2>Conectando Convex</h2>
+              <span className="pill">Auth</span>
+            </div>
+            <p className="network">Validando sesión con el backend.</p>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div className="app-shell">
+        <main className="main">
+          <section className="panel">
+            <div className="section-head">
+              <h2>Convex no autenticado</h2>
+              <span className="pill red">Revisar Clerk</span>
+            </div>
+            <p className="network">
+              Clerk inició sesión, pero no pudo emitir el token JWT para Convex. Verifica que exista el JWT template
+              "convex" en Clerk y que coincida con `convex/auth.config.ts`.
+            </p>
+            <button className="ghost-btn" onClick={() => signOut()}>Salir</button>
+          </section>
+        </main>
+      </div>
+    );
+  }
 
   return <Dashboard user={{ name }} onLogout={() => signOut()} />;
 }

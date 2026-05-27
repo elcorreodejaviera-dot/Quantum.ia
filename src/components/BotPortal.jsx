@@ -1,5 +1,8 @@
 import React from 'react'
-import { SignedIn, SignedOut, SignIn, useUser, useClerk } from '@clerk/clerk-react'
+import { useUser, useClerk } from '@clerk/clerk-react'
+import { useConvexAuth, useQuery, useMutation } from 'convex/react'
+import { api } from '../../convex/_generated/api'
+import { useHyperliquidPrices, useHyperliquidFunding } from '../hooks/useHyperliquid'
 
 const USERS = [
   { username: 'admin', password: import.meta.env.VITE_ADMIN_PASSWORD, name: 'Operador principal' },
@@ -9,12 +12,12 @@ const NETWORKS = ['Todas', 'Arbitrum', 'Base', 'Optimism'];
 const PAIRS = ['Todos', 'BTC/USDC', 'ETH/USDC'];
 
 const POOLS = [
-  { id: 1, pair: 'BTC/USDC', network: 'Arbitrum', price: 68420, min: 63200, max: 72400, liquidity: 86240, fees24h: 118, apr: 42.6, exposure: 0.74, borrowHealth: 82, leverageRevert: 2.4, status: 'En rango' },
-  { id: 2, pair: 'ETH/USDC', network: 'Arbitrum', price: 3745, min: 3420, max: 4020, liquidity: 54110, fees24h: 71, apr: 37.2, exposure: 0.62, borrowHealth: 76, leverageRevert: 1.8, status: 'En rango' },
-  { id: 3, pair: 'BTC/USDC', network: 'Base', price: 68390, min: 64600, max: 70100, liquidity: 39220, fees24h: 64, apr: 51.8, exposure: 0.81, borrowHealth: 58, leverageRevert: 3.6, status: 'Cerca del borde' },
-  { id: 4, pair: 'ETH/USDC', network: 'Base', price: 3748, min: 3600, max: 3880, liquidity: 33680, fees24h: 58, apr: 58.4, exposure: 0.77, borrowHealth: 69, leverageRevert: 2.9, status: 'En rango' },
-  { id: 5, pair: 'BTC/USDC', network: 'Optimism', price: 68480, min: 61500, max: 74200, liquidity: 28400, fees24h: 39, apr: 31.7, exposure: 0.49, borrowHealth: 91, leverageRevert: 1.2, status: 'En rango' },
-  { id: 6, pair: 'ETH/USDC', network: 'Optimism', price: 3739, min: 3860, max: 4240, liquidity: 24560, fees24h: 22, apr: 24.9, exposure: 0.88, borrowHealth: 38, leverageRevert: 5.1, status: 'Fuera de rango' },
+  { id: 1, pair: 'BTC/USDC', network: 'Arbitrum', min: 63200, max: 72400, liquidity: 86240, fees24h: 118, apr: 42.6, exposure: 0.74, borrowHealth: 82, leverageRevert: 2.4, status: 'En rango' },
+  { id: 2, pair: 'ETH/USDC', network: 'Arbitrum', min: 3420, max: 4020, liquidity: 54110, fees24h: 71, apr: 37.2, exposure: 0.62, borrowHealth: 76, leverageRevert: 1.8, status: 'En rango' },
+  { id: 3, pair: 'BTC/USDC', network: 'Base', min: 64600, max: 70100, liquidity: 39220, fees24h: 64, apr: 51.8, exposure: 0.81, borrowHealth: 58, leverageRevert: 3.6, status: 'Cerca del borde' },
+  { id: 4, pair: 'ETH/USDC', network: 'Base', min: 3600, max: 3880, liquidity: 33680, fees24h: 58, apr: 58.4, exposure: 0.77, borrowHealth: 69, leverageRevert: 2.9, status: 'En rango' },
+  { id: 5, pair: 'BTC/USDC', network: 'Optimism', min: 61500, max: 74200, liquidity: 28400, fees24h: 39, apr: 31.7, exposure: 0.49, borrowHealth: 91, leverageRevert: 1.2, status: 'En rango' },
+  { id: 6, pair: 'ETH/USDC', network: 'Optimism', min: 3860, max: 4240, liquidity: 24560, fees24h: 22, apr: 24.9, exposure: 0.88, borrowHealth: 38, leverageRevert: 5.1, status: 'Fuera de rango' },
 ];
 
 const INITIAL_BOTS = [
@@ -41,9 +44,17 @@ const SUBSCRIPTIONS = [
 ];
 
 const INITIAL_SPOT_POSITIONS = [
-  { asset: 'BTC', amount: 0.42, dca: 63200, currentPrice: 68420, protector: { active: true, triggerDrop: 4, buySize: 15, maxBuys: 3, capitalReserve: 5000, orderType: 'Trigger por caída', takeProfit: 'Rebajar DCA' } },
-  { asset: 'ETH', amount: 8.6, dca: 3420, currentPrice: 3745, protector: { active: true, triggerDrop: 5, buySize: 20, maxBuys: 4, capitalReserve: 3500, orderType: 'Trigger por caída', takeProfit: 'Rebajar DCA' } },
+  { asset: 'BTC', amount: 0.42, dca: 63200, currentPrice: null, protector: { active: true, triggerDrop: 4, buySize: 15, maxBuys: 3, capitalReserve: 5000, orderType: 'Trigger por caída', takeProfit: 'Rebajar DCA' } },
+  { asset: 'ETH', amount: 8.6, dca: 3420, currentPrice: null, protector: { active: true, triggerDrop: 5, buySize: 20, maxBuys: 4, capitalReserve: 3500, orderType: 'Trigger por caída', takeProfit: 'Rebajar DCA' } },
 ];
+
+// Campos UI de bots que no están en el schema de Convex (trading config extendida)
+const DEFAULT_BOT_UI = {
+  hedge: '—', health: '—', poolTokenId: '—',
+  tpSteps: [25, 50, 25], autoLeverage: false, takeProfit: 'Fijo',
+  orderType: 'Trigger por precio', marginMode: 'Isolated', collateral: 'USDC',
+  entryTrigger: 'Fuera de rango', triggerPrice: 0, poolCapitalPercent: 100,
+};
 
 function formatUsd(value) {
   return value.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
@@ -114,7 +125,9 @@ function Login({ onLogin }) {
 function Summary({ pools, bots }) {
   const totalLiquidity = pools.reduce((sum, pool) => sum + pool.liquidity, 0);
   const fees = pools.reduce((sum, pool) => sum + pool.fees24h, 0);
-  const avgApr = pools.reduce((sum, pool) => sum + pool.apr, 0) / pools.length;
+  const avgApy = pools.length > 0
+    ? pools.reduce((sum, pool) => sum + (pool.apy ?? 0), 0) / pools.length
+    : 0;
   const activeBots = bots.filter((bot) => bot.active).length;
   const walletBalance = WALLETS.reduce((sum, wallet) => sum + wallet.balance, 0);
 
@@ -122,7 +135,11 @@ function Summary({ pools, bots }) {
     <div className="summary-grid">
       <SummaryItem label="Liquidez monitoreada" value={formatUsd(totalLiquidity)} sub={`${pools.length} pools activos`} />
       <SummaryItem label="Fees 24h" value={formatUsd(fees)} sub="Estimado por rango" />
-      <SummaryItem label="APR anual promedio" value={`${avgApr.toFixed(1)}%`} sub={`${(avgApr / 52).toFixed(2)}% semanal`} />
+      <SummaryItem
+        label="APY promedio"
+        value={pools.length > 0 ? `${avgApy.toFixed(1)}%` : '—'}
+        sub={pools.length > 0 ? `${(avgApy / 52).toFixed(2)}% semanal` : 'Sin datos'}
+      />
       <SummaryItem label="Wallets monitoreadas" value={`${WALLETS.length}`} sub={`${formatUsd(walletBalance)} total`} />
     </div>
   );
@@ -143,10 +160,10 @@ function NetworkLiquidity({ pools }) {
     const networkPools = pools.filter((pool) => pool.network === network);
     const liquidity = networkPools.reduce((sum, pool) => sum + pool.liquidity, 0);
     const fees24h = networkPools.reduce((sum, pool) => sum + pool.fees24h, 0);
-    const avgApr = networkPools.length
-      ? networkPools.reduce((sum, pool) => sum + pool.apr, 0) / networkPools.length
+    const avgApy = networkPools.length
+      ? networkPools.reduce((sum, pool) => sum + (pool.apy ?? 0), 0) / networkPools.length
       : 0;
-    return { network, liquidity, fees24h, avgApr };
+    return { network, liquidity, fees24h, avgApy };
   });
 
   return (
@@ -165,7 +182,7 @@ function NetworkLiquidity({ pools }) {
             <div className="network-value">{formatUsd(item.liquidity)}</div>
             <div className="network-meta">
               <span>Fees diarios <strong>{formatUsd(item.fees24h)}</strong></span>
-              <span>APR prom. <strong>{item.avgApr.toFixed(1)}%</strong></span>
+              <span>APY prom. <strong>{item.avgApy.toFixed(1)}%</strong></span>
             </div>
           </div>
         ))}
@@ -175,8 +192,12 @@ function NetworkLiquidity({ pools }) {
 }
 
 function PoolCard({ pool }) {
-  const pos = Math.max(4, Math.min(96, ((pool.price - pool.min) / (pool.max - pool.min)) * 100));
-  const parts = aprParts(pool.apr);
+  const hasPrice = pool.price != null;
+  const pos = hasPrice
+    ? Math.max(4, Math.min(96, ((pool.price - pool.min) / (pool.max - pool.min)) * 100))
+    : 50;
+  const parts = aprParts(pool.apy ?? 0);
+  const apyLabel = pool.apyUpdatedAt ? 'APY (DeFiLlama)' : 'APY (estimado)';
   const tone = pool.status === 'Fuera de rango' ? 'red' : pool.status === 'Cerca del borde' ? 'amber' : 'green';
   const borrowTone = pool.borrowHealth < 50 ? 'red' : pool.borrowHealth < 70 ? 'amber' : 'green';
   const borrowLabel = pool.borrowHealth < 50 ? 'Riesgo alto' : pool.borrowHealth < 70 ? 'Vigilar' : 'Saludable';
@@ -216,7 +237,7 @@ function PoolCard({ pool }) {
           <div className="range-window"></div>
           <div className="range-price" style={{ bottom: `${pos}%` }}>
             <span>Precio</span>
-            <strong>${formatPrice(pool.pair, pool.price)}</strong>
+            <strong>{hasPrice ? `$${formatPrice(pool.pair, pool.price)}` : '—'}</strong>
           </div>
         </div>
       </div>
@@ -224,8 +245,9 @@ function PoolCard({ pool }) {
       <div className="pool-meta">
         <Metric label="Liquidez monitoreada" value={formatUsd(pool.liquidity)} />
         <Metric label="Fees 24h" value={formatUsd(pool.fees24h)} />
-        <Metric label="APR promedio" value={`${parts.annual.toFixed(1)}%`} />
+        <Metric label={apyLabel} value={`${parts.annual.toFixed(1)}%`} />
         <Metric label="Cobertura" value={`${Math.round(pool.exposure * 100)}%`} />
+        <Metric label="Funding 8h" value={pool.funding != null ? `${(pool.funding * 100).toFixed(4)}%` : '—'} />
       </div>
 
     </article>
@@ -270,8 +292,10 @@ function SubscriptionPanel() {
 }
 
 function WalletPanel() {
-  const botWallets = WALLETS.filter((wallet) => wallet.type === 'Bot');
-  const poolWallets = WALLETS.filter((wallet) => wallet.type === 'Pool');
+  const walletsFromDb = useQuery(api.wallets.listWallets);
+  const wallets = (walletsFromDb ?? []).map((w) => ({ ...w, id: w._id, owner: w.ownerId ?? '—', balance: 0 }));
+  const botWallets = wallets.filter((wallet) => wallet.type === 'Bot');
+  const poolWallets = wallets.filter((wallet) => wallet.type === 'Pool');
   const [open, setOpen] = React.useState(false);
 
   return (
@@ -283,7 +307,7 @@ function WalletPanel() {
         </button>
       </div>
       <div className="wallet-summary">
-        <span className="pill">{WALLETS.length} conectadas</span>
+        <span className="pill">{wallets.length} conectadas</span>
         <span className="label">Wallets de bots y pools conectadas al portal.</span>
       </div>
       {open && (
@@ -583,8 +607,28 @@ function RiskPanel({ pools }) {
   );
 }
 
-function SpotPositions() {
+const DEFAULT_PROTECTOR = { active: true, triggerDrop: 4, buySize: 15, maxBuys: 3, capitalReserve: 5000, orderType: 'Trigger por caída', takeProfit: 'Rebajar DCA' };
+
+function SpotPositions({ prices, connected }) {
+  const positionsFromDb = useQuery(api.spot_positions.listMyPositions);
   const [positions, setPositions] = React.useState(INITIAL_SPOT_POSITIONS);
+
+  React.useEffect(() => {
+    if (positionsFromDb === undefined) return;
+    setPositions(positionsFromDb.map((p) => ({
+      ...p,
+      id: p._id,
+      currentPrice: null,
+      protector: DEFAULT_PROTECTOR,
+    })));
+  }, [positionsFromDb]);
+
+  React.useEffect(() => {
+    setPositions((items) => items.map((position) => ({
+      ...position,
+      currentPrice: prices[position.asset] ?? position.currentPrice,
+    })));
+  }, [prices]);
 
   function updatePosition(asset, patch) {
     setPositions((items) => items.map((item) => item.asset === asset ? { ...item, ...patch } : item));
@@ -601,23 +645,25 @@ function SpotPositions() {
       <div className="section-head">
         <h2>Posiciones spot</h2>
         <span className="pill">BTC / ETH</span>
+        <span className={`pill${connected ? ' green' : ''}`}>{connected ? 'HL en vivo' : 'Conectando...'}</span>
       </div>
       <div className="spot-list">
         {positions.map((position) => {
+          const hasPrice = position.currentPrice != null;
           const cost = position.amount * position.dca;
-          const value = position.amount * position.currentPrice;
-          const pnl = value - cost;
-          const pnlPct = cost > 0 ? (pnl / cost) * 100 : 0;
-          const tone = pnl >= 0 ? 'green' : 'red';
+          const value = hasPrice ? position.amount * position.currentPrice : null;
+          const pnl = hasPrice ? value - cost : null;
+          const pnlPct = hasPrice && cost > 0 ? (pnl / cost) * 100 : null;
+          const tone = pnl == null ? '' : pnl >= 0 ? 'green' : 'red';
 
           return (
             <article className="spot-card" key={position.asset}>
               <div className="spot-head">
                 <div>
                   <div className="pair">{position.asset} spot</div>
-                  <div className="network">Precio actual ${formatPrice(`${position.asset}/USDC`, position.currentPrice)}</div>
+                  <div className="network">Precio actual {hasPrice ? `$${formatPrice(`${position.asset}/USDC`, position.currentPrice)}` : '—'}</div>
                 </div>
-                <span className={`pill ${tone}`}>{pnl >= 0 ? 'Ganancia' : 'Pérdida'}</span>
+                <span className={`pill ${tone}`}>{pnl == null ? 'Sin precio' : pnl >= 0 ? 'Ganancia' : 'Pérdida'}</span>
               </div>
               <div className="spot-form">
                 <label className="config-field">
@@ -634,7 +680,7 @@ function SpotPositions() {
                   <span>Precio compra DCA</span>
                   <input
                     type="number"
-                    min="0"
+                    min="0.00000001"
                     step="1"
                     value={position.dca}
                     onChange={(event) => updatePosition(position.asset, { dca: Number(event.target.value) })}
@@ -643,9 +689,9 @@ function SpotPositions() {
               </div>
               <div className="spot-metrics">
                 <Metric label="Costo" value={formatUsd(cost)} />
-                <Metric label="Valor actual" value={formatUsd(value)} />
-                <Metric label="PnL" value={formatUsd(pnl)} />
-                <Metric label="PnL %" value={`${pnlPct.toFixed(2)}%`} />
+                <Metric label="Valor actual" value={value != null ? formatUsd(value) : '—'} />
+                <Metric label="PnL" value={pnl != null ? formatUsd(pnl) : '—'} />
+                <Metric label="PnL %" value={pnlPct != null ? `${pnlPct.toFixed(2)}%` : '—'} />
               </div>
               <SpotProtectorBot
                 asset={position.asset}
@@ -786,29 +832,99 @@ function SpotProtectorBot({ asset, protector, onChange }) {
 function Dashboard({ user, onLogout }) {
   const [network, setNetwork] = React.useState('Todas');
   const [pair, setPair] = React.useState('Todos');
-  const [bots, setBots] = React.useState(INITIAL_BOTS);
   const [theme, setTheme] = React.useState('dark');
+
+  const botsFromDb = useQuery(api.bots.listBots);
+  const toggleBotMutation = useMutation(api.bots.toggleBot);
+  const updateBotMutation = useMutation(api.bots.updateBot);
+  const poolsFromDb = useQuery(api.pools.listPools);
+  const { prices, connected } = useHyperliquidPrices();
+  const { funding } = useHyperliquidFunding();
+
+  // UI-only state que no persiste en Convex (trading config extendida)
+  const [localBotState, setLocalBotState] = React.useState({});
+
+  const bots = React.useMemo(() => {
+    if (!botsFromDb || botsFromDb.length === 0) return [];
+    return botsFromDb.map((b) => ({
+      ...DEFAULT_BOT_UI,
+      ...b,
+      id: b._id,
+      ...(localBotState[b._id] ?? {}),
+    }));
+  }, [botsFromDb, localBotState]);
+
+  // Fusionar config de Convex con campos mock (liquidez/APR) e inyectar precio, funding y APY en tiempo real
+  const pools = React.useMemo(() => {
+    if (!poolsFromDb || poolsFromDb.length === 0) return [];
+    return poolsFromDb.map((p) => {
+      const asset = p.pair?.split('/')[0];
+      const mock = POOLS.find((m) => m.pair === p.pair && m.network === p.network) ?? {};
+      return {
+        liquidity: 0,
+        apr: 0,
+        exposure: 0,
+        borrowHealth: 0,
+        leverageRevert: 0,
+        status: 'Sin datos',
+        ...mock,
+        ...p,
+        id: p._id,
+        min: p.minRange,
+        max: p.maxRange,
+        apy: p.apy ?? mock.apr ?? 0,
+        fees24h: p.fees1d ?? mock.fees24h ?? 0,
+        price: prices[asset] ?? null,
+        funding: funding[asset] ?? null,
+      };
+    });
+  }, [poolsFromDb, prices, funding]);
 
   React.useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
 
-  const filteredPools = POOLS.filter((pool) => {
+  const filteredPools = pools.filter((pool) => {
     const networkOk = network === 'Todas' || pool.network === network;
     const pairOk = pair === 'Todos' || pool.pair === pair;
     return networkOk && pairOk;
   });
 
-  function setBotActive(id, active) {
-    setBots((items) => items.map((bot) => bot.id === id ? { ...bot, active } : bot));
+  async function setBotActive(id, active) {
+    if (!botsFromDb?.find((b) => b._id === id)) return;
+    try {
+      await toggleBotMutation({ id, active });
+      setLocalBotState((prev) => ({ ...prev, [id]: { ...prev[id], active } }));
+    } catch (error) {
+      console.error('Failed to update bot active state', error);
+    }
   }
 
-  function setBotMode(id, mode) {
-    setBots((items) => items.map((bot) => bot.id === id ? { ...bot, mode } : bot));
+  async function setBotMode(id, mode) {
+    if (!botsFromDb?.find((b) => b._id === id)) return;
+    try {
+      await updateBotMutation({ id, mode });
+      setLocalBotState((prev) => ({ ...prev, [id]: { ...prev[id], mode } }));
+    } catch (error) {
+      console.error('Failed to update bot mode', error);
+    }
   }
 
-  function updateBotConfig(id, patch) {
-    setBots((items) => items.map((bot) => bot.id === id ? { ...bot, ...patch } : bot));
+  async function updateBotConfig(id, patch) {
+    if (!botsFromDb?.find((b) => b._id === id)) return;
+    const schemaFields = ['capitalPerTrade', 'leverage', 'stop', 'simulationMode'];
+    const persistable = Object.fromEntries(
+      Object.entries(patch).filter(([k]) => schemaFields.includes(k))
+    );
+
+    try {
+      if (Object.keys(persistable).length > 0) {
+        await updateBotMutation({ id, ...persistable });
+      }
+      setLocalBotState((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }));
+    } catch (error) {
+      console.error('Failed to update bot config', error);
+    }
   }
 
   return (
@@ -869,7 +985,7 @@ function Dashboard({ user, onLogout }) {
                 {filteredPools.map((pool) => <PoolCard key={pool.id} pool={pool} />)}
               </div>
             </section>
-            <SpotPositions />
+            <SpotPositions prices={prices} connected={connected} />
           </div>
 
           <aside className="stack">
@@ -898,23 +1014,54 @@ function Dashboard({ user, onLogout }) {
 function DashboardWithClerk() {
   const { user } = useUser();
   const { signOut } = useClerk();
+  const { isLoading, isAuthenticated } = useConvexAuth();
+  const getOrCreateUser = useMutation(api.users.getOrCreateUser);
   const name = user?.firstName || user?.emailAddresses?.[0]?.emailAddress || 'Usuario';
+
+  React.useEffect(() => {
+    if (!isAuthenticated) return;
+    getOrCreateUser().catch((error) => {
+      console.error('Failed to sync user with Convex', error);
+    });
+  }, [getOrCreateUser, isAuthenticated]);
+
+  if (isLoading) {
+    return (
+      <div className="app-shell">
+        <main className="main">
+          <section className="panel">
+            <div className="section-head">
+              <h2>Conectando Convex</h2>
+              <span className="pill">Auth</span>
+            </div>
+            <p className="network">Validando sesión con el backend.</p>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div className="app-shell">
+        <main className="main">
+          <section className="panel">
+            <div className="section-head">
+              <h2>Convex no autenticado</h2>
+              <span className="pill red">Revisar Clerk</span>
+            </div>
+            <p className="network">
+              Clerk inició sesión, pero no pudo emitir el token JWT para Convex. Verifica que exista el JWT template
+              "convex" en Clerk y que coincida con `convex/auth.config.ts`.
+            </p>
+            <button className="ghost-btn" onClick={() => signOut()}>Salir</button>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
   return <Dashboard user={{ name }} onLogout={() => signOut()} />;
 }
 
-function App() {
-  return (
-    <>
-      <SignedOut>
-        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', background: 'var(--bg, #0a0a0a)' }}>
-          <SignIn />
-        </div>
-      </SignedOut>
-      <SignedIn>
-        <DashboardWithClerk />
-      </SignedIn>
-    </>
-  );
-}
-
-export default App;
+export default DashboardWithClerk;

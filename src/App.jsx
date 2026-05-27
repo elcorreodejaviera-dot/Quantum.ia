@@ -1,6 +1,6 @@
 import React from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
-import { SignIn, SignUp, SignedIn, SignedOut, RedirectToSignIn } from '@clerk/clerk-react'
+import { SignIn, SignUp, SignedIn, SignedOut } from '@clerk/clerk-react'
 import BotPortal from './components/BotPortal'
 import AuthLayout from './components/AuthLayout'
 
@@ -8,7 +8,7 @@ function ProtectedRoute({ children }) {
   return (
     <>
       <SignedIn>{children}</SignedIn>
-      <SignedOut><RedirectToSignIn redirectUrl="/dashboard" /></SignedOut>
+      <SignedOut><Navigate to="/login" replace /></SignedOut>
     </>
   )
 }
@@ -19,12 +19,12 @@ export default function App() {
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
       <Route path="/login" element={
         <AuthLayout>
-          <SignIn routing="path" path="/login" afterSignInUrl="/dashboard" />
+          <SignIn routing="path" path="/login" fallbackRedirectUrl="/dashboard" />
         </AuthLayout>
       } />
       <Route path="/register" element={
         <AuthLayout>
-          <SignUp routing="path" path="/register" afterSignUpUrl="/dashboard" />
+          <SignUp routing="path" path="/register" fallbackRedirectUrl="/dashboard" />
         </AuthLayout>
       } />
       <Route

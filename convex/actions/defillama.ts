@@ -1,6 +1,8 @@
-import { internalAction, internalMutation } from "../_generated/server";
+"use node";
+
+import { internalAction } from "../_generated/server";
 import { internal } from "../_generated/api";
-import { v } from "convex/values";
+import type { Id } from "../_generated/dataModel";
 
 const DEFILLAMA_URL = "https://yields.llama.fi/pools";
 const CHAINS = ["Arbitrum", "Base", "Optimism"];
@@ -38,6 +40,8 @@ export const fetchAndUpdateApys = internalAction({
       return;
     }
 
+    if (!Array.isArray(data.data)) return;
+
     const pools = data.data as Array<{
       chain: string;
       project: string;
@@ -53,7 +57,7 @@ export const fetchAndUpdateApys = internalAction({
       (p) => p.project === "uniswap-v3" && CHAINS.includes(p.chain)
     );
 
-    const convexPools: Array<{ _id: string; pair: string; network: string }> =
+    const convexPools: Array<{ _id: Id<"pools">; pair: string; network: string }> =
       await ctx.runQuery(internal.pools.listPoolsInternal);
 
     for (const cp of convexPools) {
@@ -64,30 +68,13 @@ export const fetchAndUpdateApys = internalAction({
 
       const best = matches.reduce((a, b) => (b.tvlUsd ?? 0) > (a.tvlUsd ?? 0) ? b : a);
 
-      await ctx.runMutation(internal.actions.defillama.patchPoolApy, {
-        id: cp._id as string,
+      await ctx.runMutation(internal.pools.patchPoolApy, {
+        id: cp._id,
         apy: best.apy ?? 0,
         tvl: best.tvlUsd,
         fees1d: estimateFees1d(best),
         defillamaId: best.pool,
       });
     }
-  },
-});
-
-export const patchPoolApy = internalMutation({
-  args: {
-    id: v.string(),
-    apy: v.number(),
-    tvl: v.optional(v.number()),
-    fees1d: v.optional(v.number()),
-    defillamaId: v.optional(v.string()),
-  },
-  handler: async (ctx, { id, apy, tvl, fees1d, defillamaId }) => {
-    const patch: Record<string, unknown> = { apy, apyUpdatedAt: Date.now() };
-    if (tvl !== undefined) patch.tvl = tvl;
-    if (fees1d !== undefined) patch.fees1d = fees1d;
-    if (defillamaId !== undefined) patch.defillamaId = defillamaId;
-    await ctx.db.patch(id as unknown as import("../_generated/dataModel").Id<"pools">, patch);
   },
 });

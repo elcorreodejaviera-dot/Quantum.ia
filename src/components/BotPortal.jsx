@@ -160,10 +160,10 @@ function NetworkLiquidity({ pools }) {
     const networkPools = pools.filter((pool) => pool.network === network);
     const liquidity = networkPools.reduce((sum, pool) => sum + pool.liquidity, 0);
     const fees24h = networkPools.reduce((sum, pool) => sum + pool.fees24h, 0);
-    const avgApr = networkPools.length
-      ? networkPools.reduce((sum, pool) => sum + pool.apr, 0) / networkPools.length
+    const avgApy = networkPools.length
+      ? networkPools.reduce((sum, pool) => sum + (pool.apy ?? 0), 0) / networkPools.length
       : 0;
-    return { network, liquidity, fees24h, avgApr };
+    return { network, liquidity, fees24h, avgApy };
   });
 
   return (
@@ -182,7 +182,7 @@ function NetworkLiquidity({ pools }) {
             <div className="network-value">{formatUsd(item.liquidity)}</div>
             <div className="network-meta">
               <span>Fees diarios <strong>{formatUsd(item.fees24h)}</strong></span>
-              <span>APR prom. <strong>{item.avgApr.toFixed(1)}%</strong></span>
+              <span>APY prom. <strong>{item.avgApy.toFixed(1)}%</strong></span>
             </div>
           </div>
         ))}

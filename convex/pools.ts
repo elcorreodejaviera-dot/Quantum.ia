@@ -1,4 +1,4 @@
-import { internalQuery, mutation, query } from "./_generated/server";
+import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { requireAdmin } from "./helpers";
 
@@ -15,6 +15,23 @@ export const listPoolsInternal = internalQuery({
   args: {},
   handler: async (ctx) => {
     return await ctx.db.query("pools").collect();
+  },
+});
+
+export const patchPoolApy = internalMutation({
+  args: {
+    id: v.id("pools"),
+    apy: v.number(),
+    tvl: v.optional(v.number()),
+    fees1d: v.optional(v.number()),
+    defillamaId: v.optional(v.string()),
+  },
+  handler: async (ctx, { id, apy, tvl, fees1d, defillamaId }) => {
+    const patch: Record<string, unknown> = { apy, apyUpdatedAt: Date.now() };
+    if (tvl !== undefined) patch.tvl = tvl;
+    if (fees1d !== undefined) patch.fees1d = fees1d;
+    if (defillamaId !== undefined) patch.defillamaId = defillamaId;
+    await ctx.db.patch(id, patch);
   },
 });
 

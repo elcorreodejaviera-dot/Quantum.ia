@@ -201,54 +201,66 @@ async function getErc20(rpc, token, address, decimals) {
   return hexToFloat(hex, decimals);
 }
 
-export function useWalletBalances(address) {
-  const [balances, setBalances] = useState({});  // { ETH: { total, perChain }, BTC: { total, perChain } }
+async function getBitcoinBalance(address) {
+  const res = await fetch(`https://blockstream.info/api/address/${address}`);
+  if (!res.ok) return 0;
+  const data = await res.json();
+  const funded = data.chain_stats?.funded_txo_sum ?? 0;
+  const spent = data.chain_stats?.spent_txo_sum ?? 0;
+  return (funded - spent) / 1e8;
+}
+
+// wallets: [{ _id, address, network, label }]
+export function useWalletBalances(wallets) {
+  const [balances, setBalances] = useState({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  const key = JSON.stringify((wallets ?? []).map(w => w._id));
 
   useEffect(() => {
     setBalances({});
     setError(null);
-    if (!address) return;
+    if (!wallets || wallets.length === 0) return;
     let cancelled = false;
 
     async function fetchAll() {
       setLoading(true);
       try {
-        const results = await Promise.allSettled(
-          Object.entries(CHAIN_CONFIG).map(async ([chain, cfg]) => {
+        const ethAcc = {};
+        const btcAcc = {};
+
+        await Promise.allSettled(wallets.map(async (w) => {
+          if (w.network === 'Bitcoin') {
+            const bal = await getBitcoinBalance(w.address);
+            if (bal > 0) btcAcc[`${w.label}(BTC)`] = bal;
+          } else {
+            const cfg = CHAIN_CONFIG[w.network];
+            if (!cfg) return;
             const [nativeEth, weth, wbtcRaw] = await Promise.all([
-              getNative(cfg.rpc, address),
-              getErc20(cfg.rpc, cfg.weth, address, 18),
-              getErc20(cfg.rpc, cfg.wbtc, address, 8),
+              getNative(cfg.rpc, w.address),
+              getErc20(cfg.rpc, cfg.weth, w.address, 18),
+              getErc20(cfg.rpc, cfg.wbtc, w.address, 8),
             ]);
-            return { chain, eth: nativeEth + weth, btc: wbtcRaw };
-          })
-        );
+            const eth = nativeEth + weth;
+            const key = `${w.label}(${w.network})`;
+            if (eth > 0) ethAcc[key] = eth;
+            if (wbtcRaw > 0) btcAcc[key] = wbtcRaw;
+          }
+        }));
 
         if (cancelled) return;
 
-        const ethPerChain = {};
-        const btcPerChain = {};
-
-        for (const r of results) {
-          if (r.status === 'fulfilled') {
-            const { chain, eth, btc } = r.value;
-            if (eth > 0) ethPerChain[chain] = eth;
-            if (btc > 0) btcPerChain[chain] = btc;
-          }
-        }
-
-        const totalEth = Object.values(ethPerChain).reduce((s, v) => s + v, 0);
-        const totalBtc = Object.values(btcPerChain).reduce((s, v) => s + v, 0);
+        const totalEth = Object.values(ethAcc).reduce((s, v) => s + v, 0);
+        const totalBtc = Object.values(btcAcc).reduce((s, v) => s + v, 0);
 
         setBalances({
-          ETH: { total: totalEth, perChain: ethPerChain },
-          BTC: { total: totalBtc, perChain: btcPerChain },
+          ...(totalEth > 0 ? { ETH: { total: totalEth, perWallet: ethAcc } } : {}),
+          ...(totalBtc > 0 ? { BTC: { total: totalBtc, perWallet: btcAcc } } : {}),
         });
         setError(null);
       } catch (err) {
-        if (!cancelled) setError('Error leyendo balances on-chain');
+        if (!cancelled) setError('Error leyendo balances');
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -257,7 +269,7 @@ export function useWalletBalances(address) {
     fetchAll();
     const interval = setInterval(fetchAll, 60_000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [address]);
+  }, [key]);
 
   return { balances, loading, error };
 }

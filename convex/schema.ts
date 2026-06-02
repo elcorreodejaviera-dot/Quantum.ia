@@ -57,7 +57,9 @@ export default defineSchema({
     address: v.string(),
     network: v.string(),
     ownerId: v.optional(v.string()),
-  }).index("by_type", ["type"]),
+  })
+    .index("by_type", ["type"])
+    .index("by_owner", ["ownerId"]),
 
   spot_positions: defineTable({
     asset: v.string(),

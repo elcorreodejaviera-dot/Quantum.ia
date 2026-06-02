@@ -839,13 +839,43 @@ button {
   font-size: 12px;
 }
 
-/* Wallet HL row */
-.wallet-hl-row {
+/* Multi-wallet manager */
+.wallet-manager {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 8px 0 10px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+}
+
+.wallet-manager-head {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 0 4px;
+  gap: 8px;
   flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.wallet-list-compact {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.wallet-compact-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.wallet-add-form {
+  display: grid;
+  grid-template-columns: 1fr 2fr 1fr auto;
+  gap: 6px;
+  margin-top: 6px;
+  align-items: start;
 }
 
 /* HL position block inside spot card */

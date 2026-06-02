@@ -690,79 +690,62 @@ function HLMarketPanel() {
   );
 }
 
+const WALLET_NETWORKS = ['Ethereum', 'Arbitrum', 'Base', 'Optimism', 'Bitcoin'];
+
 function SpotPositions({ prices, connected }) {
   const positionsFromDb = useQuery(api.spot_positions.listMyPositions);
-  const userFromDb = useQuery(api.users.getUser);
-  const setWalletAddressMutation = useMutation(api.users.setWalletAddress);
-  const [positions, setPositions] = React.useState(INITIAL_SPOT_POSITIONS);
-  const [hlOpen, setHlOpen] = React.useState(false);
-  const [walletInput, setWalletInput] = React.useState('');
-  const [editingWallet, setEditingWallet] = React.useState(false);
-  const [walletError, setWalletError] = React.useState('');
-  const EVM_RE = /^0x[a-fA-F0-9]{40}$/;
-
-  const walletAddress = userFromDb?.walletAddress ?? null;
-  const { perpPositions, hlTokens, loading: hlLoading, error: hlError } = useHyperliquidSpotState(walletAddress);
-  const { balances: onChainBalances, loading: chainLoading, error: chainError } = useWalletBalances(walletAddress);
+  const myWallets = useQuery(api.wallets.listMyWallets) ?? [];
+  const addMyWalletMutation = useMutation(api.wallets.addMyWallet);
+  const removeMyWalletMutation = useMutation(api.wallets.removeMyWallet);
   const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
 
-  async function recordSpotSignal(asset, triggerType, price, amount) {
-    try {
-      await recordSignalMutation({
-        action: `DCA compra ${asset}`,
-        asset,
-        amount,
-        price,
-        network: 'Spot',
-        botName: `Bot protector ${asset}`,
-        triggerType,
-      });
-    } catch (err) {
-      console.error('recordSpotSignal failed', err);
-    }
-  }
+  const [positions, setPositions] = React.useState(INITIAL_SPOT_POSITIONS);
+  const [hlOpen, setHlOpen] = React.useState(false);
+  const [showAddWallet, setShowAddWallet] = React.useState(false);
+  const [newAddr, setNewAddr] = React.useState('');
+  const [newLabel, setNewLabel] = React.useState('');
+  const [newNetwork, setNewNetwork] = React.useState('Base');
+  const [addError, setAddError] = React.useState('');
+
+  // Primera wallet EVM para HL perp
+  const firstEvmWallet = myWallets.find(w => w.network !== 'Bitcoin');
+  const { perpPositions, loading: hlLoading, error: hlError } = useHyperliquidSpotState(firstEvmWallet?.address ?? null);
+  const { balances: onChainBalances, loading: chainLoading, error: chainError } = useWalletBalances(myWallets);
 
   React.useEffect(() => {
     if (positionsFromDb === undefined) return;
     setPositions(positionsFromDb.map((p) => ({
-      ...p,
-      id: p._id,
-      currentPrice: null,
-      protector: DEFAULT_PROTECTOR,
+      ...p, id: p._id, currentPrice: null, protector: DEFAULT_PROTECTOR,
     })));
   }, [positionsFromDb]);
 
   React.useEffect(() => {
-    setPositions((items) => items.map((position) => ({
-      ...position,
-      currentPrice: prices[position.asset] ?? position.currentPrice,
+    setPositions((items) => items.map((pos) => ({
+      ...pos, currentPrice: prices[pos.asset] ?? pos.currentPrice,
     })));
   }, [prices]);
 
-  async function saveWallet() {
-    const addr = walletInput.trim().toLowerCase();
-    if (!EVM_RE.test(addr)) {
-      setWalletError('Debe ser 0x seguido de 40 caracteres hex');
-      return;
-    }
-    setWalletError('');
+  async function handleAddWallet() {
+    setAddError('');
     try {
-      await setWalletAddressMutation({ walletAddress: addr });
-      setEditingWallet(false);
-      setWalletInput('');
+      await addMyWalletMutation({ label: newLabel, address: newAddr, network: newNetwork });
+      setNewAddr(''); setNewLabel(''); setShowAddWallet(false);
     } catch (err) {
-      setWalletError(err.message ?? 'Error al guardar');
+      setAddError(err.message ?? 'Error al guardar');
     }
+  }
+
+  async function recordSpotSignal(asset, triggerType, price, amount) {
+    try {
+      await recordSignalMutation({ action: `DCA compra ${asset}`, asset, amount, price, network: 'Spot', botName: `Bot protector ${asset}`, triggerType });
+    } catch (_) {}
   }
 
   function updatePosition(asset, patch) {
     setPositions((items) => items.map((item) => item.asset === asset ? { ...item, ...patch } : item));
   }
-
   function updateProtector(asset, patch) {
-    setPositions((items) => items.map((item) => (
-      item.asset === asset ? { ...item, protector: { ...item.protector, ...patch } } : item
-    )));
+    setPositions((items) => items.map((item) => item.asset === asset ? { ...item, protector: { ...item.protector, ...patch } } : item));
   }
 
   return (
@@ -773,33 +756,40 @@ function SpotPositions({ prices, connected }) {
         <span className={`pill${connected ? ' green' : ''}`}>{connected ? 'HL en vivo' : 'Conectando...'}</span>
       </div>
 
-      <div className="wallet-hl-row">
-        {/* DEBUG — eliminar tras diagnóstico */}
-        <span style={{ fontSize: 10, color: '#888', width: '100%', marginBottom: 4 }}>
-          wallet: {walletAddress ?? 'null'} | userFromDb: {userFromDb === undefined ? 'cargando' : userFromDb ? userFromDb.clerkId?.slice(0,12) : 'null'}
-        </span>
-        {walletAddress && !editingWallet ? (
-          <>
-            <span className="network mono">{walletAddress.slice(0, 8)}…{walletAddress.slice(-6)}</span>
-            {hlLoading && <span className="network"> Leyendo HL...</span>}
-            <button className="mini-btn" style={{ marginLeft: 8 }} onClick={() => { setEditingWallet(true); setWalletInput(walletAddress); }}>Cambiar wallet</button>
-          </>
-        ) : (
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-              <input
-                className="hl-search"
-                style={{ flex: 1, margin: 0 }}
-                placeholder="Wallet 0x... (40 chars hex)"
-                value={walletInput}
-                onChange={e => { setWalletInput(e.target.value); setWalletError(''); }}
-              />
-              <button className="mini-btn" onClick={saveWallet}>Guardar</button>
-              {editingWallet && <button className="mini-btn" onClick={() => { setEditingWallet(false); setWalletError(''); }}>Cancelar</button>}
-            </div>
-            {walletError && <span style={{ fontSize: 11, color: 'var(--red, #f44)' }}>{walletError}</span>}
+      {/* Panel de wallets */}
+      <div className="wallet-manager">
+        <div className="wallet-manager-head">
+          <span className="hl-position-label">Mis wallets ({myWallets.length})</span>
+          {chainLoading && <span className="network"> Leyendo balances...</span>}
+          <button className="mini-btn" onClick={() => setShowAddWallet(v => !v)}>
+            {showAddWallet ? 'Cancelar' : '+ Añadir wallet'}
+          </button>
+        </div>
+
+        {myWallets.length > 0 && (
+          <div className="wallet-list-compact">
+            {myWallets.map(w => (
+              <div key={w._id} className="wallet-compact-row">
+                <span className="pill">{w.network}</span>
+                <span className="network mono">{w.label} · {w.address.slice(0, 6)}…{w.address.slice(-4)}</span>
+                <button className="mini-btn" style={{ marginLeft: 'auto' }} onClick={() => removeMyWalletMutation({ id: w._id })}>×</button>
+              </div>
+            ))}
           </div>
         )}
+
+        {showAddWallet && (
+          <div className="wallet-add-form">
+            <select className="hl-search" style={{ margin: 0 }} value={newNetwork} onChange={e => setNewNetwork(e.target.value)}>
+              {WALLET_NETWORKS.map(n => <option key={n}>{n}</option>)}
+            </select>
+            <input className="hl-search" style={{ margin: 0 }} placeholder="Dirección (0x... o bc1...)" value={newAddr} onChange={e => { setNewAddr(e.target.value); setAddError(''); }} />
+            <input className="hl-search" style={{ margin: 0 }} placeholder="Etiqueta (ej: Mi Metamask)" value={newLabel} onChange={e => setNewLabel(e.target.value)} />
+            <button className="mini-btn" onClick={handleAddWallet}>Guardar</button>
+            {addError && <span style={{ fontSize: 11, color: 'var(--red,#f44)', gridColumn: '1/-1' }}>{addError}</span>}
+          </div>
+        )}
+        {chainError && <p className="network" style={{ color: 'var(--red,#f44)', marginTop: 4 }}>{chainError}</p>}
       </div>
 
       <div className="hl-market-toggle">
@@ -822,10 +812,8 @@ function SpotPositions({ prices, connected }) {
           const hlPnlTone = perpPos == null ? '' : perpPos.unrealizedPnl >= 0 ? 'green' : 'red';
           const onChain = onChainBalances[position.asset] ?? null;
           const onChainValue = onChain && hasPrice ? onChain.total * position.currentPrice : null;
-          const onChainPnl = onChainValue != null && position.dca > 0
-            ? onChainValue - onChain.total * position.dca : null;
-          const onChainPnlPct = onChainPnl != null && position.dca > 0 && onChain.total > 0
-            ? (onChainPnl / (onChain.total * position.dca)) * 100 : null;
+          const onChainPnl = onChainValue != null && position.dca > 0 ? onChainValue - onChain.total * position.dca : null;
+          const onChainPnlPct = onChainPnl != null && onChain.total > 0 && position.dca > 0 ? (onChainPnl / (onChain.total * position.dca)) * 100 : null;
           const chainTone = onChainPnl == null ? '' : onChainPnl >= 0 ? 'green' : 'red';
 
           return (
@@ -838,86 +826,44 @@ function SpotPositions({ prices, connected }) {
                 <span className={`pill ${tone}`}>{pnl == null ? 'Sin precio' : pnl >= 0 ? 'Ganancia' : 'Pérdida'}</span>
               </div>
 
-              {walletAddress && (
+              {myWallets.length > 0 && (
                 <div className="hl-position-block">
-                  {/* On-chain balances */}
                   <div className="hl-position-head">
-                    <span className="hl-position-label">Wallet on-chain</span>
-                    {chainLoading && <span className="network">Leyendo cadena...</span>}
-                    {chainError && <span style={{ fontSize: 11, color: 'var(--red,#f44)' }}>{chainError}</span>}
-                    {onChainPnl != null && (
-                      <span className={`pill ${chainTone}`}>
-                        {onChainPnl >= 0 ? '+' : ''}{formatUsd(onChainPnl)}
-                      </span>
-                    )}
-                    {onChainPnlPct != null && (
-                      <span className={`pill ${chainTone}`}>
-                        {onChainPnlPct >= 0 ? '+' : ''}{onChainPnlPct.toFixed(2)}%
-                      </span>
-                    )}
+                    <span className="hl-position-label">Balance wallets</span>
+                    {chainLoading && <span className="network">Cargando...</span>}
+                    {onChainPnl != null && <span className={`pill ${chainTone}`}>{onChainPnl >= 0 ? '+' : ''}{formatUsd(onChainPnl)}</span>}
+                    {onChainPnlPct != null && <span className={`pill ${chainTone}`}>{onChainPnlPct >= 0 ? '+' : ''}{onChainPnlPct.toFixed(2)}%</span>}
                   </div>
-                  {chainLoading && (
-                    <p className="network" style={{ margin: '6px 0 0' }}>Leyendo Ethereum / Arbitrum / Base / Optimism...</p>
-                  )}
-                  {chainError && (
-                    <p className="network" style={{ margin: '6px 0 0', color: 'var(--red,#f44)' }}>{chainError}</p>
-                  )}
-                  {!chainLoading && onChain && (
+                  {onChain ? (
                     <>
                       <div className="spot-metrics">
-                        <Metric label="Balance total" value={`${onChain.total.toFixed(6)} ${position.asset}`} />
-                        <Metric label="Valor actual" value={onChainValue != null ? formatUsd(onChainValue) : '—'} />
-                        <Metric label="Costo (DCA)" value={position.dca > 0 ? formatUsd(onChain.total * position.dca) : '—'} />
+                        <Metric label="Total" value={`${onChain.total.toFixed(6)} ${position.asset}`} />
+                        <Metric label="Valor" value={onChainValue != null ? formatUsd(onChainValue) : '—'} />
+                        <Metric label="Costo DCA" value={position.dca > 0 ? formatUsd(onChain.total * position.dca) : '—'} />
                         <Metric label="PnL" value={onChainPnl != null ? formatUsd(onChainPnl) : '—'} />
                       </div>
-                      {Object.keys(onChain.perChain).length > 0 && (
-                        <div className="spot-metrics" style={{ marginTop: 4 }}>
-                          {Object.entries(onChain.perChain).map(([chain, bal]) => (
-                            <Metric key={chain} label={chain} value={`${bal.toFixed(6)}`} />
-                          ))}
-                        </div>
-                      )}
+                      {Object.entries(onChain.perWallet ?? {}).map(([lbl, bal]) => (
+                        <div key={lbl} className="network" style={{ fontSize: 11, marginTop: 2 }}>{lbl}: {bal.toFixed(6)}</div>
+                      ))}
                     </>
-                  )}
-                  {!chainLoading && !chainError && !onChain && (
-                    <p className="network" style={{ margin: '6px 0 0' }}>
-                      Sin balance de {position.asset} en Ethereum / Arbitrum / Base / Optimism
-                    </p>
+                  ) : !chainLoading && (
+                    <p className="network" style={{ margin: '4px 0 0' }}>Sin balance de {position.asset} en las wallets configuradas</p>
                   )}
 
-                  {/* Posición perp en HL */}
-                  {(perpPos || (!hlLoading && !hlError)) && (
+                  {perpPos && (
                     <div style={{ borderTop: '1px solid var(--line)', marginTop: 8, paddingTop: 8 }}>
                       <div className="hl-position-head">
-                        <span className="hl-position-label">Posición HL perp</span>
-                        {hlLoading && <span className="network">Cargando HL...</span>}
-                        {hlError && <span style={{ fontSize: 11, color: 'var(--red,#f44)' }}>{hlError}</span>}
-                        {perpPos && (
-                          <>
-                            <span className={`pill ${perpPos.size > 0 ? 'green' : 'cyan'}`}>
-                              {perpPos.size > 0 ? 'Long' : 'Short'}
-                            </span>
-                            <span className={`pill ${hlPnlTone}`}>
-                              {perpPos.unrealizedPnl >= 0 ? '+' : ''}{formatUsd(perpPos.unrealizedPnl)}
-                            </span>
-                            <span className={`pill ${hlPnlTone}`}>
-                              {(perpPos.roe * 100).toFixed(2)}% ROE
-                            </span>
-                          </>
-                        )}
+                        <span className="hl-position-label">HL perp</span>
+                        <span className={`pill ${perpPos.size > 0 ? 'green' : 'cyan'}`}>{perpPos.size > 0 ? 'Long' : 'Short'}</span>
+                        <span className={`pill ${hlPnlTone}`}>{perpPos.unrealizedPnl >= 0 ? '+' : ''}{formatUsd(perpPos.unrealizedPnl)}</span>
+                        <span className={`pill ${hlPnlTone}`}>{(perpPos.roe * 100).toFixed(2)}% ROE</span>
                       </div>
-                      {perpPos ? (
-                        <div className="spot-metrics">
-                          <Metric label="Tamaño" value={`${Math.abs(perpPos.size).toFixed(4)} ${position.asset}`} />
-                          <Metric label="Entrada" value={`$${formatPrice(`${position.asset}/USDC`, perpPos.entryPx)}`} />
-                          <Metric label="Valor pos." value={formatUsd(Math.abs(perpPos.positionValue))} />
-                          <Metric label="PnL no real." value={formatUsd(perpPos.unrealizedPnl)} />
-                          {perpPos.leverage && <Metric label="Leverage" value={`${perpPos.leverage}x`} />}
-                          {perpPos.liquidationPx && <Metric label="Liquidación" value={`$${formatPrice(`${position.asset}/USDC`, perpPos.liquidationPx)}`} />}
-                        </div>
-                      ) : !hlLoading && (
-                        <p className="network" style={{ margin: '6px 0 0' }}>Sin posición perp abierta en HL</p>
-                      )}
+                      <div className="spot-metrics">
+                        <Metric label="Tamaño" value={`${Math.abs(perpPos.size).toFixed(4)} ${position.asset}`} />
+                        <Metric label="Entrada" value={`$${formatPrice(`${position.asset}/USDC`, perpPos.entryPx)}`} />
+                        <Metric label="Valor" value={formatUsd(Math.abs(perpPos.positionValue))} />
+                        <Metric label="PnL" value={formatUsd(perpPos.unrealizedPnl)} />
+                      </div>
                     </div>
                   )}
                 </div>
@@ -926,23 +872,11 @@ function SpotPositions({ prices, connected }) {
               <div className="spot-form">
                 <label className="config-field">
                   <span>Cantidad (manual)</span>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={position.amount}
-                    onChange={(event) => updatePosition(position.asset, { amount: Number(event.target.value) })}
-                  />
+                  <input type="number" min="0" step="0.01" value={position.amount} onChange={(e) => updatePosition(position.asset, { amount: Number(e.target.value) })} />
                 </label>
                 <label className="config-field">
                   <span>Precio compra DCA</span>
-                  <input
-                    type="number"
-                    min="0.00000001"
-                    step="1"
-                    value={position.dca}
-                    onChange={(event) => updatePosition(position.asset, { dca: Number(event.target.value) })}
-                  />
+                  <input type="number" min="0.00000001" step="1" value={position.dca} onChange={(e) => updatePosition(position.asset, { dca: Number(e.target.value) })} />
                 </label>
               </div>
               <div className="spot-metrics">
@@ -957,11 +891,8 @@ function SpotPositions({ prices, connected }) {
                 currentPrice={position.currentPrice}
                 dca={position.dca}
                 hlPosition={perpPos}
-                onChainBalance={onChain}
                 onChange={(patch) => updateProtector(position.asset, patch)}
-                onFireSignal={(triggerType, price, amount) =>
-                  recordSpotSignal(position.asset, triggerType, price, amount)
-                }
+                onFireSignal={(triggerType, price, amount) => recordSpotSignal(position.asset, triggerType, price, amount)}
               />
             </article>
           );

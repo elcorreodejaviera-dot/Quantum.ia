@@ -742,6 +742,13 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
     INITIAL_SPOT_POSITIONS.map(p => ({ ...p, protector: loadProtector(userId, p.asset) }))
   );
   const [openAssets, setOpenAssets] = React.useState({});
+  const [drafts, setDrafts] = React.useState(() => {
+    const d = {};
+    for (const p of INITIAL_SPOT_POSITIONS) {
+      d[p.asset] = { dca: String(p.dca), amount: String(p.amount) };
+    }
+    return d;
+  });
   const cooldownRef = React.useRef({});
   const COOLDOWN_MS = 60 * 60 * 1000;
 
@@ -750,6 +757,13 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
     setPositions(positionsFromDb.map((p) => ({
       ...p, id: p._id, currentPrice: null, protector: loadProtector(userId, p.asset),
     })));
+    setDrafts((prev) => {
+      const next = { ...prev };
+      for (const p of positionsFromDb) {
+        next[p.asset] = { dca: String(p.dca), amount: String(p.amount) };
+      }
+      return next;
+    });
   }, [positionsFromDb]);
 
   React.useEffect(() => {
@@ -805,11 +819,22 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
     }
   }, [positions, recordSpotSignal, simulationMode, tradingEnabled]);
 
-  function updatePositionField(asset, field, value) {
-    setPositions((items) => items.map((item) => (item.asset !== asset ? item : { ...item, [field]: value })));
+  function handleDraftChange(asset, field, value) {
+    setDrafts((prev) => ({ ...prev, [asset]: { ...prev[asset], [field]: value } }));
+  }
+
+  function commitDraft(asset, field) {
+    const raw = drafts[asset]?.[field] ?? '';
+    const num = parseFloat(raw);
     const pos = positions.find((p) => p.asset === asset);
+    if (!raw || isNaN(num) || num <= 0) {
+      // Revert to last valid value
+      if (pos) setDrafts((prev) => ({ ...prev, [asset]: { ...prev[asset], [field]: String(pos[field]) } }));
+      return;
+    }
+    setPositions((items) => items.map((item) => (item.asset !== asset ? item : { ...item, [field]: num })));
     if (pos?.id) {
-      updatePositionMutation({ id: pos.id, [field]: value }).catch((err) => console.error('updatePosition failed', err));
+      updatePositionMutation({ id: pos.id, [field]: num }).catch((err) => console.error('updatePosition failed', err));
     }
   }
 
@@ -855,8 +880,9 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
                       type="number"
                       min="0"
                       step="1"
-                      value={position.dca}
-                      onChange={(e) => updatePositionField(position.asset, 'dca', Number(e.target.value))}
+                      value={drafts[position.asset]?.dca ?? ''}
+                      onChange={(e) => handleDraftChange(position.asset, 'dca', e.target.value)}
+                      onBlur={() => commitDraft(position.asset, 'dca')}
                     />
                   </label>
                   <label className="spot-inline-field">
@@ -865,8 +891,9 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
                       type="number"
                       min="0"
                       step="0.0001"
-                      value={position.amount}
-                      onChange={(e) => updatePositionField(position.asset, 'amount', Number(e.target.value))}
+                      value={drafts[position.asset]?.amount ?? ''}
+                      onChange={(e) => handleDraftChange(position.asset, 'amount', e.target.value)}
+                      onBlur={() => commitDraft(position.asset, 'amount')}
                     />
                   </label>
                 </div>

@@ -144,43 +144,89 @@ export function useHyperliquidAllMids() {
 }
 
 export function useHyperliquidSpotState(address) {
-  const [spotBalances, setSpotBalances] = useState({});
+  // perpPositions: posiciones abiertas en perps (BTC, ETH, etc.)
+  // hlTokens: tokens nativos de HL spot (HYPE, PURR, etc.)
+  const [perpPositions, setPerpPositions] = useState({});
+  const [hlTokens, setHlTokens] = useState({});
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
-    setSpotBalances({});
+    setPerpPositions({});
+    setHlTokens({});
+    setError(null);
     if (!address) return;
     let cancelled = false;
 
-    async function fetchSpot() {
+    async function fetchAll() {
       setLoading(true);
       try {
-        const res = await fetch(HL_REST, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type: 'spotClearinghouseState', user: address }),
-        });
-        if (!res.ok || cancelled) return;
-        const data = await res.json();
+        const [perpRes, spotRes] = await Promise.all([
+          fetch(HL_REST, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'clearinghouseState', user: address }),
+          }),
+          fetch(HL_REST, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'spotClearinghouseState', user: address }),
+          }),
+        ]);
         if (cancelled) return;
-        const map = {};
-        for (const b of data.balances ?? []) {
+
+        if (!perpRes.ok || !spotRes.ok) {
+          setError('Error al consultar Hyperliquid');
+          return;
+        }
+
+        const [perpData, spotData] = await Promise.all([perpRes.json(), spotRes.json()]);
+        if (cancelled) return;
+
+        // Perp positions: assetPositions[].position
+        const perps = {};
+        for (const ap of perpData.assetPositions ?? []) {
+          const p = ap.position;
+          const size = parseFloat(p.szi);
+          if (size !== 0) {
+            perps[p.coin] = {
+              size,
+              entryPx: parseFloat(p.entryPx),
+              unrealizedPnl: parseFloat(p.unrealizedPnl),
+              positionValue: parseFloat(p.positionValue),
+              roe: parseFloat(p.returnOnEquity ?? 0),
+              leverage: p.leverage?.value ?? null,
+              liquidationPx: p.liquidationPx ? parseFloat(p.liquidationPx) : null,
+            };
+          }
+        }
+        setPerpPositions(perps);
+
+        // HL spot tokens (no incluye BTC/ETH — son tokens nativos de HL)
+        const tokens = {};
+        for (const b of spotData.balances ?? []) {
           const total = parseFloat(b.total);
           const entryNtl = parseFloat(b.entryNtl);
-          if (total > 0) map[b.coin] = { total, entryNtl, hold: parseFloat(b.hold ?? 0) };
+          if (total > 0 && b.coin !== 'USDC') {
+            tokens[b.coin] = { total, entryNtl, hold: parseFloat(b.hold ?? 0) };
+          }
         }
-        setSpotBalances(map);
-      } catch (_) {} finally {
+        setHlTokens(tokens);
+
+        setError(null);
+      } catch (err) {
+        if (!cancelled) setError('Sin conexión con Hyperliquid');
+      } finally {
         if (!cancelled) setLoading(false);
       }
     }
 
-    fetchSpot();
-    const interval = setInterval(fetchSpot, 30_000);
+    fetchAll();
+    const interval = setInterval(fetchAll, 30_000);
     return () => { cancelled = true; clearInterval(interval); };
   }, [address]);
 
-  return { spotBalances, loading };
+  return { perpPositions, hlTokens, loading, error };
 }
 
 export function useHyperliquidFunding() {

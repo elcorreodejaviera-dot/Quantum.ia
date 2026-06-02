@@ -1113,6 +1113,44 @@ button {
   font-weight: 600;
 }
 
+/* Purchase history */
+.spot-history-panel {
+  border-top: 1px solid var(--line);
+  padding: 10px 14px 12px;
+}
+
+.purchase-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.purchase-history-row {
+  align-items: center;
+  display: flex;
+  font-size: 12px;
+  gap: 10px;
+  justify-content: space-between;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.purchase-history-left {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.purchase-history-right {
+  align-items: flex-end;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: right;
+}
+
 .spot-collapse-right {
   display: flex;
   align-items: center;

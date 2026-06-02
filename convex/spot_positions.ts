@@ -6,8 +6,7 @@ export const listMyPositions = query({
   handler: async (ctx) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new Error("Not authenticated");
-
-    return await ctx.db
+    return ctx.db
       .query("spot_positions")
       .withIndex("by_user_id", (q) => q.eq("userId", identity.subject))
       .collect();
@@ -26,10 +25,19 @@ export const addPosition = mutation({
     if (args.amount <= 0) throw new Error("amount must be > 0");
     if (args.dca <= 0) throw new Error("dca must be > 0");
 
-    return await ctx.db.insert("spot_positions", {
-      ...args,
+    const id = await ctx.db.insert("spot_positions", { ...args, userId: identity.subject });
+    await ctx.db.insert("purchase_history", {
       userId: identity.subject,
+      asset: args.asset,
+      qty: args.amount,
+      price: args.dca,
+      dcaBefore: 0,
+      dcaAfter: args.dca,
+      amountBefore: 0,
+      amountAfter: args.amount,
+      timestamp: Date.now(),
     });
+    return id;
   },
 });
 
@@ -52,16 +60,50 @@ export const updatePosition = mutation({
   },
 });
 
+export const recordPurchase = mutation({
+  args: {
+    asset: v.string(),
+    qty: v.number(),
+    price: v.number(),
+    dcaBefore: v.number(),
+    dcaAfter: v.number(),
+    amountBefore: v.number(),
+    amountAfter: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error("Not authenticated");
+    return ctx.db.insert("purchase_history", {
+      ...args,
+      userId: identity.subject,
+      timestamp: Date.now(),
+    });
+  },
+});
+
+export const listPurchaseHistory = query({
+  args: { asset: v.string() },
+  handler: async (ctx, { asset }) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error("Not authenticated");
+    return ctx.db
+      .query("purchase_history")
+      .withIndex("by_user_asset_time", (q) =>
+        q.eq("userId", identity.subject).eq("asset", asset)
+      )
+      .order("desc")
+      .take(30);
+  },
+});
+
 export const removePosition = mutation({
   args: { id: v.id("spot_positions") },
   handler: async (ctx, { id }) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new Error("Not authenticated");
-
     const pos = await ctx.db.get(id);
     if (!pos) throw new Error("Position not found");
     if (pos.userId !== identity.subject) throw new Error("Forbidden");
-
     await ctx.db.delete(id);
   },
 });

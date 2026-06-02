@@ -733,10 +733,43 @@ function saveProtector(userId, asset, protector) {
   try { localStorage.setItem(protectorKey(userId, asset), JSON.stringify(protector)); } catch (_) {}
 }
 
+function PurchaseHistorySection({ asset }) {
+  const history = useQuery(api.spot_positions.listPurchaseHistory, { asset });
+  if (!history) return <p className="network" style={{ padding: '8px 0' }}>Cargando...</p>;
+  if (!history.length) return <p className="network" style={{ padding: '8px 0' }}>Sin compras registradas.</p>;
+  return (
+    <div className="purchase-history-list">
+      {history.map((h) => {
+        const date = new Date(h.timestamp);
+        const dateStr = date.toLocaleDateString('es', { day: '2-digit', month: '2-digit', year: '2-digit' });
+        const timeStr = date.toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' });
+        const isFirst = h.dcaBefore === 0;
+        return (
+          <div key={h._id} className="purchase-history-row">
+            <div className="purchase-history-left">
+              <span className={`pill ${isFirst ? 'blue' : 'green'}`}>{isFirst ? 'Inicial' : '+ Compra'}</span>
+              <span className="mono">+{h.qty} {h.asset} @ ${h.price.toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
+            </div>
+            <div className="purchase-history-right">
+              {!isFirst && (
+                <span className="network">
+                  DCA {h.dcaBefore.toLocaleString('en-US', { maximumFractionDigits: 0 })} → <strong>${h.dcaAfter.toLocaleString('en-US', { maximumFractionDigits: 0 })}</strong>
+                </span>
+              )}
+              <span className="network">{dateStr} {timeStr}</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabled }) {
   const positionsFromDb = useQuery(api.spot_positions.listMyPositions);
   const addPositionMutation = useMutation(api.spot_positions.addPosition);
   const updatePositionMutation = useMutation(api.spot_positions.updatePosition);
+  const recordPurchaseMutation = useMutation(api.spot_positions.recordPurchase);
   const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
   const executeHlOrder = useAction(api.hyperliquid.executePerpMarketOrder);
   const [positions, setPositions] = React.useState(() =>
@@ -746,6 +779,7 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
   const [addForm, setAddForm] = React.useState({});
   const [openPurchase, setOpenPurchase] = React.useState({});
   const [purchaseForm, setPurchaseForm] = React.useState({});
+  const [openHistory, setOpenHistory] = React.useState({});
   const [drafts, setDrafts] = React.useState(() => {
     const d = {};
     for (const p of INITIAL_SPOT_POSITIONS) {
@@ -904,6 +938,15 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
         console.error('updatePosition failed', err)
       );
     }
+    recordPurchaseMutation({
+      asset,
+      qty,
+      price,
+      dcaBefore: pos.dca,
+      dcaAfter: newDCA,
+      amountBefore: pos.amount,
+      amountAfter: newAmount,
+    }).catch((err) => console.error('recordPurchase failed', err));
     setOpenPurchase((prev) => ({ ...prev, [asset]: false }));
     setPurchaseForm((prev) => ({ ...prev, [asset]: { qty: '', price: '' } }));
   }
@@ -1025,6 +1068,12 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
                   >
                     {openPurchase[position.asset] ? '✕ Cancelar' : '+ Compra'}
                   </button>
+                  <button
+                    className={`mini-btn${openHistory[position.asset] ? ' active' : ''}`}
+                    onClick={() => setOpenHistory((prev) => ({ ...prev, [position.asset]: !prev[position.asset] }))}
+                  >
+                    Historial
+                  </button>
                   <span className="pill">{position.protector?.active ? 'Bot activo' : 'Bot pausado'}</span>
                 </div>
               </div>
@@ -1067,6 +1116,13 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
                   >
                     Confirmar compra
                   </button>
+                </div>
+              )}
+
+              {openHistory[position.asset] && (
+                <div className="spot-history-panel">
+                  <div className="section-sub" style={{ marginTop: 0 }}>Historial de compras — {position.asset}</div>
+                  <PurchaseHistorySection asset={position.asset} />
                 </div>
               )}
 

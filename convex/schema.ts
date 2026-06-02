@@ -123,6 +123,20 @@ export default defineSchema({
   })
     .index("by_user_timestamp", ["userId", "timestamp"]),
 
+  purchase_history: defineTable({
+    userId: v.string(),
+    asset: v.string(),
+    qty: v.number(),
+    price: v.number(),
+    dcaBefore: v.number(),
+    dcaAfter: v.number(),
+    amountBefore: v.number(),
+    amountAfter: v.number(),
+    timestamp: v.number(),
+  })
+    .index("by_user_asset", ["userId", "asset"])
+    .index("by_user_asset_time", ["userId", "asset", "timestamp"]),
+
   system_config: defineTable({
     key: v.string(),
     value: v.any(),

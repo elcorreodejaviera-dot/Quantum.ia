@@ -703,6 +703,23 @@ function SpotPositions({ prices, connected }) {
 
   const walletAddress = userFromDb?.walletAddress ?? null;
   const { spotBalances, loading: spotLoading } = useHyperliquidSpotState(walletAddress);
+  const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
+
+  async function recordSpotSignal(asset, triggerType, price, amount) {
+    try {
+      await recordSignalMutation({
+        action: `DCA compra ${asset}`,
+        asset,
+        amount,
+        price,
+        network: 'Spot',
+        botName: `Bot protector ${asset}`,
+        triggerType,
+      });
+    } catch (err) {
+      console.error('recordSpotSignal failed', err);
+    }
+  }
 
   React.useEffect(() => {
     if (positionsFromDb === undefined) return;
@@ -861,7 +878,13 @@ function SpotPositions({ prices, connected }) {
               <SpotProtectorBot
                 asset={position.asset}
                 protector={position.protector}
+                currentPrice={position.currentPrice}
+                dca={position.dca}
+                hlBalance={hlBalance}
                 onChange={(patch) => updateProtector(position.asset, patch)}
+                onFireSignal={(triggerType, price, amount) =>
+                  recordSpotSignal(position.asset, triggerType, price, amount)
+                }
               />
             </article>
           );
@@ -918,8 +941,46 @@ function SimulationHistory({ signals }) {
   );
 }
 
-function SpotProtectorBot({ asset, protector, onChange }) {
+function SpotProtectorBot({ asset, protector, onChange, currentPrice, dca, hlBalance, onFireSignal }) {
   const [open, setOpen] = React.useState(false);
+  const cooldownRef = React.useRef(0);
+  const COOLDOWN_MS = 60 * 60 * 1000; // 1 hora entre señales auto
+
+  // DCA efectivo: si hay posición HL con entryNtl > 0, usar precio promedio de entrada real
+  const hlDca = hlBalance?.entryNtl > 0 && hlBalance?.total > 0
+    ? hlBalance.entryNtl / hlBalance.total
+    : null;
+  const effectiveDca = hlDca ?? dca;
+
+  // triggerLevel unificado para todos los tipos
+  const triggerLevel =
+    protector.orderType === 'Trigger por caída' && effectiveDca
+      ? effectiveDca * (1 - protector.triggerDrop / 100)
+      : protector.orderType === 'Trigger por precio' && protector.triggerPrice > 0
+        ? protector.triggerPrice
+        : null;
+
+  const isArmed = currentPrice && triggerLevel && currentPrice <= triggerLevel * 1.05;
+
+  // Evaluación automática de trigger en cada tick de precio
+  React.useEffect(() => {
+    if (!protector.active || !currentPrice || !triggerLevel) return;
+    if (protector.orderType === 'Trigger manual') return;
+
+    const now = Date.now();
+    if (now - cooldownRef.current < COOLDOWN_MS) return;
+
+    if (currentPrice <= triggerLevel) {
+      cooldownRef.current = now;
+      const buyAmount = (protector.capitalReserve * protector.buySize) / 100;
+      onFireSignal?.('auto', currentPrice, buyAmount);
+    }
+  }, [currentPrice, triggerLevel, protector.active, protector.orderType, protector.capitalReserve, protector.buySize, onFireSignal]);
+
+  function handleManual() {
+    const buyAmount = (protector.capitalReserve * protector.buySize) / 100;
+    onFireSignal?.('manual', currentPrice ?? 0, buyAmount);
+  }
 
   return (
     <div className="spot-protector">
@@ -932,11 +993,35 @@ function SpotProtectorBot({ asset, protector, onChange }) {
       </div>
 
       <div className="futures-grid">
-        <Metric label="Trigger" value={`${protector.triggerDrop}% caída`} />
+        <Metric
+          label="Trigger"
+          value={
+            protector.orderType === 'Trigger por caída' ? `${protector.triggerDrop}% caída` :
+            protector.orderType === 'Trigger por precio' ? `$${protector.triggerPrice > 0 ? formatPrice(`${asset}/USDC`, protector.triggerPrice) : '—'}` :
+            protector.orderType
+          }
+        />
         <Metric label="Compra" value={`${protector.buySize}%`} />
         <Metric label="Máx. compras" value={protector.maxBuys} />
         <Metric label="Reserva" value={formatUsd(protector.capitalReserve)} />
       </div>
+
+      {(effectiveDca > 0 || triggerLevel) && protector.orderType !== 'Trigger manual' && (
+        <div className="protector-status">
+          {effectiveDca > 0 && (
+            <Metric label={hlDca ? 'DCA HL' : 'DCA manual'} value={`$${formatPrice(`${asset}/USDC`, effectiveDca)}`} />
+          )}
+          {triggerLevel > 0 && (
+            <Metric label="Nivel trigger" value={`$${formatPrice(`${asset}/USDC`, triggerLevel)}`} />
+          )}
+          {currentPrice && triggerLevel > 0 && (
+            <Metric
+              label="Estado"
+              value={currentPrice <= triggerLevel ? '🔴 DISPARO' : isArmed ? '🟡 Cerca' : '🟢 Monitoreo'}
+            />
+          )}
+        </div>
+      )}
 
       <div className="bot-state-actions">
         <button className={`mini-btn ${!protector.active ? 'active' : ''}`} onClick={() => onChange({ active: false })}>Pausar</button>
@@ -945,6 +1030,9 @@ function SpotProtectorBot({ asset, protector, onChange }) {
 
       <div className="wallet-actions">
         <button className="mini-btn" onClick={() => setOpen((value) => !value)}>Configurar</button>
+        {protector.active && (
+          <button className="mini-btn amber" onClick={handleManual}>Disparar manual</button>
+        )}
       </div>
 
       {open && (
@@ -957,7 +1045,14 @@ function SpotProtectorBot({ asset, protector, onChange }) {
             <span className="pill">{protector.orderType}</span>
           </div>
 
-          <ConfigAction title="Trigger" value={`${protector.triggerDrop}% caída`}>
+          <ConfigAction
+            title="Trigger"
+            value={
+              protector.orderType === 'Trigger por caída' ? `${protector.triggerDrop}% caída` :
+              protector.orderType === 'Trigger por precio' ? `$${protector.triggerPrice > 0 ? formatPrice(`${asset}/USDC`, protector.triggerPrice) : '—'}` :
+              protector.orderType
+            }
+          >
             <label className="config-field">
               <span>Tipo de orden</span>
               <select value={protector.orderType} onChange={(event) => onChange({ orderType: event.target.value })}>
@@ -967,20 +1062,34 @@ function SpotProtectorBot({ asset, protector, onChange }) {
                 <option>Trigger manual</option>
               </select>
             </label>
-            <div className="config-field">
-              <span>Caída para comprar más</span>
-              <div className="range-control">
-                <input
-                  type="range"
-                  min="0.5"
-                  max="25"
-                  step="0.5"
-                  value={protector.triggerDrop}
-                  onChange={(event) => onChange({ triggerDrop: Number(event.target.value) })}
-                />
-                <strong>{protector.triggerDrop}%</strong>
+            {protector.orderType === 'Trigger por caída' && (
+              <div className="config-field">
+                <span>Caída para comprar más</span>
+                <div className="range-control">
+                  <input
+                    type="range"
+                    min="0.5"
+                    max="25"
+                    step="0.5"
+                    value={protector.triggerDrop}
+                    onChange={(event) => onChange({ triggerDrop: Number(event.target.value) })}
+                  />
+                  <strong>{protector.triggerDrop}%</strong>
+                </div>
               </div>
-            </div>
+            )}
+            {protector.orderType === 'Trigger por precio' && (
+              <label className="config-field">
+                <span>Precio de disparo</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={protector.triggerPrice ?? 0}
+                  onChange={(event) => onChange({ triggerPrice: Number(event.target.value) })}
+                />
+              </label>
+            )}
           </ConfigAction>
 
           <ConfigAction title="Compra" value={`${protector.buySize}%`}>

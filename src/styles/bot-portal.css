@@ -773,6 +773,18 @@ button {
   color: var(--amber);
 }
 
+/* Protector bot status row */
+.protector-status {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 8px 10px;
+  margin: 6px 0;
+}
+
 /* Simulation banner */
 .sim-banner {
   background: rgba(255, 170, 0, 0.12);

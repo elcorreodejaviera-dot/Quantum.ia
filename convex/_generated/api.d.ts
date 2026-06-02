@@ -9,6 +9,7 @@
  */
 
 import type * as actions_defillama from "../actions/defillama.js";
+import type * as alerts from "../alerts.js";
 import type * as bots from "../bots.js";
 import type * as crons from "../crons.js";
 import type * as helpers from "../helpers.js";
@@ -31,6 +32,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   "actions/defillama": typeof actions_defillama;
+  alerts: typeof alerts;
   bots: typeof bots;
   crons: typeof crons;
   helpers: typeof helpers;

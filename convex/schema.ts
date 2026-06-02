@@ -105,11 +105,23 @@ export default defineSchema({
 
   alerts: defineTable({
     userId: v.id("users"),
-    condition: v.string(),
-    threshold: v.number(),
+    alertType: v.union(v.literal("out_of_range"), v.literal("apy_below"), v.literal("price_cross")),
+    pair: v.string(),
+    network: v.optional(v.string()),
+    threshold: v.optional(v.number()),
     active: v.boolean(),
+    lastTriggeredAt: v.optional(v.number()),
   })
     .index("by_userId", ["userId"]),
+
+  alert_history: defineTable({
+    userId: v.id("users"),
+    alertType: v.string(),
+    pair: v.string(),
+    message: v.string(),
+    timestamp: v.number(),
+  })
+    .index("by_user_timestamp", ["userId", "timestamp"]),
 
   system_config: defineTable({
     key: v.string(),

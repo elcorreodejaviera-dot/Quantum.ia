@@ -435,7 +435,7 @@ function getSignalMeta(bot, pools, prices) {
   return { asset: 'POOL', price: 0, network: 'Arbitrum' };
 }
 
-function BotCard({ bot, onSetActive, onMode, onConfig, onManualTrigger }) {
+function BotCard({ bot, onSetActive, onMode, onConfig, onManualTrigger, isAdmin, userLoaded }) {
   const tone = bot.active ? 'green' : 'faint';
   const [configOpen, setConfigOpen] = React.useState(false);
   const wallet = WALLETS.find((item) => item.id === bot.walletId);
@@ -454,7 +454,10 @@ function BotCard({ bot, onSetActive, onMode, onConfig, onManualTrigger }) {
           <div className="bot-name">{bot.name}</div>
           <div className="network">{bot.action}</div>
         </div>
-        <span className={`pill ${tone}`}>{bot.active ? 'Activo' : 'Pausado'}</span>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          {userLoaded && !isAdmin && <span className="pill faint" title="Solo lectura">Lectura</span>}
+          <span className={`pill ${tone}`}>{bot.active ? 'Activo' : 'Pausado'}</span>
+        </div>
       </div>
       <div className="bot-row">
         <span>
@@ -467,9 +470,9 @@ function BotCard({ bot, onSetActive, onMode, onConfig, onManualTrigger }) {
       <div className="bot-row">
         <span>Modo: <strong className={bot.mode === 'Long' ? 'blue' : 'cyan'}>{bot.mode}</strong></span>
         <div className="bot-actions">
-          <button className={`mini-btn ${bot.mode === 'Long' ? 'active' : ''}`} onClick={() => onMode(bot.id, 'Long')}>Long</button>
-          <button className={`mini-btn ${bot.mode === 'Short' ? 'active' : ''}`} onClick={() => onMode(bot.id, 'Short')}>Short</button>
-          <button className={`mini-btn ${bot.mode === 'Long + Short' ? 'active' : ''}`} onClick={() => onMode(bot.id, 'Long + Short')}>Long + Short</button>
+          <button className={`mini-btn ${bot.mode === 'Long' ? 'active' : ''}`} onClick={() => onMode(bot.id, 'Long')} disabled={!isAdmin}>Long</button>
+          <button className={`mini-btn ${bot.mode === 'Short' ? 'active' : ''}`} onClick={() => onMode(bot.id, 'Short')} disabled={!isAdmin}>Short</button>
+          <button className={`mini-btn ${bot.mode === 'Long + Short' ? 'active' : ''}`} onClick={() => onMode(bot.id, 'Long + Short')} disabled={!isAdmin}>Long + Short</button>
         </div>
       </div>
       <div className="futures-summary">
@@ -486,14 +489,14 @@ function BotCard({ bot, onSetActive, onMode, onConfig, onManualTrigger }) {
         </div>
       </div>
       <div className="bot-state-actions">
-        <button className={`mini-btn ${!bot.active ? 'active' : ''}`} onClick={() => onSetActive(bot.id, false)}>Pausar</button>
-        <button className={`mini-btn ${bot.active ? 'active' : ''}`} onClick={() => onSetActive(bot.id, true)}>Activar</button>
+        <button className={`mini-btn ${!bot.active ? 'active' : ''}`} onClick={() => onSetActive(bot.id, false)} disabled={!isAdmin}>Pausar</button>
+        <button className={`mini-btn ${bot.active ? 'active' : ''}`} onClick={() => onSetActive(bot.id, true)} disabled={!isAdmin}>Activar</button>
       </div>
       <div className="wallet-actions">
-        <button className="mini-btn" onClick={() => setConfigOpen((value) => !value)}>Configurar</button>
+        <button className="mini-btn" onClick={() => setConfigOpen((value) => !value)} disabled={!isAdmin}>Configurar</button>
         <button className="mini-btn">Escanear wallet</button>
         <button className="mini-btn">Token ID de pool {bot.poolTokenId}</button>
-        {bot.simulationMode && (
+        {bot.simulationMode && isAdmin && (
           <button className="mini-btn amber" onClick={() => onManualTrigger?.(bot)}>
             Disparar señal
           </button>
@@ -782,7 +785,7 @@ function PurchaseHistorySection({ asset }) {
   );
 }
 
-function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabled }) {
+function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabled, isAdmin, userLoaded }) {
   const positionsFromDb = useQuery(api.spot_positions.listMyPositions);
   const addPositionMutation = useMutation(api.spot_positions.addPosition);
   const updatePositionMutation = useMutation(api.spot_positions.updatePosition);
@@ -1169,6 +1172,8 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
                   tradingEnabled={tradingEnabled}
                   onChange={(patch) => updateProtector(position.asset, patch)}
                   onFireSignal={(triggerType, price, amount) => recordSpotSignal(position.asset, triggerType, price, amount, position.protector)}
+                  isAdmin={isAdmin}
+                  userLoaded={userLoaded}
                 />
               )}
             </article>
@@ -1320,7 +1325,7 @@ function AlertsPanel({ alerts, history, onCreate, onDelete }) {
 
 const EVM_RE_PROTECTOR = /^0x[a-fA-F0-9]{40}$/;
 
-function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulationMode, tradingEnabled, onFireSignal }) {
+function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulationMode, tradingEnabled, onFireSignal, isAdmin, userLoaded }) {
   const hlWallet = protector.hlWallet ?? '';
   const validWallet = EVM_RE_PROTECTOR.test(hlWallet);
   const { account: hlAccount, loading: hlBalLoading, error: hlBalError } = useHLAccountBalance(validWallet ? hlWallet : null);
@@ -1533,12 +1538,13 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulation
       </div>
 
       <div className="bot-state-actions">
-        <button className={`mini-btn ${!protector.active ? 'active' : ''}`} onClick={() => onChange({ active: false })}>Pausar</button>
-        <button className={`mini-btn ${protector.active ? 'active' : ''}`} onClick={() => onChange({ active: true })}>Activar</button>
+        <button className={`mini-btn ${!protector.active ? 'active' : ''}`} onClick={() => onChange({ active: false })} disabled={!isAdmin}>Pausar</button>
+        <button className={`mini-btn ${protector.active ? 'active' : ''}`} onClick={() => onChange({ active: true })} disabled={!isAdmin}>Activar</button>
         <span className={`pill${!simulationMode && tradingEnabled ? ' green' : ' amber'}`}>
           {!simulationMode && tradingEnabled ? 'LIVE HL' : 'SIM'}
         </span>
-        {protector.active && (
+        {userLoaded && !isAdmin && <span className="pill faint" title="Solo lectura">Lectura</span>}
+        {protector.active && isAdmin && (
           <button className="mini-btn amber" onClick={handleManual}>Disparar manual</button>
         )}
       </div>
@@ -1688,6 +1694,7 @@ function Dashboard({ user, onLogout, userId }) {
   const setSimulationModeMutation = useMutation(api.systemConfig.setSimulationMode);
   const setTradingEnabledMutation = useMutation(api.systemConfig.setTradingEnabled);
   const currentUser = useQuery(api.users.getUser, {});
+  const userLoaded = currentUser !== undefined;
   const isAdmin = currentUser?.role === 'admin';
   const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
   const signals = useQuery(api.tradesHistory.listSignals, {});
@@ -1924,6 +1931,7 @@ function Dashboard({ user, onLogout, userId }) {
           <button className="ghost-btn" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
             {theme === 'dark' ? 'Modo blanco' : 'Modo oscuro'}
           </button>
+          {userLoaded && !isAdmin && <span className="pill faint">Solo lectura</span>}
           <span className="pill">{user.name}</span>
           <button className="ghost-btn" onClick={onLogout}>Salir</button>
         </div>
@@ -1985,6 +1993,8 @@ function Dashboard({ user, onLogout, userId }) {
               userId={userId}
               simulationMode={simulationMode}
               tradingEnabled={tradingEnabled}
+              isAdmin={isAdmin}
+              userLoaded={userLoaded}
             />
             <SimulationHistory signals={signals} />
             <AlertsPanel
@@ -2003,7 +2013,7 @@ function Dashboard({ user, onLogout, userId }) {
               </div>
               <div className="bot-list">
                 {bots.map((bot) => (
-                  <BotCard key={bot.id} bot={bot} onSetActive={setBotActive} onMode={setBotMode} onConfig={updateBotConfig} onManualTrigger={handleManualTrigger} />
+                  <BotCard key={bot.id} bot={bot} onSetActive={setBotActive} onMode={setBotMode} onConfig={updateBotConfig} onManualTrigger={handleManualTrigger} isAdmin={isAdmin} userLoaded={userLoaded} />
                 ))}
               </div>
             </section>

@@ -85,6 +85,9 @@ export default defineSchema({
     botId: v.optional(v.id("bots")),
     botName: v.optional(v.string()),
     triggerType: v.optional(v.string()),
+    exchangeStatus: v.optional(v.string()),
+    orderId: v.optional(v.string()),
+    exchangeResponse: v.optional(v.any()),
   })
     .index("by_userId", ["userId"])
     .index("by_timestamp", ["timestamp"])

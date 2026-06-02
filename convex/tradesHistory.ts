@@ -1,4 +1,4 @@
-import { mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { requireUser } from "./helpers";
 
@@ -27,6 +27,39 @@ export const recordSignal = mutation({
       botId: args.botId,
       botName: args.botName,
       triggerType: args.triggerType ?? "auto",
+    });
+  },
+});
+
+export const recordExecution = internalMutation({
+  args: {
+    userId: v.id("users"),
+    action: v.string(),
+    asset: v.string(),
+    amount: v.number(),
+    price: v.number(),
+    network: v.string(),
+    botName: v.optional(v.string()),
+    triggerType: v.optional(v.string()),
+    exchangeStatus: v.string(),
+    orderId: v.optional(v.string()),
+    exchangeResponse: v.optional(v.any()),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db.insert("trades_history", {
+      userId: args.userId,
+      action: args.action,
+      asset: args.asset,
+      amount: args.amount,
+      price: args.price,
+      simulated: false,
+      network: args.network,
+      timestamp: Date.now(),
+      botName: args.botName,
+      triggerType: args.triggerType ?? "manual",
+      exchangeStatus: args.exchangeStatus,
+      orderId: args.orderId,
+      exchangeResponse: args.exchangeResponse,
     });
   },
 });

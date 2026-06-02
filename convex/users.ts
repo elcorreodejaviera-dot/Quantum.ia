@@ -1,6 +1,13 @@
-import { mutation, query } from "./_generated/server";
+import { internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
-import { requireAuth, requireUser } from "./helpers";
+import { requireAdmin, requireAuth, requireUser } from "./helpers";
+
+export const getCurrentAdminInternal = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    return await requireAdmin(ctx);
+  },
+});
 
 export const getOrCreateUser = mutation({
   args: {},

@@ -1,4 +1,4 @@
-import { mutation, query } from "./_generated/server";
+import { internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { requireAuth, requireAdmin } from "./helpers";
 
@@ -6,6 +6,16 @@ export const getConfig = query({
   args: { key: v.string() },
   handler: async (ctx, { key }) => {
     await requireAuth(ctx);
+    return await ctx.db
+      .query("system_config")
+      .withIndex("by_key", (q) => q.eq("key", key))
+      .first();
+  },
+});
+
+export const getConfigInternal = internalQuery({
+  args: { key: v.string() },
+  handler: async (ctx, { key }) => {
     return await ctx.db
       .query("system_config")
       .withIndex("by_key", (q) => q.eq("key", key))

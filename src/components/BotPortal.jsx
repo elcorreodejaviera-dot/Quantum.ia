@@ -1,6 +1,6 @@
 import React from 'react'
 import { useUser, useClerk } from '@clerk/clerk-react'
-import { useConvexAuth, useQuery, useMutation } from 'convex/react'
+import { useConvexAuth, useQuery, useMutation, useAction } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState, useWalletBalances, useHLAccountBalance } from '../hooks/useHyperliquid'
 
@@ -663,7 +663,7 @@ function RiskPanel({ pools }) {
   );
 }
 
-const DEFAULT_PROTECTOR = { active: true, leverage: 4, buySize: 15, maxBuys: 3, capitalReserve: 5000, orderType: 'Cobertura DCA', takeProfit: 'Rebajar DCA', hlWallet: '', stopLoss: 1, tradeAmount: 0, moveSlToBE: false, moveSlToBEAt: 1 };
+const DEFAULT_PROTECTOR = { active: true, side: 'Short', leverage: 4, buySize: 15, maxBuys: 3, capitalReserve: 5000, orderType: 'Cobertura DCA', takeProfit: 'Rebajar DCA', hlWallet: '', stopLoss: 1, tradeAmount: 0, moveSlToBE: false, moveSlToBEAt: 1 };
 
 function HLMarketPanel() {
   const [hlSearch, setHlSearch] = React.useState('');
@@ -714,9 +714,10 @@ function saveProtector(userId, asset, protector) {
   try { localStorage.setItem(protectorKey(userId, asset), JSON.stringify(protector)); } catch (_) {}
 }
 
-function SpotPositions({ prices, connected, userId }) {
+function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabled }) {
   const positionsFromDb = useQuery(api.spot_positions.listMyPositions);
   const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
+  const executeHlOrder = useAction(api.hyperliquid.executePerpMarketOrder);
   const [positions, setPositions] = React.useState(() =>
     INITIAL_SPOT_POSITIONS.map(p => ({ ...p, protector: loadProtector(userId, p.asset) }))
   );
@@ -742,10 +743,28 @@ function SpotPositions({ prices, connected, userId }) {
       const lev = protector?.leverage ?? 0;
       const sl = protector?.stopLoss ?? 1;
       const be = protector?.moveSlToBE ? ` BE@${protector.moveSlToBEAt ?? 1}%` : '';
-      const action = `Cobertura ${asset} ${lev}x SL${sl}%${be}`;
-      await recordSignalMutation({ action, asset, amount, price, network: 'Spot', botName: `Bot protector ${asset}`, triggerType });
-    } catch (_) {}
-  }, [recordSignalMutation]);
+      const side = protector?.side ?? 'Short';
+      const action = `Cobertura ${side} ${asset} ${lev}x SL${sl}%${be}`;
+
+      if (simulationMode || !tradingEnabled) {
+        await recordSignalMutation({ action, asset, amount, price, network: 'Spot', botName: `Bot protector ${asset}`, triggerType });
+        return;
+      }
+
+      await executeHlOrder({
+        asset,
+        side,
+        tradeAmount: amount,
+        price,
+        leverage: lev,
+        stopLoss: sl,
+        triggerType,
+        confirmLive: true,
+      });
+    } catch (error) {
+      console.error('Failed to execute spot protector signal', error);
+    }
+  }, [executeHlOrder, recordSignalMutation, simulationMode, tradingEnabled]);
 
   const EVM_RE_AUTO = /^0x[a-fA-F0-9]{40}$/;
 
@@ -756,6 +775,7 @@ function SpotPositions({ prices, connected, userId }) {
       if (!p?.active || !pos.currentPrice || p.orderType === 'Trigger manual') continue;
       if (!p.tradeAmount || p.tradeAmount <= 0) continue;             // guard: monto configurado
       if (!p.hlWallet || !EVM_RE_AUTO.test(p.hlWallet)) continue;     // guard: wallet HL válida
+      if (!simulationMode && !tradingEnabled) continue;               // guard: no live without backend flag
       const now = Date.now();
       if (now - (cooldownRef.current[pos.asset] ?? 0) < COOLDOWN_MS) continue;
       if (pos.currentPrice <= pos.dca) {
@@ -763,7 +783,7 @@ function SpotPositions({ prices, connected, userId }) {
         recordSpotSignal(pos.asset, 'auto', pos.currentPrice, p.tradeAmount, p);
       }
     }
-  }, [positions, recordSpotSignal]);
+  }, [positions, recordSpotSignal, simulationMode, tradingEnabled]);
 
   function updateProtector(asset, patch) {
     setPositions((items) => items.map((item) => {
@@ -783,6 +803,9 @@ function SpotPositions({ prices, connected, userId }) {
       <div className="section-head">
         <h2>Posiciones spot</h2>
         <span className={`pill${connected ? ' green' : ''}`}>{connected ? 'HL en vivo' : 'Conectando...'}</span>
+        <span className={`pill${!simulationMode && tradingEnabled ? ' green' : ' amber'}`}>
+          {!simulationMode && tradingEnabled ? 'Ejecución HL' : 'SIM'}
+        </span>
       </div>
       <div className="spot-list">
         {positions.map((position) => {
@@ -807,6 +830,8 @@ function SpotPositions({ prices, connected, userId }) {
                   asset={position.asset}
                   protector={position.protector}
                   currentPrice={position.currentPrice}
+                  simulationMode={simulationMode}
+                  tradingEnabled={tradingEnabled}
                   onChange={(patch) => updateProtector(position.asset, patch)}
                   onFireSignal={(triggerType, price, amount) => recordSpotSignal(position.asset, triggerType, price, amount, position.protector)}
                 />
@@ -868,13 +893,14 @@ function SimulationHistory({ signals }) {
 
 const EVM_RE_PROTECTOR = /^0x[a-fA-F0-9]{40}$/;
 
-function SpotProtectorBot({ asset, protector, onChange, currentPrice, onFireSignal }) {
+function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulationMode, tradingEnabled, onFireSignal }) {
   const hlWallet = protector.hlWallet ?? '';
   const validWallet = EVM_RE_PROTECTOR.test(hlWallet);
   const { account: hlAccount, loading: hlBalLoading, error: hlBalError } = useHLAccountBalance(validWallet ? hlWallet : null);
 
   function handleManual() {
     if (!protector.active) return;
+    if (!protector.tradeAmount || protector.tradeAmount <= 0) return;
     onFireSignal?.('manual', currentPrice ?? 0, protector.tradeAmount ?? 0);
   }
 
@@ -941,6 +967,14 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, onFireSign
       )}
 
       {/* Leverage */}
+      <label className="config-field" style={{ padding: '4px 0' }}>
+        <span>Dirección cobertura</span>
+        <select value={protector.side ?? 'Short'} onChange={(e) => onChange({ side: e.target.value })}>
+          <option>Short</option>
+          <option>Long</option>
+        </select>
+      </label>
+
       <div className="config-field" style={{ padding: '4px 0' }}>
         <span>Leverage de cobertura</span>
         <div className="range-control">
@@ -1010,6 +1044,9 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, onFireSign
       <div className="bot-state-actions">
         <button className={`mini-btn ${!protector.active ? 'active' : ''}`} onClick={() => onChange({ active: false })}>Pausar</button>
         <button className={`mini-btn ${protector.active ? 'active' : ''}`} onClick={() => onChange({ active: true })}>Activar</button>
+        <span className={`pill${!simulationMode && tradingEnabled ? ' green' : ' amber'}`}>
+          {!simulationMode && tradingEnabled ? 'LIVE HL' : 'SIM'}
+        </span>
         {protector.active && (
           <button className="mini-btn amber" onClick={handleManual}>Disparar manual</button>
         )}
@@ -1031,6 +1068,8 @@ function Dashboard({ user, onLogout, userId }) {
   const { funding } = useHyperliquidFunding();
   const simModeConfig = useQuery(api.systemConfig.getConfig, { key: "simulationMode" });
   const simulationMode = simModeConfig?.value ?? true;
+  const tradingEnabledConfig = useQuery(api.systemConfig.getConfig, { key: "tradingEnabled" });
+  const tradingEnabled = tradingEnabledConfig?.value ?? false;
   const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
   const signals = useQuery(api.tradesHistory.listSignals, {});
   const signalCooldownRef = React.useRef({});
@@ -1222,7 +1261,13 @@ function Dashboard({ user, onLogout, userId }) {
                 {filteredPools.map((pool) => <PoolCard key={pool.id} pool={pool} />)}
               </div>
             </section>
-            <SpotPositions prices={prices} connected={connected} userId={userId} />
+            <SpotPositions
+              prices={prices}
+              connected={connected}
+              userId={userId}
+              simulationMode={simulationMode}
+              tradingEnabled={tradingEnabled}
+            />
             <SimulationHistory signals={signals} />
           </div>
 

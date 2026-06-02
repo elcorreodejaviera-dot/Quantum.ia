@@ -12,6 +12,7 @@ import type * as actions_defillama from "../actions/defillama.js";
 import type * as bots from "../bots.js";
 import type * as crons from "../crons.js";
 import type * as helpers from "../helpers.js";
+import type * as hyperliquid from "../hyperliquid.js";
 import type * as pools from "../pools.js";
 import type * as seed from "../seed.js";
 import type * as spot_positions from "../spot_positions.js";
@@ -31,6 +32,7 @@ declare const fullApi: ApiFromModules<{
   bots: typeof bots;
   crons: typeof crons;
   helpers: typeof helpers;
+  hyperliquid: typeof hyperliquid;
   pools: typeof pools;
   seed: typeof seed;
   spot_positions: typeof spot_positions;

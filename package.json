@@ -14,10 +14,12 @@
   },
   "dependencies": {
     "@clerk/clerk-react": "^5.61.7",
+    "@nktkas/hyperliquid": "^0.32.2",
     "convex": "^1.39.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^7.15.1"
+    "react-router-dom": "^7.15.1",
+    "viem": "^2.52.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",

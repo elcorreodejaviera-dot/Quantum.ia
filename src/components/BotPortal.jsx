@@ -744,6 +744,8 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
   );
   const [openAssets, setOpenAssets] = React.useState({});
   const [addForm, setAddForm] = React.useState({});
+  const [openPurchase, setOpenPurchase] = React.useState({});
+  const [purchaseForm, setPurchaseForm] = React.useState({});
   const [drafts, setDrafts] = React.useState(() => {
     const d = {};
     for (const p of INITIAL_SPOT_POSITIONS) {
@@ -871,6 +873,41 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
     setOpenAssets(prev => ({ ...prev, [asset]: !prev[asset] }));
   }
 
+  function togglePurchase(asset) {
+    setOpenPurchase((prev) => ({ ...prev, [asset]: !prev[asset] }));
+    setPurchaseForm((prev) => ({ ...prev, [asset]: { qty: '', price: '' } }));
+  }
+
+  function calcNewDCA(currentAmount, currentDCA, addQty, addPrice) {
+    const newAmount = currentAmount + addQty;
+    const newDCA = (currentAmount * currentDCA + addQty * addPrice) / newAmount;
+    return { newDCA, newAmount };
+  }
+
+  async function handleRegisterPurchase(asset) {
+    const form = purchaseForm[asset] ?? {};
+    const qty = parseFloat(form.qty);
+    const price = parseFloat(form.price);
+    if (!qty || qty <= 0 || !price || price <= 0) return;
+    const pos = positions.find((p) => p.asset === asset);
+    if (!pos) return;
+    const { newDCA, newAmount } = calcNewDCA(pos.amount, pos.dca, qty, price);
+    setPositions((items) => items.map((item) =>
+      item.asset !== asset ? item : { ...item, dca: newDCA, amount: newAmount }
+    ));
+    setDrafts((prev) => ({
+      ...prev,
+      [asset]: { dca: String(Math.round(newDCA)), amount: String(+newAmount.toFixed(8)) },
+    }));
+    if (pos.id) {
+      updatePositionMutation({ id: pos.id, dca: newDCA, amount: newAmount }).catch((err) =>
+        console.error('updatePosition failed', err)
+      );
+    }
+    setOpenPurchase((prev) => ({ ...prev, [asset]: false }));
+    setPurchaseForm((prev) => ({ ...prev, [asset]: { qty: '', price: '' } }));
+  }
+
   return (
     <section className="panel">
       <div className="section-head">
@@ -924,6 +961,12 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
           const pnl = currentVal != null ? currentVal - invested : null;
           const pnlPositive = pnl != null && pnl >= 0;
           const pnlPct = pnl != null && invested > 0 ? (pnl / invested) * 100 : null;
+          const pForm = purchaseForm[position.asset] ?? {};
+          const addQty = parseFloat(pForm.qty);
+          const addPrice = parseFloat(pForm.price);
+          const purchasePreview = addQty > 0 && addPrice > 0
+            ? calcNewDCA(position.amount, position.dca, addQty, addPrice)
+            : null;
 
           return (
             <article className="spot-card" key={position.asset}>
@@ -976,9 +1019,56 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
                   </div>
                 </div>
                 <div className="spot-collapse-right">
+                  <button
+                    className={`mini-btn${openPurchase[position.asset] ? ' amber' : ''}`}
+                    onClick={() => togglePurchase(position.asset)}
+                  >
+                    {openPurchase[position.asset] ? '✕ Cancelar' : '+ Compra'}
+                  </button>
                   <span className="pill">{position.protector?.active ? 'Bot activo' : 'Bot pausado'}</span>
                 </div>
               </div>
+
+              {openPurchase[position.asset] && (
+                <div className="spot-purchase-form">
+                  <label className="spot-inline-field">
+                    <span>Cantidad comprada ({position.asset})</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.0001"
+                      placeholder="ej. 0.10"
+                      value={pForm.qty ?? ''}
+                      onChange={(e) => setPurchaseForm((prev) => ({ ...prev, [position.asset]: { ...prev[position.asset], qty: e.target.value } }))}
+                    />
+                  </label>
+                  <label className="spot-inline-field">
+                    <span>Precio pagado (USD)</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      placeholder="ej. 58000"
+                      value={pForm.price ?? ''}
+                      onChange={(e) => setPurchaseForm((prev) => ({ ...prev, [position.asset]: { ...prev[position.asset], price: e.target.value } }))}
+                    />
+                  </label>
+                  {purchasePreview && (
+                    <div className="spot-purchase-preview">
+                      <span>Nuevo DCA <strong>${formatPrice(`${position.asset}/USDC`, purchasePreview.newDCA)}</strong></span>
+                      <span>Nueva cantidad <strong>{+purchasePreview.newAmount.toFixed(8)} {position.asset}</strong></span>
+                      <span>Nuevo invertido <strong>{formatUsd(purchasePreview.newDCA * purchasePreview.newAmount)}</strong></span>
+                    </div>
+                  )}
+                  <button
+                    className="mini-btn active"
+                    onClick={() => handleRegisterPurchase(position.asset)}
+                    disabled={!purchasePreview}
+                  >
+                    Confirmar compra
+                  </button>
+                </div>
+              )}
 
               {isOpen && (
                 <SpotProtectorBot

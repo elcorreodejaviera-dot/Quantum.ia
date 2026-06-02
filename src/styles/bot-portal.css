@@ -1085,6 +1085,34 @@ button {
 .spot-calc-value.positive { color: var(--green); }
 .spot-calc-value.negative { color: var(--red); }
 
+/* Purchase form */
+.spot-purchase-form {
+  align-items: flex-end;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 14px 12px;
+}
+
+.spot-purchase-preview {
+  align-items: center;
+  background: rgba(0, 200, 5, 0.06);
+  border: 1px solid rgba(0, 200, 5, 0.25);
+  border-radius: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 14px;
+  padding: 6px 12px;
+  width: 100%;
+}
+
+.spot-purchase-preview strong {
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
 .spot-collapse-right {
   display: flex;
   align-items: center;

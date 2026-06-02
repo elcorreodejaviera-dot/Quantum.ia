@@ -699,30 +699,14 @@ function HLMarketPanel() {
   );
 }
 
-const WALLET_NETWORKS = ['Ethereum', 'Arbitrum', 'Base', 'Optimism', 'Bitcoin'];
-
 function SpotPositions({ prices, connected }) {
   const positionsFromDb = useQuery(api.spot_positions.listMyPositions);
-  const myWallets = useQuery(api.wallets.listMyWallets) ?? [];
-  const addMyWalletMutation = useMutation(api.wallets.addMyWallet);
-  const removeMyWalletMutation = useMutation(api.wallets.removeMyWallet);
   const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
-
   const [positions, setPositions] = React.useState(INITIAL_SPOT_POSITIONS);
-  const [hlOpen, setHlOpen] = React.useState(false);
-  const [showAddWallet, setShowAddWallet] = React.useState(false);
-  const [newAddr, setNewAddr] = React.useState('');
-  const [newLabel, setNewLabel] = React.useState('');
-  const [newNetwork, setNewNetwork] = React.useState('Base');
-  const [addError, setAddError] = React.useState('');
-
-  // Primera wallet EVM para HL perp
-  const firstEvmWallet = myWallets.find(w => w.network !== 'Bitcoin');
-  const { perpPositions, loading: hlLoading, error: hlError } = useHyperliquidSpotState(firstEvmWallet?.address ?? null);
-  const { balances: onChainBalances, walletTokens, loading: chainLoading, error: chainError } = useWalletBalances(myWallets);
+  const [openAssets, setOpenAssets] = React.useState({});
 
   React.useEffect(() => {
-    if (!positionsFromDb?.length) return; // vacío o cargando → mantener INITIAL_SPOT_POSITIONS
+    if (!positionsFromDb?.length) return;
     setPositions(positionsFromDb.map((p) => ({
       ...p, id: p._id, currentPrice: null, protector: DEFAULT_PROTECTOR,
     })));
@@ -734,255 +718,52 @@ function SpotPositions({ prices, connected }) {
     })));
   }, [prices]);
 
-  async function handleAddWallet() {
-    setAddError('');
-    try {
-      await addMyWalletMutation({ label: newLabel, address: newAddr, network: newNetwork });
-      setNewAddr(''); setNewLabel(''); setShowAddWallet(false);
-    } catch (err) {
-      setAddError(err.message ?? 'Error al guardar');
-    }
-  }
-
   const recordSpotSignal = React.useCallback(async (asset, triggerType, price, amount) => {
     try {
-      await recordSignalMutation({ action: `DCA compra ${asset}`, asset, amount, price, network: 'Spot', botName: `Bot protector ${asset}`, triggerType });
+      await recordSignalMutation({ action: `Cobertura ${asset}`, asset, amount, price, network: 'Spot', botName: `Bot protector ${asset}`, triggerType });
     } catch (_) {}
   }, [recordSignalMutation]);
 
-  function updatePosition(asset, patch) {
-    setPositions((items) => items.map((item) => item.asset === asset ? { ...item, ...patch } : item));
-  }
   function updateProtector(asset, patch) {
     setPositions((items) => items.map((item) => item.asset === asset ? { ...item, protector: { ...item.protector, ...patch } } : item));
   }
 
-  const [openAssets, setOpenAssets] = React.useState({});
   function toggleAsset(asset) {
     setOpenAssets(prev => ({ ...prev, [asset]: !prev[asset] }));
   }
-
-  // Evaluación automática del bot protector — siempre activa, independiente del colapso
-  const protectorCooldownRef = React.useRef({});
-  const PROTECTOR_COOLDOWN_MS = 60 * 60 * 1000;
-
-  React.useEffect(() => {
-    for (const position of positions) {
-      const protector = position.protector;
-      if (!protector?.active || !position.currentPrice) continue;
-      if (protector.orderType === 'Trigger manual') continue;
-
-      const perpPos = perpPositions[position.asset] ?? null;
-      const hlDca = perpPos?.entryPx > 0 ? perpPos.entryPx : null;
-      const effectiveDca = hlDca ?? position.dca;
-
-      const triggerLevel =
-        protector.orderType === 'Cobertura DCA' && effectiveDca
-          ? effectiveDca   // dispara cuando precio cae al nivel DCA
-          : protector.orderType === 'Trigger por precio' && protector.triggerPrice > 0
-            ? protector.triggerPrice
-            : null;
-
-      if (!triggerLevel) continue;
-
-      const now = Date.now();
-      const lastFired = protectorCooldownRef.current[position.asset] ?? 0;
-      if (now - lastFired < PROTECTOR_COOLDOWN_MS) continue;
-
-      if (position.currentPrice <= triggerLevel) {
-        protectorCooldownRef.current[position.asset] = now;
-        const buyAmount = (protector.capitalReserve * protector.buySize) / 100;
-        recordSpotSignal(position.asset, 'auto', position.currentPrice, buyAmount);
-      }
-    }
-  }, [positions, perpPositions, recordSpotSignal]);
 
   return (
     <section className="panel">
       <div className="section-head">
         <h2>Posiciones spot</h2>
-        <span className="pill">BTC / ETH</span>
         <span className={`pill${connected ? ' green' : ''}`}>{connected ? 'HL en vivo' : 'Conectando...'}</span>
       </div>
-
-      {/* Panel de wallets */}
-      <div className="wallet-manager">
-        <div className="wallet-manager-head">
-          <span className="hl-position-label">Mis wallets ({myWallets.length})</span>
-          {chainLoading && <span className="network"> Leyendo balances...</span>}
-          <button className="mini-btn" onClick={() => setShowAddWallet(v => !v)}>
-            {showAddWallet ? 'Cancelar' : '+ Añadir wallet'}
-          </button>
-        </div>
-
-        {myWallets.length > 0 && (
-          <div className="wallet-list-compact">
-            {myWallets.map(w => (
-              <div key={w._id} className="wallet-compact-row">
-                <span className="pill">{w.network}</span>
-                <span className="network mono">{w.label} · {w.address.slice(0, 6)}…{w.address.slice(-4)}</span>
-                <button className="mini-btn" style={{ marginLeft: 'auto' }} onClick={() => removeMyWalletMutation({ id: w._id })}>×</button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {showAddWallet && (
-          <div className="wallet-add-form">
-            <select className="hl-search" style={{ margin: 0 }} value={newNetwork} onChange={e => setNewNetwork(e.target.value)}>
-              {WALLET_NETWORKS.map(n => <option key={n}>{n}</option>)}
-            </select>
-            <input className="hl-search" style={{ margin: 0 }} placeholder="Dirección (0x... o bc1...)" value={newAddr} onChange={e => { setNewAddr(e.target.value); setAddError(''); }} />
-            <input className="hl-search" style={{ margin: 0 }} placeholder="Etiqueta (ej: Mi Metamask)" value={newLabel} onChange={e => setNewLabel(e.target.value)} />
-            <button className="mini-btn" onClick={handleAddWallet}>Guardar</button>
-            {addError && <span style={{ fontSize: 11, color: 'var(--red,#f44)', gridColumn: '1/-1' }}>{addError}</span>}
-          </div>
-        )}
-        {chainError && <p className="network" style={{ color: 'var(--red,#f44)', marginTop: 4 }}>{chainError}</p>}
-
-        {/* Saldos detallados por wallet */}
-        {Object.values(walletTokens).map((wt) => (
-          <div key={wt.address} className="wallet-token-block">
-            <div className="wallet-token-head">
-              <span className="pill">{wt.network}</span>
-              <span className="network mono">{wt.label} · {wt.address.slice(0, 6)}…{wt.address.slice(-4)}</span>
-            </div>
-            <div className="wallet-token-grid">
-              {Object.entries(wt.tokens)
-                .sort(([, a], [, b]) => b - a)
-                .map(([symbol, amount]) => (
-                  <div key={symbol} className="wallet-token-row">
-                    <span className="hl-asset">{symbol}</span>
-                    <span className="mono">{amount < 0.0001 ? amount.toExponential(2) : amount.toFixed(symbol === 'ETH' || symbol === 'WETH' ? 6 : symbol === 'WBTC' || symbol === 'cbBTC' || symbol === 'BTC' ? 8 : 2)}</span>
-                  </div>
-                ))}
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <div className="hl-market-toggle">
-        <button className="mini-btn" onClick={() => setHlOpen(v => !v)}>
-          {hlOpen ? 'Ocultar mercado HL' : 'Ver mercado HL'}
-        </button>
-      </div>
-      {hlOpen && <HLMarketPanel />}
-
       <div className="spot-list">
         {positions.map((position) => {
           const hasPrice = position.currentPrice != null;
-          const cost = position.amount * position.dca;
-          const value = hasPrice ? position.amount * position.currentPrice : null;
-          const pnl = hasPrice ? value - cost : null;
-          const pnlPct = hasPrice && cost > 0 ? (pnl / cost) * 100 : null;
-          const tone = pnl == null ? '' : pnl >= 0 ? 'green' : 'red';
-
-          const perpPos = perpPositions[position.asset] ?? null;
-          const hlPnlTone = perpPos == null ? '' : perpPos.unrealizedPnl >= 0 ? 'green' : 'red';
-          const onChain = onChainBalances[position.asset] ?? null;
-          const onChainValue = onChain && hasPrice ? onChain.total * position.currentPrice : null;
-          const onChainPnl = onChainValue != null && position.dca > 0 ? onChainValue - onChain.total * position.dca : null;
-          const onChainPnlPct = onChainPnl != null && onChain.total > 0 && position.dca > 0 ? (onChainPnl / (onChain.total * position.dca)) * 100 : null;
-          const chainTone = onChainPnl == null ? '' : onChainPnl >= 0 ? 'green' : 'red';
-
           const isOpen = !!openAssets[position.asset];
 
           return (
             <article className="spot-card" key={position.asset}>
-              {/* Botón colapsable — siempre visible */}
               <button className="spot-collapse-btn" onClick={() => toggleAsset(position.asset)}>
                 <div className="spot-collapse-left">
                   <span className="spot-collapse-arrow">{isOpen ? '▼' : '▶'}</span>
                   <span className="pair">{position.asset}</span>
-                  {hasPrice && (
-                    <span className="network">${formatPrice(`${position.asset}/USDC`, position.currentPrice)}</span>
-                  )}
+                  {hasPrice && <span className="network">${formatPrice(`${position.asset}/USDC`, position.currentPrice)}</span>}
                 </div>
                 <div className="spot-collapse-right">
-                  {pnl != null && (
-                    <span className={`pill ${tone}`}>
-                      {pnl >= 0 ? '+' : ''}{formatUsd(pnl)} · {pnlPct?.toFixed(2)}%
-                    </span>
-                  )}
-                  {onChainPnl != null && (
-                    <span className={`pill ${chainTone}`}>
-                      On-chain {onChainPnl >= 0 ? '+' : ''}{onChainPnlPct?.toFixed(2)}%
-                    </span>
-                  )}
+                  <span className="pill">{position.protector?.active ? 'Bot activo' : 'Bot pausado'}</span>
                 </div>
               </button>
 
-              {/* Contenido expandible */}
               {isOpen && (
-                <>
-                  {myWallets.length > 0 && (
-                    <div className="hl-position-block">
-                      <div className="hl-position-head">
-                        <span className="hl-position-label">Balance wallets</span>
-                        {chainLoading && <span className="network">Cargando...</span>}
-                        {onChainPnl != null && <span className={`pill ${chainTone}`}>{onChainPnl >= 0 ? '+' : ''}{formatUsd(onChainPnl)}</span>}
-                        {onChainPnlPct != null && <span className={`pill ${chainTone}`}>{onChainPnlPct >= 0 ? '+' : ''}{onChainPnlPct.toFixed(2)}%</span>}
-                      </div>
-                      {onChain ? (
-                        <>
-                          <div className="spot-metrics">
-                            <Metric label="Total" value={`${onChain.total.toFixed(6)} ${position.asset}`} />
-                            <Metric label="Valor" value={onChainValue != null ? formatUsd(onChainValue) : '—'} />
-                            <Metric label="Costo DCA" value={position.dca > 0 ? formatUsd(onChain.total * position.dca) : '—'} />
-                            <Metric label="PnL" value={onChainPnl != null ? formatUsd(onChainPnl) : '—'} />
-                          </div>
-                          {Object.entries(onChain.perWallet ?? {}).map(([lbl, bal]) => (
-                            <div key={lbl} className="network" style={{ fontSize: 11, marginTop: 2 }}>{lbl}: {bal.toFixed(6)}</div>
-                          ))}
-                        </>
-                      ) : !chainLoading && (
-                        <p className="network" style={{ margin: '4px 0 0' }}>Sin balance de {position.asset} en las wallets configuradas</p>
-                      )}
-                      {perpPos && (
-                        <div style={{ borderTop: '1px solid var(--line)', marginTop: 8, paddingTop: 8 }}>
-                          <div className="hl-position-head">
-                            <span className="hl-position-label">HL perp</span>
-                            <span className={`pill ${perpPos.size > 0 ? 'green' : 'cyan'}`}>{perpPos.size > 0 ? 'Long' : 'Short'}</span>
-                            <span className={`pill ${hlPnlTone}`}>{perpPos.unrealizedPnl >= 0 ? '+' : ''}{formatUsd(perpPos.unrealizedPnl)}</span>
-                            <span className={`pill ${hlPnlTone}`}>{(perpPos.roe * 100).toFixed(2)}% ROE</span>
-                          </div>
-                          <div className="spot-metrics">
-                            <Metric label="Tamaño" value={`${Math.abs(perpPos.size).toFixed(4)} ${position.asset}`} />
-                            <Metric label="Entrada" value={`$${formatPrice(`${position.asset}/USDC`, perpPos.entryPx)}`} />
-                            <Metric label="Valor" value={formatUsd(Math.abs(perpPos.positionValue))} />
-                            <Metric label="PnL" value={formatUsd(perpPos.unrealizedPnl)} />
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  <div className="spot-form">
-                    <label className="config-field">
-                      <span>Cantidad (manual)</span>
-                      <input type="number" min="0" step="0.01" value={position.amount} onChange={(e) => updatePosition(position.asset, { amount: Number(e.target.value) })} />
-                    </label>
-                    <label className="config-field">
-                      <span>Precio compra DCA</span>
-                      <input type="number" min="0.00000001" step="1" value={position.dca} onChange={(e) => updatePosition(position.asset, { dca: Number(e.target.value) })} />
-                    </label>
-                  </div>
-                  <div className="spot-metrics">
-                    <Metric label="Costo" value={formatUsd(cost)} />
-                    <Metric label="Valor actual" value={value != null ? formatUsd(value) : '—'} />
-                    <Metric label="PnL" value={pnl != null ? formatUsd(pnl) : '—'} />
-                    <Metric label="PnL %" value={pnlPct != null ? `${pnlPct.toFixed(2)}%` : '—'} />
-                  </div>
-                  <SpotProtectorBot
-                    asset={position.asset}
-                    protector={position.protector}
-                    currentPrice={position.currentPrice}
-                    dca={position.dca}
-                    hlPosition={perpPos}
-                    onChange={(patch) => updateProtector(position.asset, patch)}
-                    onFireSignal={(triggerType, price, amount) => recordSpotSignal(position.asset, triggerType, price, amount)}
-                  />
-                </>
+                <SpotProtectorBot
+                  asset={position.asset}
+                  protector={position.protector}
+                  currentPrice={position.currentPrice}
+                  onChange={(patch) => updateProtector(position.asset, patch)}
+                  onFireSignal={(triggerType, price, amount) => recordSpotSignal(position.asset, triggerType, price, amount)}
+                />
               )}
             </article>
           );
@@ -1039,190 +820,38 @@ function SimulationHistory({ signals }) {
   );
 }
 
-function SpotProtectorBot({ asset, protector, onChange, currentPrice, dca, hlPosition, onFireSignal }) {
-  const [open, setOpen] = React.useState(false);
-
-  const hlDca = hlPosition?.entryPx > 0 ? hlPosition.entryPx : null;
-  const effectiveDca = hlDca ?? dca;
-
-  const triggerLevel =
-    protector.orderType === 'Cobertura DCA' && effectiveDca
-      ? effectiveDca   // dispara cuando precio llega al DCA
-      : protector.orderType === 'Trigger por precio' && protector.triggerPrice > 0
-        ? protector.triggerPrice
-        : null;
-
-  const isArmed = currentPrice && triggerLevel && currentPrice <= triggerLevel * 1.05;
-
+function SpotProtectorBot({ asset, protector, onChange, currentPrice, onFireSignal }) {
   function handleManual() {
-    const buyAmount = (protector.capitalReserve * protector.buySize) / 100;
-    onFireSignal?.('manual', currentPrice ?? 0, buyAmount);
+    onFireSignal?.('manual', currentPrice ?? 0, 0);
   }
 
   return (
     <div className="spot-protector">
       <div className="spot-protector-head">
-        <div>
-          <span>Bot protector</span>
-          <strong>Baja más compramos más</strong>
-        </div>
+        <span>Bot cobertura {asset}</span>
         <span className={`pill ${protector.active ? 'green' : 'faint'}`}>{protector.active ? 'Activo' : 'Pausado'}</span>
       </div>
 
-      <div className="futures-grid">
-        <Metric
-          label="Trigger"
-          value={
-            protector.orderType === 'Cobertura DCA' ? `${protector.triggerDrop}x` :
-            protector.orderType === 'Trigger por precio' ? `$${protector.triggerPrice > 0 ? formatPrice(`${asset}/USDC`, protector.triggerPrice) : '—'}` :
-            protector.orderType
-          }
-        />
-        <Metric label="Compra" value={`${protector.buySize}%`} />
-        <Metric label="Máx. compras" value={protector.maxBuys} />
-        <Metric label="Reserva" value={formatUsd(protector.capitalReserve)} />
-      </div>
-
-      {(effectiveDca > 0 || triggerLevel) && protector.orderType !== 'Trigger manual' && (
-        <div className="protector-status">
-          {effectiveDca > 0 && (
-            <Metric label={hlDca ? 'DCA HL' : 'DCA manual'} value={`$${formatPrice(`${asset}/USDC`, effectiveDca)}`} />
-          )}
-          {triggerLevel > 0 && (
-            <Metric label="Nivel trigger" value={`$${formatPrice(`${asset}/USDC`, triggerLevel)}`} />
-          )}
-          {currentPrice && triggerLevel > 0 && (
-            <Metric
-              label="Estado"
-              value={currentPrice <= triggerLevel ? '🔴 DISPARO' : isArmed ? '🟡 Cerca' : '🟢 Monitoreo'}
-            />
-          )}
+      <div className="config-field" style={{ padding: '10px 0 6px' }}>
+        <span>Leverage de cobertura</span>
+        <div className="range-control">
+          <input
+            type="range"
+            min="0"
+            max="25"
+            step="1"
+            value={protector.triggerDrop ?? 0}
+            onChange={(e) => onChange({ triggerDrop: Number(e.target.value) })}
+          />
+          <strong>{protector.triggerDrop ?? 0}x</strong>
         </div>
-      )}
+      </div>
 
       <div className="bot-state-actions">
         <button className={`mini-btn ${!protector.active ? 'active' : ''}`} onClick={() => onChange({ active: false })}>Pausar</button>
         <button className={`mini-btn ${protector.active ? 'active' : ''}`} onClick={() => onChange({ active: true })}>Activar</button>
+        <button className="mini-btn amber" onClick={handleManual}>Disparar manual</button>
       </div>
-
-      <div className="wallet-actions">
-        <button className="mini-btn" onClick={() => setOpen((value) => !value)}>Configurar</button>
-        {protector.active && (
-          <button className="mini-btn amber" onClick={handleManual}>Disparar manual</button>
-        )}
-      </div>
-
-      {open && (
-        <div className="bot-config">
-          <div className="config-header">
-            <div>
-              <div className="config-title">Baja más compramos más</div>
-              <div className="network">{asset} spot · estrategia DCA</div>
-            </div>
-            <span className="pill">{protector.orderType}</span>
-          </div>
-
-          <ConfigAction
-            title="Trigger"
-            value={
-              protector.orderType === 'Cobertura DCA' ? `${protector.triggerDrop}x` :
-              protector.orderType === 'Trigger por precio' ? `$${protector.triggerPrice > 0 ? formatPrice(`${asset}/USDC`, protector.triggerPrice) : '—'}` :
-              protector.orderType
-            }
-          >
-            <label className="config-field">
-              <span>Tipo de orden</span>
-              <select value={protector.orderType} onChange={(event) => onChange({ orderType: event.target.value })}>
-                <option>Cobertura DCA</option>
-                <option>Trigger por precio</option>
-                <option>Trigger por RSI</option>
-                <option>Trigger manual</option>
-              </select>
-            </label>
-            {protector.orderType === 'Cobertura DCA' && (
-              <div className="config-field">
-                <span>Leverage de cobertura</span>
-                <div className="range-control">
-                  <input
-                    type="range"
-                    min="0"
-                    max="25"
-                    step="1"
-                    value={protector.triggerDrop}
-                    onChange={(event) => onChange({ triggerDrop: Number(event.target.value) })}
-                  />
-                  <strong>{protector.triggerDrop}x</strong>
-                </div>
-              </div>
-            )}
-            {protector.orderType === 'Trigger por precio' && (
-              <label className="config-field">
-                <span>Precio de disparo</span>
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  value={protector.triggerPrice ?? 0}
-                  onChange={(event) => onChange({ triggerPrice: Number(event.target.value) })}
-                />
-              </label>
-            )}
-          </ConfigAction>
-
-          <ConfigAction title="Compra" value={`${protector.buySize}%`}>
-            <div className="config-field">
-              <span>Tamaño de compra por trigger</span>
-              <div className="range-control">
-                <input
-                  type="range"
-                  min="1"
-                  max="100"
-                  step="1"
-                  value={protector.buySize}
-                  onChange={(event) => onChange({ buySize: Number(event.target.value) })}
-                />
-                <strong>{protector.buySize}%</strong>
-              </div>
-            </div>
-            <label className="config-field">
-              <span>Máximo de compras</span>
-              <input
-                type="number"
-                min="1"
-                max="20"
-                step="1"
-                value={protector.maxBuys}
-                onChange={(event) => onChange({ maxBuys: Number(event.target.value) })}
-              />
-            </label>
-          </ConfigAction>
-
-          <ConfigAction title="Capital" value={formatUsd(protector.capitalReserve)}>
-            <label className="config-field">
-              <span>Capital reservado</span>
-              <input
-                type="number"
-                min="0"
-                step="100"
-                value={protector.capitalReserve}
-                onChange={(event) => onChange({ capitalReserve: Number(event.target.value) })}
-              />
-            </label>
-          </ConfigAction>
-
-          <ConfigAction title="Take profit" value={protector.takeProfit}>
-            <label className="config-field">
-              <span>Objetivo</span>
-              <select value={protector.takeProfit} onChange={(event) => onChange({ takeProfit: event.target.value })}>
-                <option>Rebajar DCA</option>
-                <option>Tomar ganancia parcial</option>
-                <option>Vender al recuperar DCA</option>
-                <option>Mantener spot</option>
-              </select>
-            </label>
-          </ConfigAction>
-        </div>
-      )}
     </div>
   );
 }

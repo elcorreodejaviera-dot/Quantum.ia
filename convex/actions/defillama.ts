@@ -80,6 +80,7 @@ export const fetchAndUpdateApys = internalAction({
         apy: best.apy ?? 0,
         tvl: best.tvlUsd,
         fees1d: estimateFees1d(best),
+        volume1d: best.volumeUsd1d,
         defillamaId: best.pool,
         poolAddress,
       });

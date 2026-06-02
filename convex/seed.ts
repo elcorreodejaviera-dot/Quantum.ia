@@ -1,4 +1,4 @@
-import { mutation } from "./_generated/server";
+import { internalMutation, mutation } from "./_generated/server";
 import { requireAdmin } from "./helpers";
 
 const SEED_POOLS = [
@@ -23,6 +23,17 @@ const SEED_WALLETS = [
   { label: "Wallet pool BTC", type: "Pool", address: "0x5c02...B7D1", network: "Arbitrum", ownerId: "BTC/USDC" },
   { label: "Wallet pool ETH", type: "Pool", address: "0x96ef...3C44", network: "Base", ownerId: "ETH/USDC" },
 ];
+
+// Solo para uso interno via CLI — no requiere auth.
+export const seedPoolsInternal = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const existing = await ctx.db.query("pools").first();
+    if (existing) return { skipped: true };
+    for (const pool of SEED_POOLS) await ctx.db.insert("pools", pool);
+    return { inserted: SEED_POOLS.length };
+  },
+});
 
 // Idempotente: solo inserta si las tablas están vacías.
 // Llamar una vez desde Convex dashboard o desde el primer login de admin.

@@ -251,15 +251,15 @@ function PoolCard({ pool }) {
       </div>
 
       <div className="pool-meta">
-        <Metric label="TVL" value={pool.subgraphTvlUsd != null ? formatUsd(pool.subgraphTvlUsd) : pool.tvl != null ? formatUsd(pool.tvl) : formatUsd(pool.liquidity)} />
-        <Metric label="Volumen 24h" value={pool.subgraphVolumeUsd1d != null ? formatUsd(pool.subgraphVolumeUsd1d) : '—'} />
-        <Metric label="Fees 24h" value={pool.subgraphFeesUsd1d != null ? formatUsd(pool.subgraphFeesUsd1d) : formatUsd(pool.fees24h)} />
+        <Metric label="TVL" value={pool.tvl != null ? formatUsd(pool.tvl) : formatUsd(pool.liquidity)} />
+        <Metric label="Volumen 24h" value={pool.volume1d != null ? formatUsd(pool.volume1d) : '—'} />
+        <Metric label="Fees 24h" value={formatUsd(pool.fees24h)} />
         <Metric label={apyLabel} value={`${parts.annual.toFixed(1)}%`} />
         <Metric label="Funding 8h" value={pool.funding != null ? `${(pool.funding * 100).toFixed(4)}%` : '—'} />
       </div>
-      {pool.subgraphUpdatedAt && (
+      {pool.apyUpdatedAt && (
         <div className="network" style={{ fontSize: 10, marginTop: 4, textAlign: 'right' }}>
-          Subgraph {new Date(pool.subgraphUpdatedAt).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' })}
+          DeFiLlama {new Date(pool.apyUpdatedAt).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' })}
         </div>
       )}
 

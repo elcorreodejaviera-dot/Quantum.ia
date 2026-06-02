@@ -37,6 +37,7 @@ export default defineSchema({
     defillamaId: v.optional(v.string()),
     poolAddress: v.optional(v.string()),
     apyUpdatedAt: v.optional(v.number()),
+    volume1d: v.optional(v.number()),
     subgraphVolumeUsd1d: v.optional(v.number()),
     subgraphFeesUsd1d: v.optional(v.number()),
     subgraphTvlUsd: v.optional(v.number()),

@@ -710,10 +710,10 @@ function SpotPositions({ prices, connected }) {
   // Primera wallet EVM para HL perp
   const firstEvmWallet = myWallets.find(w => w.network !== 'Bitcoin');
   const { perpPositions, loading: hlLoading, error: hlError } = useHyperliquidSpotState(firstEvmWallet?.address ?? null);
-  const { balances: onChainBalances, loading: chainLoading, error: chainError } = useWalletBalances(myWallets);
+  const { balances: onChainBalances, walletTokens, loading: chainLoading, error: chainError } = useWalletBalances(myWallets);
 
   React.useEffect(() => {
-    if (positionsFromDb === undefined) return;
+    if (!positionsFromDb?.length) return; // vacío o cargando → mantener INITIAL_SPOT_POSITIONS
     setPositions(positionsFromDb.map((p) => ({
       ...p, id: p._id, currentPrice: null, protector: DEFAULT_PROTECTOR,
     })));
@@ -790,6 +790,26 @@ function SpotPositions({ prices, connected }) {
           </div>
         )}
         {chainError && <p className="network" style={{ color: 'var(--red,#f44)', marginTop: 4 }}>{chainError}</p>}
+
+        {/* Saldos detallados por wallet */}
+        {Object.values(walletTokens).map((wt) => (
+          <div key={wt.address} className="wallet-token-block">
+            <div className="wallet-token-head">
+              <span className="pill">{wt.network}</span>
+              <span className="network mono">{wt.label} · {wt.address.slice(0, 6)}…{wt.address.slice(-4)}</span>
+            </div>
+            <div className="wallet-token-grid">
+              {Object.entries(wt.tokens)
+                .sort(([, a], [, b]) => b - a)
+                .map(([symbol, amount]) => (
+                  <div key={symbol} className="wallet-token-row">
+                    <span className="hl-asset">{symbol}</span>
+                    <span className="mono">{amount < 0.0001 ? amount.toExponential(2) : amount.toFixed(symbol === 'ETH' || symbol === 'WETH' ? 6 : symbol === 'WBTC' || symbol === 'cbBTC' || symbol === 'BTC' ? 8 : 2)}</span>
+                  </div>
+                ))}
+            </div>
+          </div>
+        ))}
       </div>
 
       <div className="hl-market-toggle">
@@ -949,7 +969,7 @@ function SimulationHistory({ signals }) {
   );
 }
 
-function SpotProtectorBot({ asset, protector, onChange, currentPrice, dca, hlPosition, onChainBalance, onFireSignal }) {
+function SpotProtectorBot({ asset, protector, onChange, currentPrice, dca, hlPosition, onFireSignal }) {
   const [open, setOpen] = React.useState(false);
   const cooldownRef = React.useRef(0);
   const COOLDOWN_MS = 60 * 60 * 1000; // 1 hora entre señales auto

@@ -148,23 +148,42 @@ export function useHyperliquidAllMids() {
 const CHAIN_CONFIG = {
   Ethereum: {
     rpc: 'https://ethereum.publicnode.com',
-    wbtc: '0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599',
-    weth: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+    tokens: {
+      WBTC: { address: '0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599', decimals: 8 },
+      WETH: { address: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', decimals: 18 },
+      USDC: { address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', decimals: 6 },
+      USDT: { address: '0xdAC17F958D2ee523a2206206994597C13D831ec7', decimals: 6 },
+      DAI:  { address: '0x6B175474E89094C44Da98b954EedeAC495271d0F', decimals: 18 },
+    },
   },
   Arbitrum: {
     rpc: 'https://arb1.arbitrum.io/rpc',
-    wbtc: '0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f',
-    weth: '0x82af49447d8a07e3bd95bd0d56f35241523fbab1',
+    tokens: {
+      WBTC: { address: '0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f', decimals: 8 },
+      WETH: { address: '0x82af49447d8a07e3bd95bd0d56f35241523fbab1', decimals: 18 },
+      USDC: { address: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', decimals: 6 },
+      USDT: { address: '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9', decimals: 6 },
+      DAI:  { address: '0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1', decimals: 18 },
+    },
   },
   Base: {
     rpc: 'https://mainnet.base.org',
-    wbtc: '0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf',
-    weth: '0x4200000000000000000000000000000000000006',
+    tokens: {
+      cbBTC: { address: '0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf', decimals: 8 },
+      WETH:  { address: '0x4200000000000000000000000000000000000006', decimals: 18 },
+      USDC:  { address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', decimals: 6 },
+      DAI:   { address: '0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb', decimals: 18 },
+    },
   },
   Optimism: {
     rpc: 'https://mainnet.optimism.io',
-    wbtc: '0x68f180fcCe6836688e9084f035309E29Bf0A2095',
-    weth: '0x4200000000000000000000000000000000000006',
+    tokens: {
+      WBTC: { address: '0x68f180fcCe6836688e9084f035309E29Bf0A2095', decimals: 8 },
+      WETH: { address: '0x4200000000000000000000000000000000000006', decimals: 18 },
+      USDC: { address: '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85', decimals: 6 },
+      USDT: { address: '0x94b008aA00579c1307B0EF2c499aD98a8ce58e58', decimals: 6 },
+      DAI:  { address: '0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1', decimals: 18 },
+    },
   },
 };
 
@@ -211,15 +230,20 @@ async function getBitcoinBalance(address) {
 }
 
 // wallets: [{ _id, address, network, label }]
+// Retorna:
+//   balances: { ETH: { total, perWallet }, BTC: { total, perWallet } } — para cards de spot
+//   walletTokens: { walletId: { label, network, tokens: { SYMBOL: amount } } } — para panel detalle
 export function useWalletBalances(wallets) {
   const [balances, setBalances] = useState({});
+  const [walletTokens, setWalletTokens] = useState({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  const key = JSON.stringify((wallets ?? []).map(w => w._id));
+  const key = JSON.stringify((wallets ?? []).map(w => `${w._id}|${w.address}|${w.network}|${w.label}`));
 
   useEffect(() => {
     setBalances({});
+    setWalletTokens({});
     setError(null);
     if (!wallets || wallets.length === 0) return;
     let cancelled = false;
@@ -229,23 +253,44 @@ export function useWalletBalances(wallets) {
       try {
         const ethAcc = {};
         const btcAcc = {};
+        const wTokens = {};
 
         await Promise.allSettled(wallets.map(async (w) => {
+          const walletKey = w._id;
+          const tokenMap = {};
+
           if (w.network === 'Bitcoin') {
             const bal = await getBitcoinBalance(w.address);
-            if (bal > 0) btcAcc[`${w.label}(BTC)`] = bal;
+            if (bal > 0) {
+              tokenMap['BTC'] = bal;
+              btcAcc[`${w.label}(BTC)`] = bal;
+            }
           } else {
             const cfg = CHAIN_CONFIG[w.network];
             if (!cfg) return;
-            const [nativeEth, weth, wbtcRaw] = await Promise.all([
-              getNative(cfg.rpc, w.address),
-              getErc20(cfg.rpc, cfg.weth, w.address, 18),
-              getErc20(cfg.rpc, cfg.wbtc, w.address, 8),
-            ]);
-            const eth = nativeEth + weth;
-            const key = `${w.label}(${w.network})`;
-            if (eth > 0) ethAcc[key] = eth;
-            if (wbtcRaw > 0) btcAcc[key] = wbtcRaw;
+
+            // ETH nativo
+            const nativeEth = await getNative(cfg.rpc, w.address);
+            if (nativeEth > 0) tokenMap['ETH'] = (tokenMap['ETH'] ?? 0) + nativeEth;
+
+            // Todos los tokens ERC-20 configurados
+            await Promise.allSettled(
+              Object.entries(cfg.tokens).map(async ([symbol, { address, decimals }]) => {
+                const bal = await getErc20(cfg.rpc, address, w.address, decimals);
+                if (bal > 0) tokenMap[symbol] = (tokenMap[symbol] ?? 0) + bal;
+              })
+            );
+
+            // Acumular ETH y BTC para las cards de spot
+            const totalEthHere = (tokenMap['ETH'] ?? 0) + (tokenMap['WETH'] ?? 0);
+            const totalBtcHere = (tokenMap['WBTC'] ?? 0) + (tokenMap['cbBTC'] ?? 0);
+            const wKey = `${w.label}(${w.network})`;
+            if (totalEthHere > 0) ethAcc[wKey] = totalEthHere;
+            if (totalBtcHere > 0) btcAcc[wKey] = totalBtcHere;
+          }
+
+          if (Object.keys(tokenMap).length > 0) {
+            wTokens[walletKey] = { label: w.label, network: w.network, address: w.address, tokens: tokenMap };
           }
         }));
 
@@ -258,6 +303,7 @@ export function useWalletBalances(wallets) {
           ...(totalEth > 0 ? { ETH: { total: totalEth, perWallet: ethAcc } } : {}),
           ...(totalBtc > 0 ? { BTC: { total: totalBtc, perWallet: btcAcc } } : {}),
         });
+        setWalletTokens(wTokens);
         setError(null);
       } catch (err) {
         if (!cancelled) setError('Error leyendo balances');
@@ -271,7 +317,7 @@ export function useWalletBalances(wallets) {
     return () => { cancelled = true; clearInterval(interval); };
   }, [key]);
 
-  return { balances, loading, error };
+  return { balances, walletTokens, loading, error };
 }
 
 export function useHyperliquidSpotState(address) {

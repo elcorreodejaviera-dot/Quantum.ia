@@ -354,8 +354,12 @@ function ConfigAction({ title, value, children }) {
 }
 
 function evaluateTrigger(bot, pools, prices) {
-  const t = (bot.trigger ?? '').toLowerCase();
-  if (!t || !bot.active || !bot.simulationMode) return false;
+  if (!bot.active || !bot.simulationMode) return false;
+  if (bot.orderType === 'Trigger manual') return false; // solo disparo manual
+
+  // DCA Auto: evaluar por entryTrigger si existe, sino por trigger text
+  const condition = (bot.entryTrigger ?? bot.trigger ?? '').toLowerCase();
+  const t = condition;
   if (t.includes('sale del rango') || t.includes('fuera de rango')) {
     return pools.some(p => {
       const asset = p.pair?.split('/')[0];
@@ -379,7 +383,7 @@ function evaluateTrigger(bot, pools, prices) {
 }
 
 function getSignalMeta(bot, pools, prices) {
-  const t = (bot.trigger ?? '').toLowerCase();
+  const t = (bot.entryTrigger ?? bot.trigger ?? '').toLowerCase();
   const isPrice = t.includes('rango') || t.includes('retorno');
   if (isPrice) {
     const pool = pools.find(p => {
@@ -417,7 +421,11 @@ function BotCard({ bot, onSetActive, onMode, onConfig, onManualTrigger }) {
         <span className={`pill ${tone}`}>{bot.active ? 'Activo' : 'Pausado'}</span>
       </div>
       <div className="bot-row">
-        <span>{bot.trigger}</span>
+        <span>
+          {bot.orderType === 'Trigger manual'
+            ? 'Modo manual'
+            : `DCA Auto · ${bot.entryTrigger ?? bot.trigger}`}
+        </span>
         <span className="mono">{bot.hedge}</span>
       </div>
       <div className="bot-row">
@@ -434,9 +442,9 @@ function BotCard({ bot, onSetActive, onMode, onConfig, onManualTrigger }) {
           <Metric label="Dirección" value={bot.mode} />
           <Metric label="Orden" value={bot.orderType} />
           <Metric label="Margen" value={bot.marginMode} />
-          <Metric label="Capital" value={formatUsd(bot.capitalPerTrade)} />
+          <Metric label="Wallet HL" value={bot.walletId?.startsWith('0x') ? `${bot.walletId.slice(0,8)}…` : '—'} />
           <Metric label="Pool monitor" value={`${bot.poolCapitalPercent}%`} />
-          <Metric label="Leverage" value={bot.autoLeverage ? 'Auto' : `${bot.leverage}x`} />
+          <Metric label="Leverage" value={bot.autoLeverage ? 'Auto' : `${bot.leverage ?? 0}x`} />
           <Metric label="Stop" value={`${bot.stop.toFixed(1)}%`} />
           <Metric label="TP" value={bot.takeProfit} />
         </div>
@@ -476,82 +484,75 @@ function BotCard({ bot, onSetActive, onMode, onConfig, onManualTrigger }) {
             </label>
           </ConfigAction>
 
-          <ConfigAction title="Orden trigger" value={bot.orderType}>
-            <label className="config-field">
-              <span>Tipo de trigger</span>
-              <select value={bot.orderType} onChange={(event) => onConfig(bot.id, { orderType: event.target.value })}>
-                <option>Trigger por precio</option>
-                <option>Trigger por rango</option>
-                <option>Trigger por APR</option>
-                <option>Trigger por volatilidad</option>
-                <option>Trigger manual</option>
-              </select>
-            </label>
-            <label className="config-field">
-              <span>Valor del trigger</span>
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={bot.triggerPrice}
-                onChange={(event) => onConfig(bot.id, { triggerPrice: Number(event.target.value) })}
-              />
-            </label>
-            <label className="config-field">
-              <span>Condición</span>
-              <select value={bot.entryTrigger} onChange={(event) => onConfig(bot.id, { entryTrigger: event.target.value })}>
-                <option>Fuera de rango</option>
-                <option>Retorno al rango</option>
-                <option>APR bajo</option>
-                <option>Volatilidad alta</option>
-                <option>Manual</option>
-              </select>
-            </label>
-          </ConfigAction>
-
-          <ConfigAction title="Capital" value={formatUsd(bot.capitalPerTrade)}>
-            <label className="config-field">
-              <span>Capital por operación</span>
-              <input
-                type="number"
-                min="0"
-                step="100"
-                value={bot.capitalPerTrade}
-                onChange={(event) => onConfig(bot.id, { capitalPerTrade: Number(event.target.value) })}
-              />
-            </label>
-            <label className="config-field">
-              <span>Capital del pool que monitorea</span>
-              <select
-                value={bot.poolCapitalPercent}
-                onChange={(event) => onConfig(bot.id, { poolCapitalPercent: Number(event.target.value) })}
+          <ConfigAction
+            title="Modo trigger"
+            value={bot.orderType === 'Trigger manual' ? 'Manual' : 'DCA Auto'}
+          >
+            <div className="trigger-mode-switch">
+              <button
+                className={`trigger-option${bot.orderType === 'Trigger manual' ? ' active' : ''}`}
+                onClick={() => onConfig(bot.id, { orderType: 'Trigger manual' })}
               >
-                {[50, 75, 100, 125, 150, 200].map((value) => <option key={value} value={value}>{value}%</option>)}
-              </select>
-            </label>
-            <label className="config-field">
-              <span>Colateral</span>
-              <select value={bot.collateral} onChange={(event) => onConfig(bot.id, { collateral: event.target.value })}>
-                <option>USDC</option>
-                <option>USDT</option>
-                <option>USD</option>
-              </select>
-            </label>
+                Manual
+              </button>
+              <button
+                className={`trigger-option${bot.orderType !== 'Trigger manual' ? ' active' : ''}`}
+                onClick={() => onConfig(bot.id, { orderType: 'Trigger por rango' })}
+              >
+                DCA Auto
+              </button>
+            </div>
+            {bot.orderType === 'Trigger manual' ? (
+              <p className="network" style={{ marginTop: 6 }}>
+                El bot solo dispara cuando pulsas "Disparar señal" manualmente.
+              </p>
+            ) : (
+              <>
+                <label className="config-field" style={{ marginTop: 6 }}>
+                  <span>Precio DCA / nivel de entrada</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={bot.triggerPrice}
+                    onChange={(event) => onConfig(bot.id, { triggerPrice: Number(event.target.value) })}
+                  />
+                </label>
+                <label className="config-field">
+                  <span>Condición</span>
+                  <select value={bot.entryTrigger} onChange={(event) => onConfig(bot.id, { entryTrigger: event.target.value })}>
+                    <option>Fuera de rango</option>
+                    <option>Retorno al rango</option>
+                    <option>APR bajo</option>
+                    <option>Volatilidad alta</option>
+                  </select>
+                </label>
+                <p className="network" style={{ marginTop: 4 }}>
+                  El bot evalúa la condición automáticamente con precios en tiempo real.
+                </p>
+              </>
+            )}
           </ConfigAction>
 
-          <ConfigAction title="Margen y leverage" value={`${bot.marginMode} · ${bot.autoLeverage ? 'Auto' : `${bot.leverage}x`}`}>
+          <ConfigAction
+            title="Wallet HL"
+            value={bot.walletId?.startsWith('0x') ? `${bot.walletId.slice(0, 8)}…${bot.walletId.slice(-6)}` : (bot.walletId ?? 'Sin configurar')}
+          >
             <label className="config-field">
-              <span>Modo de margen</span>
-              <select value={bot.marginMode} onChange={(event) => onConfig(bot.id, { marginMode: event.target.value })}>
-                <option>Isolated</option>
-              </select>
+              <span>Dirección wallet HL (0x)</span>
+              <input
+                type="text"
+                placeholder="0x... wallet para ejecutar cobertura"
+                value={bot.walletId ?? ''}
+                onChange={(event) => onConfig(bot.id, { walletId: event.target.value.trim() })}
+              />
             </label>
             <div className="config-field">
-              <span>Leverage</span>
+              <span>Leverage (1-25x)</span>
               <div className="range-control">
                 <input
                   type="range"
-                  min="0"
+                  min="1"
                   max="25"
                   step="1"
                   value={bot.leverage}
@@ -568,6 +569,14 @@ function BotCard({ bot, onSetActive, onMode, onConfig, onManualTrigger }) {
                 onChange={(event) => onConfig(bot.id, { autoLeverage: event.target.checked })}
               />
               <span>Autoleverage</span>
+            </label>
+            <label className="config-field">
+              <span>Colateral</span>
+              <select value={bot.collateral} onChange={(event) => onConfig(bot.id, { collateral: event.target.value })}>
+                <option>USDC</option>
+                <option>USDT</option>
+                <option>USD</option>
+              </select>
             </label>
           </ConfigAction>
 
@@ -1306,7 +1315,7 @@ function Dashboard({ user, onLogout }) {
 
   async function updateBotConfig(id, patch) {
     if (!botsFromDb?.find((b) => b._id === id)) return;
-    const schemaFields = ['capitalPerTrade', 'leverage', 'stop', 'simulationMode'];
+    const schemaFields = ['capitalPerTrade', 'leverage', 'stop', 'simulationMode', 'walletId', 'orderType', 'entryTrigger', 'triggerPrice', 'autoLeverage', 'collateral'];
     const persistable = Object.fromEntries(
       Object.entries(patch).filter(([k]) => schemaFields.includes(k))
     );

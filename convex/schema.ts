@@ -49,6 +49,11 @@ export default defineSchema({
     leverage: v.number(),
     stop: v.number(),
     simulationMode: v.boolean(),
+    orderType: v.optional(v.string()),
+    entryTrigger: v.optional(v.string()),
+    triggerPrice: v.optional(v.number()),
+    autoLeverage: v.optional(v.boolean()),
+    collateral: v.optional(v.string()),
   }),
 
   wallets: defineTable({

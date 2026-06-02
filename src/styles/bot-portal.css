@@ -785,6 +785,37 @@ button {
   margin: 6px 0;
 }
 
+/* Trigger mode switch */
+.trigger-mode-switch {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  width: 100%;
+}
+
+.trigger-option {
+  flex: 1;
+  padding: 8px 0;
+  background: var(--panel-2);
+  border: none;
+  color: var(--text-2);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: background 0.15s, color 0.15s;
+}
+
+.trigger-option.active {
+  background: var(--green);
+  color: #000;
+}
+
+.trigger-option:not(.active):hover {
+  background: var(--line);
+  color: var(--text);
+}
+
 /* Simulation banner */
 .sim-banner {
   background: rgba(255, 170, 0, 0.12);

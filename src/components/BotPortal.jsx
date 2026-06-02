@@ -435,7 +435,7 @@ function getSignalMeta(bot, pools, prices) {
   return { asset: 'POOL', price: 0, network: 'Arbitrum' };
 }
 
-function BotCard({ bot, onSetActive, onMode, onConfig, onManualTrigger, isAdmin }) {
+function BotCard({ bot, onSetActive, onMode, onConfig, onManualTrigger, isAdmin, userLoaded }) {
   const tone = bot.active ? 'green' : 'faint';
   const [configOpen, setConfigOpen] = React.useState(false);
   const wallet = WALLETS.find((item) => item.id === bot.walletId);
@@ -455,7 +455,7 @@ function BotCard({ bot, onSetActive, onMode, onConfig, onManualTrigger, isAdmin 
           <div className="network">{bot.action}</div>
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          {!isAdmin && <span className="pill faint" title="Solo lectura">Lectura</span>}
+          {userLoaded && !isAdmin && <span className="pill faint" title="Solo lectura">Lectura</span>}
           <span className={`pill ${tone}`}>{bot.active ? 'Activo' : 'Pausado'}</span>
         </div>
       </div>
@@ -785,7 +785,7 @@ function PurchaseHistorySection({ asset }) {
   );
 }
 
-function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabled, isAdmin }) {
+function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabled, isAdmin, userLoaded }) {
   const positionsFromDb = useQuery(api.spot_positions.listMyPositions);
   const addPositionMutation = useMutation(api.spot_positions.addPosition);
   const updatePositionMutation = useMutation(api.spot_positions.updatePosition);
@@ -1173,6 +1173,7 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
                   onChange={(patch) => updateProtector(position.asset, patch)}
                   onFireSignal={(triggerType, price, amount) => recordSpotSignal(position.asset, triggerType, price, amount, position.protector)}
                   isAdmin={isAdmin}
+                  userLoaded={userLoaded}
                 />
               )}
             </article>
@@ -1324,7 +1325,7 @@ function AlertsPanel({ alerts, history, onCreate, onDelete }) {
 
 const EVM_RE_PROTECTOR = /^0x[a-fA-F0-9]{40}$/;
 
-function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulationMode, tradingEnabled, onFireSignal, isAdmin }) {
+function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulationMode, tradingEnabled, onFireSignal, isAdmin, userLoaded }) {
   const hlWallet = protector.hlWallet ?? '';
   const validWallet = EVM_RE_PROTECTOR.test(hlWallet);
   const { account: hlAccount, loading: hlBalLoading, error: hlBalError } = useHLAccountBalance(validWallet ? hlWallet : null);
@@ -1542,7 +1543,7 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulation
         <span className={`pill${!simulationMode && tradingEnabled ? ' green' : ' amber'}`}>
           {!simulationMode && tradingEnabled ? 'LIVE HL' : 'SIM'}
         </span>
-        {!isAdmin && <span className="pill faint" title="Solo lectura">Lectura</span>}
+        {userLoaded && !isAdmin && <span className="pill faint" title="Solo lectura">Lectura</span>}
         {protector.active && isAdmin && (
           <button className="mini-btn amber" onClick={handleManual}>Disparar manual</button>
         )}
@@ -1693,6 +1694,7 @@ function Dashboard({ user, onLogout, userId }) {
   const setSimulationModeMutation = useMutation(api.systemConfig.setSimulationMode);
   const setTradingEnabledMutation = useMutation(api.systemConfig.setTradingEnabled);
   const currentUser = useQuery(api.users.getUser, {});
+  const userLoaded = currentUser !== undefined;
   const isAdmin = currentUser?.role === 'admin';
   const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
   const signals = useQuery(api.tradesHistory.listSignals, {});
@@ -1929,7 +1931,7 @@ function Dashboard({ user, onLogout, userId }) {
           <button className="ghost-btn" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
             {theme === 'dark' ? 'Modo blanco' : 'Modo oscuro'}
           </button>
-          {!isAdmin && <span className="pill faint">Solo lectura</span>}
+          {userLoaded && !isAdmin && <span className="pill faint">Solo lectura</span>}
           <span className="pill">{user.name}</span>
           <button className="ghost-btn" onClick={onLogout}>Salir</button>
         </div>
@@ -1992,6 +1994,7 @@ function Dashboard({ user, onLogout, userId }) {
               simulationMode={simulationMode}
               tradingEnabled={tradingEnabled}
               isAdmin={isAdmin}
+              userLoaded={userLoaded}
             />
             <SimulationHistory signals={signals} />
             <AlertsPanel
@@ -2010,7 +2013,7 @@ function Dashboard({ user, onLogout, userId }) {
               </div>
               <div className="bot-list">
                 {bots.map((bot) => (
-                  <BotCard key={bot.id} bot={bot} onSetActive={setBotActive} onMode={setBotMode} onConfig={updateBotConfig} onManualTrigger={handleManualTrigger} isAdmin={isAdmin} />
+                  <BotCard key={bot.id} bot={bot} onSetActive={setBotActive} onMode={setBotMode} onConfig={updateBotConfig} onManualTrigger={handleManualTrigger} isAdmin={isAdmin} userLoaded={userLoaded} />
                 ))}
               </div>
             </section>

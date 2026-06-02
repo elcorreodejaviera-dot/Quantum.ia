@@ -852,7 +852,13 @@ function SpotPositions({ prices, connected }) {
                       </span>
                     )}
                   </div>
-                  {onChain ? (
+                  {chainLoading && (
+                    <p className="network" style={{ margin: '6px 0 0' }}>Leyendo Ethereum / Arbitrum / Base / Optimism...</p>
+                  )}
+                  {chainError && (
+                    <p className="network" style={{ margin: '6px 0 0', color: 'var(--red,#f44)' }}>{chainError}</p>
+                  )}
+                  {!chainLoading && onChain && (
                     <>
                       <div className="spot-metrics">
                         <Metric label="Balance total" value={`${onChain.total.toFixed(6)} ${position.asset}`} />
@@ -860,7 +866,7 @@ function SpotPositions({ prices, connected }) {
                         <Metric label="Costo (DCA)" value={position.dca > 0 ? formatUsd(onChain.total * position.dca) : '—'} />
                         <Metric label="PnL" value={onChainPnl != null ? formatUsd(onChainPnl) : '—'} />
                       </div>
-                      {Object.keys(onChain.perChain).length > 1 && (
+                      {Object.keys(onChain.perChain).length > 0 && (
                         <div className="spot-metrics" style={{ marginTop: 4 }}>
                           {Object.entries(onChain.perChain).map(([chain, bal]) => (
                             <Metric key={chain} label={chain} value={`${bal.toFixed(6)}`} />
@@ -868,8 +874,11 @@ function SpotPositions({ prices, connected }) {
                         </div>
                       )}
                     </>
-                  ) : !chainLoading && !chainError && (
-                    <p className="network" style={{ margin: '6px 0 0' }}>Sin balance de {position.asset} en Arbitrum/Base/Optimism</p>
+                  )}
+                  {!chainLoading && !chainError && !onChain && (
+                    <p className="network" style={{ margin: '6px 0 0' }}>
+                      Sin balance de {position.asset} en Ethereum / Arbitrum / Base / Optimism
+                    </p>
                   )}
 
                   {/* Posición perp en HL */}

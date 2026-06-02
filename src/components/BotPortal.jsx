@@ -2,7 +2,7 @@ import React from 'react'
 import { useUser, useClerk } from '@clerk/clerk-react'
 import { useConvexAuth, useQuery, useMutation } from 'convex/react'
 import { api } from '../../convex/_generated/api'
-import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState } from '../hooks/useHyperliquid'
+import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState, useWalletBalances } from '../hooks/useHyperliquid'
 
 const USERS = [
   { username: 'admin', password: import.meta.env.VITE_ADMIN_PASSWORD, name: 'Operador principal' },
@@ -702,7 +702,8 @@ function SpotPositions({ prices, connected }) {
   const EVM_RE = /^0x[a-fA-F0-9]{40}$/;
 
   const walletAddress = userFromDb?.walletAddress ?? null;
-  const { perpPositions, hlTokens, loading: spotLoading, error: spotError } = useHyperliquidSpotState(walletAddress);
+  const { perpPositions, hlTokens, loading: hlLoading, error: hlError } = useHyperliquidSpotState(walletAddress);
+  const { balances: onChainBalances, loading: chainLoading, error: chainError } = useWalletBalances(walletAddress);
   const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
 
   async function recordSpotSignal(asset, triggerType, price, amount) {
@@ -815,6 +816,13 @@ function SpotPositions({ prices, connected }) {
 
           const perpPos = perpPositions[position.asset] ?? null;
           const hlPnlTone = perpPos == null ? '' : perpPos.unrealizedPnl >= 0 ? 'green' : 'red';
+          const onChain = onChainBalances[position.asset] ?? null;
+          const onChainValue = onChain && hasPrice ? onChain.total * position.currentPrice : null;
+          const onChainPnl = onChainValue != null && position.dca > 0
+            ? onChainValue - onChain.total * position.dca : null;
+          const onChainPnlPct = onChainPnl != null && position.dca > 0 && onChain.total > 0
+            ? (onChainPnl / (onChain.total * position.dca)) * 100 : null;
+          const chainTone = onChainPnl == null ? '' : onChainPnl >= 0 ? 'green' : 'red';
 
           return (
             <article className="spot-card" key={position.asset}>
@@ -828,35 +836,76 @@ function SpotPositions({ prices, connected }) {
 
               {walletAddress && (
                 <div className="hl-position-block">
+                  {/* On-chain balances */}
                   <div className="hl-position-head">
-                    <span className="hl-position-label">Posición HL</span>
-                    {spotLoading && <span className="network">Cargando...</span>}
-                    {spotError && <span style={{ fontSize: 11, color: 'var(--red, #f44)' }}>{spotError}</span>}
-                    {perpPos && (
-                      <>
-                        <span className={`pill ${perpPos.size > 0 ? 'green' : 'cyan'}`}>
-                          {perpPos.size > 0 ? 'Long' : 'Short'}
-                        </span>
-                        <span className={`pill ${hlPnlTone}`}>
-                          {perpPos.unrealizedPnl >= 0 ? '+' : ''}{formatUsd(perpPos.unrealizedPnl)}
-                        </span>
-                        <span className={`pill ${hlPnlTone}`}>
-                          {(perpPos.roe * 100).toFixed(2)}% ROE
-                        </span>
-                      </>
+                    <span className="hl-position-label">Wallet on-chain</span>
+                    {chainLoading && <span className="network">Leyendo cadena...</span>}
+                    {chainError && <span style={{ fontSize: 11, color: 'var(--red,#f44)' }}>{chainError}</span>}
+                    {onChainPnl != null && (
+                      <span className={`pill ${chainTone}`}>
+                        {onChainPnl >= 0 ? '+' : ''}{formatUsd(onChainPnl)}
+                      </span>
+                    )}
+                    {onChainPnlPct != null && (
+                      <span className={`pill ${chainTone}`}>
+                        {onChainPnlPct >= 0 ? '+' : ''}{onChainPnlPct.toFixed(2)}%
+                      </span>
                     )}
                   </div>
-                  {perpPos ? (
-                    <div className="spot-metrics">
-                      <Metric label="Tamaño" value={`${Math.abs(perpPos.size).toFixed(4)} ${position.asset}`} />
-                      <Metric label="Entrada" value={`$${formatPrice(`${position.asset}/USDC`, perpPos.entryPx)}`} />
-                      <Metric label="Valor pos." value={formatUsd(Math.abs(perpPos.positionValue))} />
-                      <Metric label="PnL no real." value={formatUsd(perpPos.unrealizedPnl)} />
-                      {perpPos.leverage && <Metric label="Leverage" value={`${perpPos.leverage}x`} />}
-                      {perpPos.liquidationPx && <Metric label="Liquidación" value={`$${formatPrice(`${position.asset}/USDC`, perpPos.liquidationPx)}`} />}
+                  {onChain ? (
+                    <>
+                      <div className="spot-metrics">
+                        <Metric label="Balance total" value={`${onChain.total.toFixed(6)} ${position.asset}`} />
+                        <Metric label="Valor actual" value={onChainValue != null ? formatUsd(onChainValue) : '—'} />
+                        <Metric label="Costo (DCA)" value={position.dca > 0 ? formatUsd(onChain.total * position.dca) : '—'} />
+                        <Metric label="PnL" value={onChainPnl != null ? formatUsd(onChainPnl) : '—'} />
+                      </div>
+                      {Object.keys(onChain.perChain).length > 1 && (
+                        <div className="spot-metrics" style={{ marginTop: 4 }}>
+                          {Object.entries(onChain.perChain).map(([chain, bal]) => (
+                            <Metric key={chain} label={chain} value={`${bal.toFixed(6)}`} />
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  ) : !chainLoading && !chainError && (
+                    <p className="network" style={{ margin: '6px 0 0' }}>Sin balance de {position.asset} en Arbitrum/Base/Optimism</p>
+                  )}
+
+                  {/* Posición perp en HL */}
+                  {(perpPos || (!hlLoading && !hlError)) && (
+                    <div style={{ borderTop: '1px solid var(--line)', marginTop: 8, paddingTop: 8 }}>
+                      <div className="hl-position-head">
+                        <span className="hl-position-label">Posición HL perp</span>
+                        {hlLoading && <span className="network">Cargando HL...</span>}
+                        {hlError && <span style={{ fontSize: 11, color: 'var(--red,#f44)' }}>{hlError}</span>}
+                        {perpPos && (
+                          <>
+                            <span className={`pill ${perpPos.size > 0 ? 'green' : 'cyan'}`}>
+                              {perpPos.size > 0 ? 'Long' : 'Short'}
+                            </span>
+                            <span className={`pill ${hlPnlTone}`}>
+                              {perpPos.unrealizedPnl >= 0 ? '+' : ''}{formatUsd(perpPos.unrealizedPnl)}
+                            </span>
+                            <span className={`pill ${hlPnlTone}`}>
+                              {(perpPos.roe * 100).toFixed(2)}% ROE
+                            </span>
+                          </>
+                        )}
+                      </div>
+                      {perpPos ? (
+                        <div className="spot-metrics">
+                          <Metric label="Tamaño" value={`${Math.abs(perpPos.size).toFixed(4)} ${position.asset}`} />
+                          <Metric label="Entrada" value={`$${formatPrice(`${position.asset}/USDC`, perpPos.entryPx)}`} />
+                          <Metric label="Valor pos." value={formatUsd(Math.abs(perpPos.positionValue))} />
+                          <Metric label="PnL no real." value={formatUsd(perpPos.unrealizedPnl)} />
+                          {perpPos.leverage && <Metric label="Leverage" value={`${perpPos.leverage}x`} />}
+                          {perpPos.liquidationPx && <Metric label="Liquidación" value={`$${formatPrice(`${position.asset}/USDC`, perpPos.liquidationPx)}`} />}
+                        </div>
+                      ) : !hlLoading && (
+                        <p className="network" style={{ margin: '6px 0 0' }}>Sin posición perp abierta en HL</p>
+                      )}
                     </div>
-                  ) : !spotLoading && !spotError && (
-                    <p className="network" style={{ margin: '6px 0 0' }}>Sin posición abierta en HL para {position.asset}</p>
                   )}
                 </div>
               )}
@@ -895,6 +944,7 @@ function SpotPositions({ prices, connected }) {
                 currentPrice={position.currentPrice}
                 dca={position.dca}
                 hlPosition={perpPos}
+                onChainBalance={onChain}
                 onChange={(patch) => updateProtector(position.asset, patch)}
                 onFireSignal={(triggerType, price, amount) =>
                   recordSpotSignal(position.asset, triggerType, price, amount)
@@ -955,12 +1005,12 @@ function SimulationHistory({ signals }) {
   );
 }
 
-function SpotProtectorBot({ asset, protector, onChange, currentPrice, dca, hlPosition, onFireSignal }) {
+function SpotProtectorBot({ asset, protector, onChange, currentPrice, dca, hlPosition, onChainBalance, onFireSignal }) {
   const [open, setOpen] = React.useState(false);
   const cooldownRef = React.useRef(0);
   const COOLDOWN_MS = 60 * 60 * 1000; // 1 hora entre señales auto
 
-  // DCA efectivo: si hay posición perp en HL, usar entryPx como referencia
+  // DCA efectivo por prioridad: 1) perp HL entryPx, 2) on-chain (dca manual), 3) input manual
   const hlDca = hlPosition?.entryPx > 0 ? hlPosition.entryPx : null;
   const effectiveDca = hlDca ?? dca;
 

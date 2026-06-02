@@ -1075,6 +1075,16 @@ button {
   outline: none;
 }
 
+.spot-calc-value {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 26px;
+}
+
+.spot-calc-value.positive { color: var(--green); }
+.spot-calc-value.negative { color: var(--red); }
+
 .spot-collapse-right {
   display: flex;
   align-items: center;

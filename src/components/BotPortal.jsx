@@ -919,6 +919,10 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
         {positions.map((position) => {
           const hasPrice = position.currentPrice != null;
           const isOpen = !!openAssets[position.asset];
+          const invested = position.dca * position.amount;
+          const currentVal = hasPrice ? position.currentPrice * position.amount : null;
+          const pnl = currentVal != null ? currentVal - invested : null;
+          const pnlPositive = pnl != null && pnl >= 0;
 
           return (
             <article className="spot-card" key={position.asset}>
@@ -951,6 +955,16 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
                       onBlur={() => commitDraft(position.asset, 'amount')}
                     />
                   </label>
+                  <div className="spot-inline-field">
+                    <span>Invertido</span>
+                    <span className="spot-calc-value">{invested > 0 ? formatUsd(invested) : '—'}</span>
+                  </div>
+                  <div className="spot-inline-field">
+                    <span>Valor actual</span>
+                    <span className={`spot-calc-value${currentVal != null ? (pnlPositive ? ' positive' : ' negative') : ''}`}>
+                      {currentVal != null ? formatUsd(currentVal) : '—'}
+                    </span>
+                  </div>
                 </div>
                 <div className="spot-collapse-right">
                   <span className="pill">{position.protector?.active ? 'Bot activo' : 'Bot pausado'}</span>

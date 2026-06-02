@@ -216,6 +216,8 @@ function PoolCard({ pool }) {
   const borrowTone = pool.borrowHealth < 50 ? 'red' : pool.borrowHealth < 70 ? 'amber' : 'green';
   const borrowLabel = pool.borrowHealth < 50 ? 'Riesgo alto' : pool.borrowHealth < 70 ? 'Vigilar' : 'Saludable';
 
+  const feeTierLabel = pool.feeTier != null ? `${(pool.feeTier / 10000).toFixed(2)}%` : null;
+
   return (
     <article className="pool-card">
       <div className="pool-title">
@@ -223,7 +225,10 @@ function PoolCard({ pool }) {
           <div className="pair">{pool.pair}</div>
           <div className="network">{pool.network}</div>
         </div>
-        <span className={`pill ${tone}`}>{pool.status}</span>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {feeTierLabel && <span className="pill" title="Fee tier">{feeTierLabel} fee</span>}
+          <span className={`pill ${tone}`}>{pool.status}</span>
+        </div>
       </div>
 
       <div className={`borrow-health borrow-health-featured ${borrowTone}`}>
@@ -259,6 +264,7 @@ function PoolCard({ pool }) {
       <div className="pool-meta">
         <Metric label="TVL" value={pool.tvl != null ? formatUsdCompact(pool.tvl) : formatUsdCompact(pool.liquidity)} />
         <Metric label="Vol. 24h" value={pool.volume1d != null ? formatUsdCompact(pool.volume1d) : '—'} />
+        <Metric label="Vol. 7d" value={pool.volume7d != null ? formatUsdCompact(pool.volume7d) : '—'} />
         <Metric label="Fees 24h" value={formatUsdCompact(pool.fees24h)} />
         <Metric label={apyLabel} value={`${parts.annual.toFixed(1)}%`} />
         <Metric label="Funding" value={pool.funding != null ? `${(pool.funding * 100).toFixed(4)}%` : '—'} />

@@ -49,7 +49,9 @@ export const fetchAndUpdateApys = internalAction({
       apy?: number;
       tvlUsd?: number;
       volumeUsd1d?: number;
+      volumeUsd7d?: number;
       feeTier?: number;
+      poolMeta?: string;
       pool: string;
       underlyingTokens?: string[];
     }>;
@@ -75,12 +77,19 @@ export const fetchAndUpdateApys = internalAction({
         ? rawId.split(':')[0].toLowerCase()
         : undefined;
 
+      // poolMeta contiene el fee tier como "0.05%" — convertir a bps (500)
+      const feeTierBps = best.poolMeta
+        ? Math.round(parseFloat(best.poolMeta) * 100)
+        : undefined;
+
       await ctx.runMutation(internal.pools.patchPoolApy, {
         id: cp._id,
         apy: best.apy ?? 0,
         tvl: best.tvlUsd,
         fees1d: estimateFees1d(best),
         volume1d: best.volumeUsd1d,
+        volume7d: best.volumeUsd7d,
+        feeTier: feeTierBps,
         defillamaId: best.pool,
         poolAddress,
       });

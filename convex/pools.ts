@@ -25,14 +25,18 @@ export const patchPoolApy = internalMutation({
     tvl: v.optional(v.number()),
     fees1d: v.optional(v.number()),
     volume1d: v.optional(v.number()),
+    volume7d: v.optional(v.number()),
+    feeTier: v.optional(v.number()),
     defillamaId: v.optional(v.string()),
     poolAddress: v.optional(v.string()),
   },
-  handler: async (ctx, { id, apy, tvl, fees1d, volume1d, defillamaId, poolAddress }) => {
+  handler: async (ctx, { id, apy, tvl, fees1d, volume1d, volume7d, feeTier, defillamaId, poolAddress }) => {
     const patch: Record<string, unknown> = { apy, apyUpdatedAt: Date.now() };
     if (tvl !== undefined) patch.tvl = tvl;
     if (fees1d !== undefined) patch.fees1d = fees1d;
     if (volume1d !== undefined) patch.volume1d = volume1d;
+    if (volume7d !== undefined) patch.volume7d = volume7d;
+    if (feeTier !== undefined) patch.feeTier = feeTier;
     if (defillamaId !== undefined) patch.defillamaId = defillamaId;
     if (poolAddress !== undefined) patch.poolAddress = poolAddress;
     await ctx.db.patch(id, patch);

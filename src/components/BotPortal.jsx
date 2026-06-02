@@ -2,7 +2,7 @@ import React from 'react'
 import { useUser, useClerk } from '@clerk/clerk-react'
 import { useConvexAuth, useQuery, useMutation } from 'convex/react'
 import { api } from '../../convex/_generated/api'
-import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids } from '../hooks/useHyperliquid'
+import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState } from '../hooks/useHyperliquid'
 
 const USERS = [
   { username: 'admin', password: import.meta.env.VITE_ADMIN_PASSWORD, name: 'Operador principal' },
@@ -692,8 +692,17 @@ function HLMarketPanel() {
 
 function SpotPositions({ prices, connected }) {
   const positionsFromDb = useQuery(api.spot_positions.listMyPositions);
+  const userFromDb = useQuery(api.users.getUser);
+  const setWalletAddressMutation = useMutation(api.users.setWalletAddress);
   const [positions, setPositions] = React.useState(INITIAL_SPOT_POSITIONS);
   const [hlOpen, setHlOpen] = React.useState(false);
+  const [walletInput, setWalletInput] = React.useState('');
+  const [editingWallet, setEditingWallet] = React.useState(false);
+  const [walletError, setWalletError] = React.useState('');
+  const EVM_RE = /^0x[a-fA-F0-9]{40}$/;
+
+  const walletAddress = userFromDb?.walletAddress ?? null;
+  const { spotBalances, loading: spotLoading } = useHyperliquidSpotState(walletAddress);
 
   React.useEffect(() => {
     if (positionsFromDb === undefined) return;
@@ -712,6 +721,22 @@ function SpotPositions({ prices, connected }) {
     })));
   }, [prices]);
 
+  async function saveWallet() {
+    const addr = walletInput.trim().toLowerCase();
+    if (!EVM_RE.test(addr)) {
+      setWalletError('Debe ser 0x seguido de 40 caracteres hex');
+      return;
+    }
+    setWalletError('');
+    try {
+      await setWalletAddressMutation({ walletAddress: addr });
+      setEditingWallet(false);
+      setWalletInput('');
+    } catch (err) {
+      setWalletError(err.message ?? 'Error al guardar');
+    }
+  }
+
   function updatePosition(asset, patch) {
     setPositions((items) => items.map((item) => item.asset === asset ? { ...item, ...patch } : item));
   }
@@ -729,6 +754,32 @@ function SpotPositions({ prices, connected }) {
         <span className="pill">BTC / ETH</span>
         <span className={`pill${connected ? ' green' : ''}`}>{connected ? 'HL en vivo' : 'Conectando...'}</span>
       </div>
+
+      <div className="wallet-hl-row">
+        {walletAddress && !editingWallet ? (
+          <>
+            <span className="network mono">{walletAddress.slice(0, 8)}…{walletAddress.slice(-6)}</span>
+            {spotLoading && <span className="network"> Leyendo HL...</span>}
+            <button className="mini-btn" style={{ marginLeft: 8 }} onClick={() => { setEditingWallet(true); setWalletInput(walletAddress); }}>Cambiar wallet</button>
+          </>
+        ) : (
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input
+                className="hl-search"
+                style={{ flex: 1, margin: 0 }}
+                placeholder="Wallet 0x... (40 chars hex)"
+                value={walletInput}
+                onChange={e => { setWalletInput(e.target.value); setWalletError(''); }}
+              />
+              <button className="mini-btn" onClick={saveWallet}>Guardar</button>
+              {editingWallet && <button className="mini-btn" onClick={() => { setEditingWallet(false); setWalletError(''); }}>Cancelar</button>}
+            </div>
+            {walletError && <span style={{ fontSize: 11, color: 'var(--red, #f44)' }}>{walletError}</span>}
+          </div>
+        )}
+      </div>
+
       <div className="hl-market-toggle">
         <button className="mini-btn" onClick={() => setHlOpen(v => !v)}>
           {hlOpen ? 'Ocultar mercado HL' : 'Ver mercado HL'}
@@ -745,6 +796,12 @@ function SpotPositions({ prices, connected }) {
           const pnlPct = hasPrice && cost > 0 ? (pnl / cost) * 100 : null;
           const tone = pnl == null ? '' : pnl >= 0 ? 'green' : 'red';
 
+          const hlBalance = spotBalances[position.asset] ?? null;
+          const hlValue = hlBalance && hasPrice ? hlBalance.total * position.currentPrice : null;
+          const hlPnl = hlBalance && hlBalance.entryNtl > 0 ? (hlValue ?? 0) - hlBalance.entryNtl : null;
+          const hlPnlPct = hlPnl != null && hlBalance.entryNtl > 0 ? (hlPnl / hlBalance.entryNtl) * 100 : null;
+          const hlTone = hlPnl == null ? '' : hlPnl >= 0 ? 'green' : 'red';
+
           return (
             <article className="spot-card" key={position.asset}>
               <div className="spot-head">
@@ -754,9 +811,28 @@ function SpotPositions({ prices, connected }) {
                 </div>
                 <span className={`pill ${tone}`}>{pnl == null ? 'Sin precio' : pnl >= 0 ? 'Ganancia' : 'Pérdida'}</span>
               </div>
+
+              {hlBalance && (
+                <div className="hl-position-block">
+                  <div className="hl-position-head">
+                    <span className="hl-position-label">Posición HL</span>
+                    <span className={`pill ${hlTone}`}>{hlPnl == null ? '—' : hlPnl >= 0 ? '+' + formatUsd(hlPnl) : formatUsd(hlPnl)}</span>
+                    {hlPnlPct != null && (
+                      <span className={`pill ${hlTone}`}>{hlPnlPct >= 0 ? '+' : ''}{hlPnlPct.toFixed(2)}%</span>
+                    )}
+                  </div>
+                  <div className="spot-metrics">
+                    <Metric label="Balance HL" value={`${hlBalance.total.toFixed(6)} ${position.asset}`} />
+                    <Metric label="En órdenes" value={hlBalance.hold > 0 ? `${hlBalance.hold.toFixed(6)}` : '—'} />
+                    <Metric label="Costo entrada" value={hlBalance.entryNtl > 0 ? formatUsd(hlBalance.entryNtl) : '—'} />
+                    <Metric label="Valor actual" value={hlValue != null ? formatUsd(hlValue) : '—'} />
+                  </div>
+                </div>
+              )}
+
               <div className="spot-form">
                 <label className="config-field">
-                  <span>Cantidad</span>
+                  <span>Cantidad (manual)</span>
                   <input
                     type="number"
                     min="0"

@@ -37,9 +37,16 @@ export const getUser = query({
   },
 });
 
+const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+
 export const setWalletAddress = mutation({
   args: { walletAddress: v.string() },
   handler: async (ctx, { walletAddress }) => {
+    const normalized = walletAddress.trim().toLowerCase();
+    if (!EVM_ADDRESS_RE.test(normalized)) {
+      throw new Error("Dirección EVM inválida — debe ser 0x seguido de 40 caracteres hex");
+    }
+
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new Error("Not authenticated");
 
@@ -49,7 +56,7 @@ export const setWalletAddress = mutation({
       .first();
     if (!user) throw new Error("User not found");
 
-    await ctx.db.patch(user._id, { walletAddress });
+    await ctx.db.patch(user._id, { walletAddress: normalized });
   },
 });
 

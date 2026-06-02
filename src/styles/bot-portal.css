@@ -827,6 +827,40 @@ button {
   font-size: 12px;
 }
 
+/* Wallet HL row */
+.wallet-hl-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0 4px;
+  flex-wrap: wrap;
+}
+
+/* HL position block inside spot card */
+.hl-position-block {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 8px 0;
+  padding: 10px 12px;
+}
+
+.hl-position-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.hl-position-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
 /* HL market panel */
 .hl-market-toggle {
   display: flex;

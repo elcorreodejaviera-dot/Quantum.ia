@@ -143,6 +143,46 @@ export function useHyperliquidAllMids() {
   return { allPrices, connected };
 }
 
+export function useHyperliquidSpotState(address) {
+  const [spotBalances, setSpotBalances] = useState({});
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    setSpotBalances({});
+    if (!address) return;
+    let cancelled = false;
+
+    async function fetchSpot() {
+      setLoading(true);
+      try {
+        const res = await fetch(HL_REST, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'spotClearinghouseState', user: address }),
+        });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (cancelled) return;
+        const map = {};
+        for (const b of data.balances ?? []) {
+          const total = parseFloat(b.total);
+          const entryNtl = parseFloat(b.entryNtl);
+          if (total > 0) map[b.coin] = { total, entryNtl, hold: parseFloat(b.hold ?? 0) };
+        }
+        setSpotBalances(map);
+      } catch (_) {} finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    fetchSpot();
+    const interval = setInterval(fetchSpot, 30_000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [address]);
+
+  return { spotBalances, loading };
+}
+
 export function useHyperliquidFunding() {
   const [funding, setFunding] = useState({});
 

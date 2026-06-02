@@ -788,6 +788,31 @@ button {
   font-size: 13px;
 }
 
+.hl-account-scan {
+  margin-bottom: 8px;
+}
+
+.futures-grid.compact {
+  margin-top: 6px;
+}
+
+.hl-position-list {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.hl-position-row {
+  display: grid;
+  grid-template-columns: 0.7fr 1fr 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
 /* Protector bot status row */
 .protector-status {
   display: grid;

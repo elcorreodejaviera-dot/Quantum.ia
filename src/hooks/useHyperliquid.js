@@ -321,17 +321,17 @@ export function useWalletBalances(wallets) {
 }
 
 export function useHLAccountBalance(address) {
-  const [balance, setBalance] = useState(null);
+  const [account, setAccount] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    setBalance(null);
+    setAccount(null);
     setError(null);
     if (!address) return;
     let cancelled = false;
 
-    async function fetchBalance() {
+    async function fetchAccount() {
       setLoading(true);
       try {
         const res = await fetch(HL_REST, {
@@ -343,22 +343,28 @@ export function useHLAccountBalance(address) {
         if (cancelled) return;
         const data = await res.json();
         if (!cancelled) {
-          setBalance(parseFloat(data.withdrawable ?? 0));
+          setAccount({
+            accountValue: parseFloat(data.marginSummary?.accountValue ?? 0),
+            withdrawable: parseFloat(data.withdrawable ?? 0),
+            totalNtlPos: parseFloat(data.marginSummary?.totalNtlPos ?? 0),
+            totalMarginUsed: parseFloat(data.marginSummary?.totalMarginUsed ?? 0),
+            openPositions: (data.assetPositions ?? []).filter(p => parseFloat(p.position?.szi ?? 0) !== 0),
+          });
           setError(null);
         }
-      } catch (err) {
+      } catch (_) {
         if (!cancelled) setError('Sin conexión con Hyperliquid');
       } finally {
         if (!cancelled) setLoading(false);
       }
     }
 
-    fetchBalance();
-    const interval = setInterval(fetchBalance, 30_000);
+    fetchAccount();
+    const interval = setInterval(fetchAccount, 30_000);
     return () => { cancelled = true; clearInterval(interval); };
   }, [address]);
 
-  return { balance, loading, error };
+  return { account, loading, error };
 }
 
 export function useHyperliquidSpotState(address) {

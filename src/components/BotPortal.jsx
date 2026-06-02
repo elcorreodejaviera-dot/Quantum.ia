@@ -871,7 +871,7 @@ const EVM_RE_PROTECTOR = /^0x[a-fA-F0-9]{40}$/;
 function SpotProtectorBot({ asset, protector, onChange, currentPrice, onFireSignal }) {
   const hlWallet = protector.hlWallet ?? '';
   const validWallet = EVM_RE_PROTECTOR.test(hlWallet);
-  const { balance: hlBalance, loading: hlBalLoading, error: hlBalError } = useHLAccountBalance(validWallet ? hlWallet : null);
+  const { account: hlAccount, loading: hlBalLoading, error: hlBalError } = useHLAccountBalance(validWallet ? hlWallet : null);
 
   function handleManual() {
     if (!protector.active) return;
@@ -900,11 +900,43 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, onFireSign
         <span style={{ fontSize: 11, color: 'var(--red,#f44)' }}>Dirección EVM inválida</span>
       )}
       {validWallet && (
-        <div className="network" style={{ fontSize: 12, marginBottom: 6 }}>
-          Saldo HL:{' '}
-          {hlBalLoading ? 'Cargando...' :
-           hlBalError ? <span style={{ color: 'var(--red,#f44)' }}>{hlBalError}</span> :
-           hlBalance != null ? `$${hlBalance.toLocaleString('en-US', { maximumFractionDigits: 2 })} USDC` : '—'}
+        <div className="hl-account-scan">
+          <div className="network" style={{ fontSize: 12 }}>
+            Scanner HL:{' '}
+            {hlBalLoading ? 'Cargando...' :
+             hlBalError ? <span style={{ color: 'var(--red,#f44)' }}>{hlBalError}</span> :
+             hlAccount ? 'Cuenta conectada' : '—'}
+          </div>
+          {hlAccount && (
+            <>
+              <div className="futures-grid compact">
+                <Metric label="Account value" value={formatUsd(hlAccount.accountValue)} />
+                <Metric label="Withdrawable" value={formatUsd(hlAccount.withdrawable)} />
+                <Metric label="Notional" value={formatUsd(hlAccount.totalNtlPos)} />
+                <Metric label="Margin used" value={formatUsd(hlAccount.totalMarginUsed)} />
+              </div>
+              <div className="network" style={{ fontSize: 12, marginTop: 6 }}>
+                Posiciones abiertas: {hlAccount.openPositions.length}
+              </div>
+              {hlAccount.openPositions.length > 0 && (
+                <div className="hl-position-list">
+                  {hlAccount.openPositions.slice(0, 4).map((item) => {
+                    const position = item.position ?? {};
+                    const size = parseFloat(position.szi ?? 0);
+                    const entry = parseFloat(position.entryPx ?? 0);
+                    const coin = position.coin ?? '—';
+                    return (
+                      <div className="hl-position-row" key={`${coin}-${position.szi}`}>
+                        <span>{coin}</span>
+                        <span className="mono">{size > 0 ? 'Long' : 'Short'} {Math.abs(size).toLocaleString('en-US', { maximumFractionDigits: 4 })}</span>
+                        <span className="mono">@ ${entry > 0 ? formatPrice(`${coin}/USDC`, entry) : '—'}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
 

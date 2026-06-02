@@ -774,6 +774,10 @@ function SpotPositions({ prices, connected }) {
       </div>
 
       <div className="wallet-hl-row">
+        {/* DEBUG — eliminar tras diagnóstico */}
+        <span style={{ fontSize: 10, color: '#888', width: '100%', marginBottom: 4 }}>
+          wallet: {walletAddress ?? 'null'} | userFromDb: {userFromDb === undefined ? 'cargando' : userFromDb ? userFromDb.clerkId?.slice(0,12) : 'null'}
+        </span>
         {walletAddress && !editingWallet ? (
           <>
             <span className="network mono">{walletAddress.slice(0, 8)}…{walletAddress.slice(-6)}</span>

@@ -44,8 +44,8 @@ const SUBSCRIPTIONS = [
 ];
 
 const INITIAL_SPOT_POSITIONS = [
-  { asset: 'BTC', amount: 0.42, dca: 63200, currentPrice: null, protector: { active: true, triggerDrop: 4, buySize: 15, maxBuys: 3, capitalReserve: 5000, orderType: 'Trigger por caída', takeProfit: 'Rebajar DCA' } },
-  { asset: 'ETH', amount: 8.6, dca: 3420, currentPrice: null, protector: { active: true, triggerDrop: 5, buySize: 20, maxBuys: 4, capitalReserve: 3500, orderType: 'Trigger por caída', takeProfit: 'Rebajar DCA' } },
+  { asset: 'BTC', amount: 0.42, dca: 63200, currentPrice: null, protector: { active: true, triggerDrop: 4, buySize: 15, maxBuys: 3, capitalReserve: 5000, orderType: 'Cobertura DCA', takeProfit: 'Rebajar DCA' } },
+  { asset: 'ETH', amount: 8.6, dca: 3420, currentPrice: null, protector: { active: true, triggerDrop: 5, buySize: 20, maxBuys: 4, capitalReserve: 3500, orderType: 'Cobertura DCA', takeProfit: 'Rebajar DCA' } },
 ];
 
 // Campos UI de bots que no están en el schema de Convex (trading config extendida)
@@ -663,7 +663,7 @@ function RiskPanel({ pools }) {
   );
 }
 
-const DEFAULT_PROTECTOR = { active: true, triggerDrop: 4, buySize: 15, maxBuys: 3, capitalReserve: 5000, orderType: 'Trigger por caída', takeProfit: 'Rebajar DCA' };
+const DEFAULT_PROTECTOR = { active: true, triggerDrop: 4, buySize: 15, maxBuys: 3, capitalReserve: 5000, orderType: 'Cobertura DCA', takeProfit: 'Rebajar DCA' };
 
 function HLMarketPanel() {
   const [hlSearch, setHlSearch] = React.useState('');
@@ -777,8 +777,8 @@ function SpotPositions({ prices, connected }) {
       const effectiveDca = hlDca ?? position.dca;
 
       const triggerLevel =
-        protector.orderType === 'Trigger por caída' && effectiveDca
-          ? effectiveDca * (1 - protector.triggerDrop / 100)
+        protector.orderType === 'Cobertura DCA' && effectiveDca
+          ? effectiveDca   // dispara cuando precio cae al nivel DCA
           : protector.orderType === 'Trigger por precio' && protector.triggerPrice > 0
             ? protector.triggerPrice
             : null;
@@ -1046,8 +1046,8 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, dca, hlPos
   const effectiveDca = hlDca ?? dca;
 
   const triggerLevel =
-    protector.orderType === 'Trigger por caída' && effectiveDca
-      ? effectiveDca * (1 - protector.triggerDrop / 100)
+    protector.orderType === 'Cobertura DCA' && effectiveDca
+      ? effectiveDca   // dispara cuando precio llega al DCA
       : protector.orderType === 'Trigger por precio' && protector.triggerPrice > 0
         ? protector.triggerPrice
         : null;
@@ -1073,7 +1073,7 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, dca, hlPos
         <Metric
           label="Trigger"
           value={
-            protector.orderType === 'Trigger por caída' ? `${protector.triggerDrop}% caída` :
+            protector.orderType === 'Cobertura DCA' ? `${protector.triggerDrop}x` :
             protector.orderType === 'Trigger por precio' ? `$${protector.triggerPrice > 0 ? formatPrice(`${asset}/USDC`, protector.triggerPrice) : '—'}` :
             protector.orderType
           }
@@ -1125,7 +1125,7 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, dca, hlPos
           <ConfigAction
             title="Trigger"
             value={
-              protector.orderType === 'Trigger por caída' ? `${protector.triggerDrop}% caída` :
+              protector.orderType === 'Cobertura DCA' ? `${protector.triggerDrop}x` :
               protector.orderType === 'Trigger por precio' ? `$${protector.triggerPrice > 0 ? formatPrice(`${asset}/USDC`, protector.triggerPrice) : '—'}` :
               protector.orderType
             }
@@ -1133,25 +1133,25 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, dca, hlPos
             <label className="config-field">
               <span>Tipo de orden</span>
               <select value={protector.orderType} onChange={(event) => onChange({ orderType: event.target.value })}>
-                <option>Trigger por caída</option>
+                <option>Cobertura DCA</option>
                 <option>Trigger por precio</option>
                 <option>Trigger por RSI</option>
                 <option>Trigger manual</option>
               </select>
             </label>
-            {protector.orderType === 'Trigger por caída' && (
+            {protector.orderType === 'Cobertura DCA' && (
               <div className="config-field">
-                <span>Caída para comprar más</span>
+                <span>Leverage de cobertura</span>
                 <div className="range-control">
                   <input
                     type="range"
-                    min="0.5"
+                    min="0"
                     max="25"
-                    step="0.5"
+                    step="1"
                     value={protector.triggerDrop}
                     onChange={(event) => onChange({ triggerDrop: Number(event.target.value) })}
                   />
-                  <strong>{protector.triggerDrop}%</strong>
+                  <strong>{protector.triggerDrop}x</strong>
                 </div>
               </div>
             )}

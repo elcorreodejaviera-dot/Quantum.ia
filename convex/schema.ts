@@ -66,6 +66,16 @@ export default defineSchema({
     .index("by_type", ["type"])
     .index("by_owner", ["ownerId"]),
 
+  hl_api_credentials: defineTable({
+    userId: v.id("users"),
+    agentAddress: v.string(),
+    encryptedPrivateKey: v.string(),
+    iv: v.string(),
+    authTag: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_user", ["userId"]),
+
   spot_positions: defineTable({
     asset: v.string(),
     amount: v.number(),

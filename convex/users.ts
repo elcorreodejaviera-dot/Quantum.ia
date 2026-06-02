@@ -9,6 +9,13 @@ export const getCurrentAdminInternal = internalQuery({
   },
 });
 
+export const getCurrentUserInternal = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    return await requireUser(ctx);
+  },
+});
+
 export const getOrCreateUser = mutation({
   args: {},
   handler: async (ctx) => {

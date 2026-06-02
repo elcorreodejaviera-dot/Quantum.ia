@@ -5,16 +5,13 @@ import { internal } from "./_generated/api";
 import { v } from "convex/values";
 import { ExchangeClient, HttpTransport } from "@nktkas/hyperliquid";
 import { privateKeyToAccount } from "viem/accounts";
+import { decryptPrivateKey } from "./hlCredentialActions";
 
 const ASSET_IDS: Record<string, number> = {
   BTC: 0,
   ETH: 1,
 };
 const IOC_SLIPPAGE = 0.01;
-
-function normalizePrivateKey(value: string): `0x${string}` {
-  return value.startsWith("0x") ? value as `0x${string}` : `0x${value}`;
-}
 
 function orderIdFromResponse(response: unknown): string | undefined {
   const statuses = (response as any)?.response?.data?.statuses;
@@ -35,7 +32,7 @@ export const executePerpMarketOrder = action({
     confirmLive: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const user = await ctx.runQuery(internal.users.getCurrentAdminInternal, {});
+    const user = await ctx.runQuery(internal.users.getCurrentUserInternal, {});
     const tradingConfig = await ctx.runQuery(internal.systemConfig.getConfigInternal, {
       key: "tradingEnabled",
     });
@@ -50,10 +47,12 @@ export const executePerpMarketOrder = action({
     const assetId = ASSET_IDS[asset];
     if (assetId == null) throw new Error(`Unsupported HL asset: ${args.asset}`);
 
-    const privateKey = process.env.HL_API_PRIVATE_KEY;
-    if (!privateKey) throw new Error("HL_API_PRIVATE_KEY is not configured");
+    const credential = await ctx.runQuery(internal.hlCredentials.getForUserInternal, {
+      userId: user._id,
+    });
+    if (!credential) throw new Error("Hyperliquid API wallet is not connected");
 
-    const wallet = privateKeyToAccount(normalizePrivateKey(privateKey));
+    const wallet = privateKeyToAccount(decryptPrivateKey(credential));
     const transport = new HttpTransport();
     const exchange = new ExchangeClient({ transport, wallet });
 

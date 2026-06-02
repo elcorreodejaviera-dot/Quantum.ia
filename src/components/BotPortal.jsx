@@ -897,6 +897,35 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulation
   const hlWallet = protector.hlWallet ?? '';
   const validWallet = EVM_RE_PROTECTOR.test(hlWallet);
   const { account: hlAccount, loading: hlBalLoading, error: hlBalError } = useHLAccountBalance(validWallet ? hlWallet : null);
+  const credentialStatus = useQuery(api.hlCredentials.status);
+  const saveHlCredential = useAction(api.hlCredentialActions.save);
+  const revokeHlCredential = useMutation(api.hlCredentials.revoke);
+  const [apiKeyInput, setApiKeyInput] = React.useState('');
+  const [apiKeyError, setApiKeyError] = React.useState('');
+  const [apiKeySaving, setApiKeySaving] = React.useState(false);
+
+  async function saveApiKey() {
+    setApiKeyError('');
+    if (!apiKeyInput.trim()) return;
+    setApiKeySaving(true);
+    try {
+      await saveHlCredential({ privateKey: apiKeyInput.trim() });
+      setApiKeyInput('');
+    } catch (error) {
+      setApiKeyError(error?.message ?? 'No se pudo guardar la API wallet');
+    } finally {
+      setApiKeySaving(false);
+    }
+  }
+
+  async function revokeApiKey() {
+    setApiKeyError('');
+    try {
+      await revokeHlCredential({});
+    } catch (error) {
+      setApiKeyError(error?.message ?? 'No se pudo revocar la API wallet');
+    }
+  }
 
   function handleManual() {
     if (!protector.active) return;
@@ -965,6 +994,41 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulation
           )}
         </div>
       )}
+
+      <div className="be-block">
+        <div className="be-head">
+          <span>API wallet HL</span>
+          <span className={`pill${credentialStatus?.connected ? ' green' : ' amber'}`}>
+            {credentialStatus?.connected ? 'Conectada' : 'Sin API'}
+          </span>
+        </div>
+        {credentialStatus?.connected && (
+          <div className="network" style={{ fontSize: 12, marginTop: 6 }}>
+            Agent: {credentialStatus.agentAddress?.slice(0, 8)}...{credentialStatus.agentAddress?.slice(-6)}
+          </div>
+        )}
+        <div className="config-field" style={{ marginTop: 6 }}>
+          <span>Private key API wallet</span>
+          <input
+            type="password"
+            className="hl-search"
+            style={{ margin: 0 }}
+            placeholder="0x... solo se cifra en backend"
+            value={apiKeyInput}
+            onChange={(event) => setApiKeyInput(event.target.value)}
+            autoComplete="off"
+          />
+        </div>
+        {apiKeyError && <span style={{ fontSize: 11, color: 'var(--red,#f44)' }}>{apiKeyError}</span>}
+        <div className="wallet-actions" style={{ marginTop: 8 }}>
+          <button className="mini-btn" onClick={saveApiKey} disabled={apiKeySaving || !apiKeyInput.trim()}>
+            {apiKeySaving ? 'Guardando...' : 'Guardar API'}
+          </button>
+          {credentialStatus?.connected && (
+            <button className="mini-btn" onClick={revokeApiKey}>Revocar API</button>
+          )}
+        </div>
+      </div>
 
       {/* Leverage */}
       <label className="config-field" style={{ padding: '4px 0' }}>

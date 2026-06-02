@@ -320,6 +320,47 @@ export function useWalletBalances(wallets) {
   return { balances, walletTokens, loading, error };
 }
 
+export function useHLAccountBalance(address) {
+  const [balance, setBalance] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    setBalance(null);
+    setError(null);
+    if (!address) return;
+    let cancelled = false;
+
+    async function fetchBalance() {
+      setLoading(true);
+      try {
+        const res = await fetch(HL_REST, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'clearinghouseState', user: address }),
+        });
+        if (!res.ok) { if (!cancelled) setError('Error al consultar HL'); return; }
+        if (cancelled) return;
+        const data = await res.json();
+        if (!cancelled) {
+          setBalance(parseFloat(data.withdrawable ?? 0));
+          setError(null);
+        }
+      } catch (err) {
+        if (!cancelled) setError('Sin conexión con Hyperliquid');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    fetchBalance();
+    const interval = setInterval(fetchBalance, 30_000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [address]);
+
+  return { balance, loading, error };
+}
+
 export function useHyperliquidSpotState(address) {
   // perpPositions: posiciones abiertas en perps (BTC, ETH, etc.)
   // hlTokens: tokens nativos de HL spot (HYPE, PURR, etc.)

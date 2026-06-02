@@ -773,6 +773,21 @@ button {
   color: var(--amber);
 }
 
+/* Break Even block */
+.be-block {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 4px 0 8px;
+}
+
+.be-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+}
+
 /* Protector bot status row */
 .protector-status {
   display: grid;

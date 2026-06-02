@@ -2,7 +2,7 @@ import React from 'react'
 import { useUser, useClerk } from '@clerk/clerk-react'
 import { useConvexAuth, useQuery, useMutation } from 'convex/react'
 import { api } from '../../convex/_generated/api'
-import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState, useWalletBalances } from '../hooks/useHyperliquid'
+import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState, useWalletBalances, useHLAccountBalance } from '../hooks/useHyperliquid'
 
 const USERS = [
   { username: 'admin', password: import.meta.env.VITE_ADMIN_PASSWORD, name: 'Operador principal' },
@@ -44,8 +44,8 @@ const SUBSCRIPTIONS = [
 ];
 
 const INITIAL_SPOT_POSITIONS = [
-  { asset: 'BTC', amount: 0.42, dca: 63200, currentPrice: null, protector: { active: true, triggerDrop: 4, buySize: 15, maxBuys: 3, capitalReserve: 5000, orderType: 'Cobertura DCA', takeProfit: 'Rebajar DCA' } },
-  { asset: 'ETH', amount: 8.6, dca: 3420, currentPrice: null, protector: { active: true, triggerDrop: 5, buySize: 20, maxBuys: 4, capitalReserve: 3500, orderType: 'Cobertura DCA', takeProfit: 'Rebajar DCA' } },
+  { asset: 'BTC', amount: 0.42, dca: 63200, currentPrice: null },
+  { asset: 'ETH', amount: 8.6, dca: 3420, currentPrice: null },
 ];
 
 // Campos UI de bots que no están en el schema de Convex (trading config extendida)
@@ -663,7 +663,7 @@ function RiskPanel({ pools }) {
   );
 }
 
-const DEFAULT_PROTECTOR = { active: true, triggerDrop: 4, buySize: 15, maxBuys: 3, capitalReserve: 5000, orderType: 'Cobertura DCA', takeProfit: 'Rebajar DCA' };
+const DEFAULT_PROTECTOR = { active: true, leverage: 4, buySize: 15, maxBuys: 3, capitalReserve: 5000, orderType: 'Cobertura DCA', takeProfit: 'Rebajar DCA', hlWallet: '', stopLoss: 1, tradeAmount: 0, moveSlToBE: false, moveSlToBEAt: 1 };
 
 function HLMarketPanel() {
   const [hlSearch, setHlSearch] = React.useState('');
@@ -699,16 +699,35 @@ function HLMarketPanel() {
   );
 }
 
-function SpotPositions({ prices, connected }) {
+function protectorKey(userId, asset) {
+  return `protector_${userId ?? 'anon'}_${asset}`;
+}
+
+function loadProtector(userId, asset) {
+  try {
+    const saved = localStorage.getItem(protectorKey(userId, asset));
+    return saved ? { ...DEFAULT_PROTECTOR, ...JSON.parse(saved) } : DEFAULT_PROTECTOR;
+  } catch (_) { return DEFAULT_PROTECTOR; }
+}
+
+function saveProtector(userId, asset, protector) {
+  try { localStorage.setItem(protectorKey(userId, asset), JSON.stringify(protector)); } catch (_) {}
+}
+
+function SpotPositions({ prices, connected, userId }) {
   const positionsFromDb = useQuery(api.spot_positions.listMyPositions);
   const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
-  const [positions, setPositions] = React.useState(INITIAL_SPOT_POSITIONS);
+  const [positions, setPositions] = React.useState(() =>
+    INITIAL_SPOT_POSITIONS.map(p => ({ ...p, protector: loadProtector(userId, p.asset) }))
+  );
   const [openAssets, setOpenAssets] = React.useState({});
+  const cooldownRef = React.useRef({});
+  const COOLDOWN_MS = 60 * 60 * 1000;
 
   React.useEffect(() => {
     if (!positionsFromDb?.length) return;
     setPositions(positionsFromDb.map((p) => ({
-      ...p, id: p._id, currentPrice: null, protector: DEFAULT_PROTECTOR,
+      ...p, id: p._id, currentPrice: null, protector: loadProtector(userId, p.asset),
     })));
   }, [positionsFromDb]);
 
@@ -718,14 +737,41 @@ function SpotPositions({ prices, connected }) {
     })));
   }, [prices]);
 
-  const recordSpotSignal = React.useCallback(async (asset, triggerType, price, amount) => {
+  const recordSpotSignal = React.useCallback(async (asset, triggerType, price, amount, protector) => {
     try {
-      await recordSignalMutation({ action: `Cobertura ${asset}`, asset, amount, price, network: 'Spot', botName: `Bot protector ${asset}`, triggerType });
+      const lev = protector?.leverage ?? 0;
+      const sl = protector?.stopLoss ?? 1;
+      const be = protector?.moveSlToBE ? ` BE@${protector.moveSlToBEAt ?? 1}%` : '';
+      const action = `Cobertura ${asset} ${lev}x SL${sl}%${be}`;
+      await recordSignalMutation({ action, asset, amount, price, network: 'Spot', botName: `Bot protector ${asset}`, triggerType });
     } catch (_) {}
   }, [recordSignalMutation]);
 
+  const EVM_RE_AUTO = /^0x[a-fA-F0-9]{40}$/;
+
+  // Evaluación automática — corre en cada tick de precio
+  React.useEffect(() => {
+    for (const pos of positions) {
+      const p = pos.protector;
+      if (!p?.active || !pos.currentPrice || p.orderType === 'Trigger manual') continue;
+      if (!p.tradeAmount || p.tradeAmount <= 0) continue;             // guard: monto configurado
+      if (!p.hlWallet || !EVM_RE_AUTO.test(p.hlWallet)) continue;     // guard: wallet HL válida
+      const now = Date.now();
+      if (now - (cooldownRef.current[pos.asset] ?? 0) < COOLDOWN_MS) continue;
+      if (pos.currentPrice <= pos.dca) {
+        cooldownRef.current[pos.asset] = now;
+        recordSpotSignal(pos.asset, 'auto', pos.currentPrice, p.tradeAmount, p);
+      }
+    }
+  }, [positions, recordSpotSignal]);
+
   function updateProtector(asset, patch) {
-    setPositions((items) => items.map((item) => item.asset === asset ? { ...item, protector: { ...item.protector, ...patch } } : item));
+    setPositions((items) => items.map((item) => {
+      if (item.asset !== asset) return item;
+      const updated = { ...item.protector, ...patch };
+      saveProtector(userId, asset, updated);
+      return { ...item, protector: updated };
+    }));
   }
 
   function toggleAsset(asset) {
@@ -762,7 +808,7 @@ function SpotPositions({ prices, connected }) {
                   protector={position.protector}
                   currentPrice={position.currentPrice}
                   onChange={(patch) => updateProtector(position.asset, patch)}
-                  onFireSignal={(triggerType, price, amount) => recordSpotSignal(position.asset, triggerType, price, amount)}
+                  onFireSignal={(triggerType, price, amount) => recordSpotSignal(position.asset, triggerType, price, amount, position.protector)}
                 />
               )}
             </article>
@@ -820,9 +866,16 @@ function SimulationHistory({ signals }) {
   );
 }
 
+const EVM_RE_PROTECTOR = /^0x[a-fA-F0-9]{40}$/;
+
 function SpotProtectorBot({ asset, protector, onChange, currentPrice, onFireSignal }) {
+  const hlWallet = protector.hlWallet ?? '';
+  const validWallet = EVM_RE_PROTECTOR.test(hlWallet);
+  const { balance: hlBalance, loading: hlBalLoading, error: hlBalError } = useHLAccountBalance(validWallet ? hlWallet : null);
+
   function handleManual() {
-    onFireSignal?.('manual', currentPrice ?? 0, 0);
+    if (!protector.active) return;
+    onFireSignal?.('manual', currentPrice ?? 0, protector.tradeAmount ?? 0);
   }
 
   return (
@@ -832,31 +885,108 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, onFireSign
         <span className={`pill ${protector.active ? 'green' : 'faint'}`}>{protector.active ? 'Activo' : 'Pausado'}</span>
       </div>
 
-      <div className="config-field" style={{ padding: '10px 0 6px' }}>
+      {/* Wallet HL */}
+      <div className="config-field" style={{ padding: '10px 0 4px' }}>
+        <span>Wallet Hyperliquid</span>
+        <input
+          className="hl-search"
+          style={{ margin: 0 }}
+          placeholder="0x... wallet HL para cobertura"
+          value={hlWallet}
+          onChange={(e) => onChange({ hlWallet: e.target.value.trim() })}
+        />
+      </div>
+      {hlWallet && !validWallet && (
+        <span style={{ fontSize: 11, color: 'var(--red,#f44)' }}>Dirección EVM inválida</span>
+      )}
+      {validWallet && (
+        <div className="network" style={{ fontSize: 12, marginBottom: 6 }}>
+          Saldo HL:{' '}
+          {hlBalLoading ? 'Cargando...' :
+           hlBalError ? <span style={{ color: 'var(--red,#f44)' }}>{hlBalError}</span> :
+           hlBalance != null ? `$${hlBalance.toLocaleString('en-US', { maximumFractionDigits: 2 })} USDC` : '—'}
+        </div>
+      )}
+
+      {/* Leverage */}
+      <div className="config-field" style={{ padding: '4px 0' }}>
         <span>Leverage de cobertura</span>
         <div className="range-control">
           <input
-            type="range"
-            min="0"
-            max="25"
-            step="1"
-            value={protector.triggerDrop ?? 0}
-            onChange={(e) => onChange({ triggerDrop: Number(e.target.value) })}
+            type="range" min="0" max="25" step="1"
+            value={protector.leverage ?? 0}
+            onChange={(e) => onChange({ leverage: Number(e.target.value) })}
           />
-          <strong>{protector.triggerDrop ?? 0}x</strong>
+          <strong>{protector.leverage ?? 0}x</strong>
         </div>
+      </div>
+
+      {/* Monto de la operación */}
+      <div className="config-field" style={{ padding: '4px 0' }}>
+        <span>Monto a operar (USDC)</span>
+        <input
+          type="number"
+          className="hl-search"
+          style={{ margin: 0 }}
+          min="0"
+          step="100"
+          placeholder="0"
+          value={protector.tradeAmount ?? 0}
+          onChange={(e) => onChange({ tradeAmount: Number(e.target.value) })}
+        />
+      </div>
+
+      {/* Stop Loss */}
+      <div className="config-field" style={{ padding: '4px 0' }}>
+        <span>Stop Loss</span>
+        <div className="range-control">
+          <input
+            type="range" min="0.1" max="5" step="0.1"
+            value={protector.stopLoss ?? 1}
+            onChange={(e) => onChange({ stopLoss: Number(e.target.value) })}
+          />
+          <strong>{(protector.stopLoss ?? 1).toFixed(1)}%</strong>
+        </div>
+      </div>
+
+      {/* Mover SL a Break Even */}
+      <div className="be-block">
+        <div className="be-head">
+          <span>Mover SL a Break Even</span>
+          <button
+            className={`mini-btn ${protector.moveSlToBE ? 'active' : ''}`}
+            onClick={() => onChange({ moveSlToBE: !protector.moveSlToBE })}
+          >
+            {protector.moveSlToBE ? 'ON' : 'OFF'}
+          </button>
+        </div>
+        {protector.moveSlToBE && (
+          <div className="config-field" style={{ marginTop: 6 }}>
+            <span>Mover BE cuando ganancia ≥</span>
+            <div className="range-control">
+              <input
+                type="range" min="0.1" max="20" step="0.1"
+                value={protector.moveSlToBEAt ?? 1}
+                onChange={(e) => onChange({ moveSlToBEAt: Number(e.target.value) })}
+              />
+              <strong>{(protector.moveSlToBEAt ?? 1).toFixed(1)}%</strong>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="bot-state-actions">
         <button className={`mini-btn ${!protector.active ? 'active' : ''}`} onClick={() => onChange({ active: false })}>Pausar</button>
         <button className={`mini-btn ${protector.active ? 'active' : ''}`} onClick={() => onChange({ active: true })}>Activar</button>
-        <button className="mini-btn amber" onClick={handleManual}>Disparar manual</button>
+        {protector.active && (
+          <button className="mini-btn amber" onClick={handleManual}>Disparar manual</button>
+        )}
       </div>
     </div>
   );
 }
 
-function Dashboard({ user, onLogout }) {
+function Dashboard({ user, onLogout, userId }) {
   const [network, setNetwork] = React.useState('Todas');
   const [pair, setPair] = React.useState('Todos');
   const [theme, setTheme] = React.useState('dark');
@@ -1060,7 +1190,7 @@ function Dashboard({ user, onLogout }) {
                 {filteredPools.map((pool) => <PoolCard key={pool.id} pool={pool} />)}
               </div>
             </section>
-            <SpotPositions prices={prices} connected={connected} />
+            <SpotPositions prices={prices} connected={connected} userId={userId} />
             <SimulationHistory signals={signals} />
           </div>
 
@@ -1137,7 +1267,7 @@ function DashboardWithClerk() {
     );
   }
 
-  return <Dashboard user={{ name }} onLogout={() => signOut()} />;
+  return <Dashboard user={{ name }} onLogout={() => signOut()} userId={user?.id ?? 'anon'} />;
 }
 
 class ErrorBoundary extends React.Component {

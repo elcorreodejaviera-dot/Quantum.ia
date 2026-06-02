@@ -146,6 +146,11 @@ export function useHyperliquidAllMids() {
 // ─── On-chain wallet balances (Arbitrum, Base, Optimism) ───────────────────
 
 const CHAIN_CONFIG = {
+  Ethereum: {
+    rpc: 'https://eth.llamarpc.com',
+    wbtc: '0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599',
+    weth: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+  },
   Arbitrum: {
     rpc: 'https://arb1.arbitrum.io/rpc',
     wbtc: '0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f',

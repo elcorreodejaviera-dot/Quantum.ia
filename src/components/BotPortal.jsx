@@ -735,6 +735,7 @@ function saveProtector(userId, asset, protector) {
 
 function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabled }) {
   const positionsFromDb = useQuery(api.spot_positions.listMyPositions);
+  const addPositionMutation = useMutation(api.spot_positions.addPosition);
   const updatePositionMutation = useMutation(api.spot_positions.updatePosition);
   const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
   const executeHlOrder = useAction(api.hyperliquid.executePerpMarketOrder);
@@ -742,6 +743,7 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
     INITIAL_SPOT_POSITIONS.map(p => ({ ...p, protector: loadProtector(userId, p.asset) }))
   );
   const [openAssets, setOpenAssets] = React.useState({});
+  const [addForm, setAddForm] = React.useState({});
   const [drafts, setDrafts] = React.useState(() => {
     const d = {};
     for (const p of INITIAL_SPOT_POSITIONS) {
@@ -847,6 +849,24 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
     }));
   }
 
+  const SPOT_ASSETS = ['BTC', 'ETH'];
+  const missingAssets = positionsFromDb !== undefined
+    ? SPOT_ASSETS.filter((a) => !positionsFromDb.some((p) => p.asset === a))
+    : [];
+
+  async function handleAddPosition(asset) {
+    const form = addForm[asset] ?? {};
+    const amount = parseFloat(form.amount);
+    const dca = parseFloat(form.dca);
+    if (!amount || amount <= 0 || !dca || dca <= 0) return;
+    try {
+      await addPositionMutation({ asset, amount, dca });
+      setAddForm((prev) => ({ ...prev, [asset]: { amount: '', dca: '' } }));
+    } catch (err) {
+      console.error('addPosition failed', err);
+    }
+  }
+
   function toggleAsset(asset) {
     setOpenAssets(prev => ({ ...prev, [asset]: !prev[asset] }));
   }
@@ -861,6 +881,41 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
         </span>
       </div>
       <div className="spot-list">
+        {missingAssets.map((asset) => (
+          <article className="spot-card" key={`add-${asset}`}>
+            <div className="spot-collapse-btn">
+              <span className="pair" style={{ flexShrink: 0 }}>{asset}</span>
+              <div className="spot-collapse-inputs">
+                <label className="spot-inline-field">
+                  <span>Precio DCA</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    placeholder="ej. 63200"
+                    value={addForm[asset]?.dca ?? ''}
+                    onChange={(e) => setAddForm((prev) => ({ ...prev, [asset]: { ...prev[asset], dca: e.target.value } }))}
+                  />
+                </label>
+                <label className="spot-inline-field">
+                  <span>Monto ({asset})</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.0001"
+                    placeholder="ej. 0.42"
+                    value={addForm[asset]?.amount ?? ''}
+                    onChange={(e) => setAddForm((prev) => ({ ...prev, [asset]: { ...prev[asset], amount: e.target.value } }))}
+                  />
+                </label>
+              </div>
+              <div className="spot-collapse-right">
+                <button className="mini-btn active" onClick={() => handleAddPosition(asset)}>+ Añadir</button>
+              </div>
+            </div>
+          </article>
+        ))}
+
         {positions.map((position) => {
           const hasPrice = position.currentPrice != null;
           const isOpen = !!openAssets[position.asset];

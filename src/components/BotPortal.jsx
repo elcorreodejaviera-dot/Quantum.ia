@@ -68,6 +68,12 @@ function formatUsd(value) {
   return value.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
 }
 
+function formatUsdCompact(value) {
+  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `$${(value / 1_000).toFixed(1)}k`;
+  return `$${value.toFixed(0)}`;
+}
+
 function formatPrice(pair, value) {
   const max = pair.startsWith('BTC') ? 0 : 2;
   return value.toLocaleString('en-US', { maximumFractionDigits: max });
@@ -251,11 +257,11 @@ function PoolCard({ pool }) {
       </div>
 
       <div className="pool-meta">
-        <Metric label="TVL" value={pool.tvl != null ? formatUsd(pool.tvl) : formatUsd(pool.liquidity)} />
-        <Metric label="Volumen 24h" value={pool.volume1d != null ? formatUsd(pool.volume1d) : '—'} />
-        <Metric label="Fees 24h" value={formatUsd(pool.fees24h)} />
+        <Metric label="TVL" value={pool.tvl != null ? formatUsdCompact(pool.tvl) : formatUsdCompact(pool.liquidity)} />
+        <Metric label="Vol. 24h" value={pool.volume1d != null ? formatUsdCompact(pool.volume1d) : '—'} />
+        <Metric label="Fees 24h" value={formatUsdCompact(pool.fees24h)} />
         <Metric label={apyLabel} value={`${parts.annual.toFixed(1)}%`} />
-        <Metric label="Funding 8h" value={pool.funding != null ? `${(pool.funding * 100).toFixed(4)}%` : '—'} />
+        <Metric label="Funding" value={pool.funding != null ? `${(pool.funding * 100).toFixed(4)}%` : '—'} />
       </div>
       {pool.apyUpdatedAt && (
         <div className="network" style={{ fontSize: 10, marginTop: 4, textAlign: 'right' }}>

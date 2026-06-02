@@ -531,18 +531,22 @@ button {
 .pool-meta {
   display: grid;
   gap: 8px;
-}
-
-.pool-meta {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .metric {
   min-width: 0;
+  overflow: hidden;
   padding: 9px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.025);
+}
+
+.metric .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .metric strong {
@@ -550,6 +554,9 @@ button {
   margin-top: 5px;
   font-family: var(--mono);
   font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .borrow-health {
@@ -1549,6 +1556,14 @@ button {
   .pool-grid {
     grid-template-columns: 1fr;
   }
+
+  .pool-meta {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .metric strong {
+    font-size: 12px;
+  }
 }
 
 @media (max-width: 640px) {
@@ -1573,11 +1588,18 @@ button {
   }
 
   .summary-grid,
-  .pool-meta,
   .futures-grid,
   .spot-form,
   .spot-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .pool-meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .metric strong {
+    font-size: 11px;
   }
 
   .hero h1 {

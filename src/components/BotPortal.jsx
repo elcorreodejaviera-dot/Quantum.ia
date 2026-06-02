@@ -777,7 +777,7 @@ function SpotPositions({ prices, connected }) {
         {walletAddress && !editingWallet ? (
           <>
             <span className="network mono">{walletAddress.slice(0, 8)}…{walletAddress.slice(-6)}</span>
-            {spotLoading && <span className="network"> Leyendo HL...</span>}
+            {hlLoading && <span className="network"> Leyendo HL...</span>}
             <button className="mini-btn" style={{ marginLeft: 8 }} onClick={() => { setEditingWallet(true); setWalletInput(walletAddress); }}>Cambiar wallet</button>
           </>
         ) : (

@@ -1496,4 +1496,45 @@ function DashboardWithClerk() {
   return <Dashboard user={{ name }} onLogout={() => signOut()} />;
 }
 
-export default DashboardWithClerk;
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="app-shell">
+          <main className="main">
+            <section className="panel">
+              <div className="section-head">
+                <h2>Error al cargar el portal</h2>
+                <span className="pill red">Error</span>
+              </div>
+              <p className="network" style={{ color: 'var(--red,#f44)', wordBreak: 'break-all' }}>
+                {this.state.error?.message ?? String(this.state.error)}
+              </p>
+              <button className="ghost-btn" style={{ marginTop: 12 }} onClick={() => this.setState({ error: null })}>
+                Reintentar
+              </button>
+            </section>
+          </main>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function WrappedDashboard(props) {
+  return (
+    <ErrorBoundary>
+      <DashboardWithClerk {...props} />
+    </ErrorBoundary>
+  );
+}
+
+export default WrappedDashboard;

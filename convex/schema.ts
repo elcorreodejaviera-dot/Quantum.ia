@@ -75,6 +75,9 @@ export default defineSchema({
     simulated: v.boolean(),
     network: v.string(),
     timestamp: v.number(),
+    botId: v.optional(v.id("bots")),
+    botName: v.optional(v.string()),
+    triggerType: v.optional(v.string()),
   })
     .index("by_userId", ["userId"])
     .index("by_timestamp", ["timestamp"]),

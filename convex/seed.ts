@@ -46,6 +46,12 @@ export const seedInitialData = mutation({
       for (const wallet of SEED_WALLETS) await ctx.db.insert("wallets", wallet);
     }
 
+    const existingConfig = await ctx.db.query("system_config").first();
+    if (!existingConfig) {
+      await ctx.db.insert("system_config", { key: "simulationMode", value: true });
+      await ctx.db.insert("system_config", { key: "tradingEnabled", value: false });
+    }
+
     return { ok: true };
   },
 });

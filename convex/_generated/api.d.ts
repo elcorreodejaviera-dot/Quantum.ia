@@ -16,6 +16,7 @@ import type * as pools from "../pools.js";
 import type * as seed from "../seed.js";
 import type * as spot_positions from "../spot_positions.js";
 import type * as systemConfig from "../systemConfig.js";
+import type * as tradesHistory from "../tradesHistory.js";
 import type * as users from "../users.js";
 import type * as wallets from "../wallets.js";
 
@@ -34,6 +35,7 @@ declare const fullApi: ApiFromModules<{
   seed: typeof seed;
   spot_positions: typeof spot_positions;
   systemConfig: typeof systemConfig;
+  tradesHistory: typeof tradesHistory;
   users: typeof users;
   wallets: typeof wallets;
 }>;

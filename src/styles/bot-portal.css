@@ -768,6 +768,123 @@ button {
   color: var(--green);
 }
 
+.mini-btn.amber {
+  border-color: rgba(255, 170, 0, 0.5);
+  color: var(--amber);
+}
+
+/* Simulation banner */
+.sim-banner {
+  background: rgba(255, 170, 0, 0.12);
+  border-bottom: 1px solid rgba(255, 170, 0, 0.35);
+  color: var(--amber);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 8px 24px;
+  text-align: center;
+}
+
+/* Simulation history */
+.signal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.signal-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.signal-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.signal-bot {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.signal-action {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.signal-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+/* HL market panel */
+.hl-market-toggle {
+  display: flex;
+  align-items: center;
+  padding: 8px 0 4px;
+}
+
+.hl-market {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 6px 0 10px;
+  padding: 10px;
+}
+
+.hl-search {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  box-sizing: border-box;
+}
+
+.hl-price-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 4px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.hl-price-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.hl-price-row:hover {
+  background: var(--line);
+}
+
+.hl-asset {
+  font-weight: 500;
+  color: var(--text);
+}
+
+.hl-price {
+  color: var(--text-2);
+  font-size: 11px;
+}
+
 .wallet-actions {
   display: flex;
   flex-wrap: wrap;

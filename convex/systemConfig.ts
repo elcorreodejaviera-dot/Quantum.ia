@@ -13,6 +13,22 @@ export const getConfig = query({
   },
 });
 
+export const setSimulationMode = mutation({
+  args: { enabled: v.boolean() },
+  handler: async (ctx, { enabled }) => {
+    await requireAdmin(ctx);
+    const existing = await ctx.db
+      .query("system_config")
+      .withIndex("by_key", (q) => q.eq("key", "simulationMode"))
+      .first();
+    if (existing) {
+      await ctx.db.patch(existing._id, { value: enabled });
+    } else {
+      await ctx.db.insert("system_config", { key: "simulationMode", value: enabled });
+    }
+  },
+});
+
 export const setTradingEnabled = mutation({
   args: { enabled: v.boolean() },
   handler: async (ctx, { enabled }) => {

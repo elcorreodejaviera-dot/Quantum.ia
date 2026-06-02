@@ -79,6 +79,70 @@ export function useHyperliquidPrices() {
   return { prices, connected, lastUpdate };
 }
 
+export function useHyperliquidAllMids() {
+  const [allPrices, setAllPrices] = useState({});
+  const [connected, setConnected] = useState(false);
+  const wsRef = useRef(null);
+  const retriesRef = useRef(0);
+  const timeoutRef = useRef(null);
+
+  useEffect(() => {
+    let destroyed = false;
+
+    function connect() {
+      if (destroyed) return;
+      const ws = new WebSocket(WS_URL);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (destroyed) { ws.close(); return; }
+        retriesRef.current = 0;
+        setConnected(true);
+        ws.send(JSON.stringify({ method: 'subscribe', subscription: { type: 'allMids' } }));
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.channel === 'allMids' && msg.data?.mids) {
+            setAllPrices((prev) => {
+              const next = { ...prev };
+              let changed = false;
+              for (const [asset, mid] of Object.entries(msg.data.mids)) {
+                const val = parseFloat(mid);
+                if (Number.isFinite(val) && val !== prev[asset]) {
+                  next[asset] = val;
+                  changed = true;
+                }
+              }
+              return changed ? next : prev;
+            });
+          }
+        } catch (_) {}
+      };
+
+      ws.onclose = () => {
+        setConnected(false);
+        if (destroyed) return;
+        const delay = Math.min(Math.pow(2, Math.min(retriesRef.current, 5)) * 1000, MAX_BACKOFF_MS);
+        retriesRef.current += 1;
+        timeoutRef.current = setTimeout(connect, delay);
+      };
+
+      ws.onerror = () => ws.close();
+    }
+
+    connect();
+    return () => {
+      destroyed = true;
+      clearTimeout(timeoutRef.current);
+      wsRef.current?.close();
+    };
+  }, []);
+
+  return { allPrices, connected };
+}
+
 export function useHyperliquidFunding() {
   const [funding, setFunding] = useState({});
 

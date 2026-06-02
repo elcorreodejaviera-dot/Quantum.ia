@@ -2,7 +2,7 @@ import React from 'react'
 import { useUser, useClerk } from '@clerk/clerk-react'
 import { useConvexAuth, useQuery, useMutation } from 'convex/react'
 import { api } from '../../convex/_generated/api'
-import { useHyperliquidPrices, useHyperliquidFunding } from '../hooks/useHyperliquid'
+import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids } from '../hooks/useHyperliquid'
 
 const USERS = [
   { username: 'admin', password: import.meta.env.VITE_ADMIN_PASSWORD, name: 'Operador principal' },
@@ -353,7 +353,49 @@ function ConfigAction({ title, value, children }) {
   );
 }
 
-function BotCard({ bot, onSetActive, onMode, onConfig }) {
+function evaluateTrigger(bot, pools, prices) {
+  const t = (bot.trigger ?? '').toLowerCase();
+  if (!t || !bot.active || !bot.simulationMode) return false;
+  if (t.includes('sale del rango') || t.includes('fuera de rango')) {
+    return pools.some(p => {
+      const asset = p.pair?.split('/')[0];
+      const price = prices[asset];
+      return price != null && (price < p.min || price > p.max);
+    });
+  }
+  if (t.includes('recupera rango') || t.includes('retorno')) {
+    return pools.some(p => {
+      const asset = p.pair?.split('/')[0];
+      const price = prices[asset];
+      return price != null && price >= p.min && price <= p.max;
+    });
+  }
+  if (t.includes('apr') || t.includes('rebalanceo')) {
+    const match = t.match(/(\d+(?:\.\d+)?)/);
+    const threshold = match ? parseFloat(match[1]) : 18;
+    return pools.some(p => p.apy != null && p.apy < threshold);
+  }
+  return false;
+}
+
+function getSignalMeta(bot, pools, prices) {
+  const t = (bot.trigger ?? '').toLowerCase();
+  const isPrice = t.includes('rango') || t.includes('retorno');
+  if (isPrice) {
+    const pool = pools.find(p => {
+      const asset = p.pair?.split('/')[0];
+      const price = prices[asset];
+      if (price == null) return false;
+      if (t.includes('sale del rango') || t.includes('fuera de rango')) return price < p.min || price > p.max;
+      return price >= p.min && price <= p.max;
+    }) ?? pools[0];
+    const asset = pool?.pair?.split('/')[0] ?? 'BTC';
+    return { asset, price: prices[asset] ?? 0, network: pool?.network ?? 'Arbitrum' };
+  }
+  return { asset: 'POOL', price: 0, network: 'Arbitrum' };
+}
+
+function BotCard({ bot, onSetActive, onMode, onConfig, onManualTrigger }) {
   const tone = bot.active ? 'green' : 'faint';
   const [configOpen, setConfigOpen] = React.useState(false);
   const wallet = WALLETS.find((item) => item.id === bot.walletId);
@@ -407,6 +449,11 @@ function BotCard({ bot, onSetActive, onMode, onConfig }) {
         <button className="mini-btn" onClick={() => setConfigOpen((value) => !value)}>Configurar</button>
         <button className="mini-btn">Escanear wallet</button>
         <button className="mini-btn">Token ID de pool {bot.poolTokenId}</button>
+        {bot.simulationMode && (
+          <button className="mini-btn amber" onClick={() => onManualTrigger?.(bot)}>
+            Disparar señal
+          </button>
+        )}
       </div>
       {configOpen && (
         <div className="bot-config">
@@ -505,7 +552,7 @@ function BotCard({ bot, onSetActive, onMode, onConfig }) {
                 <input
                   type="range"
                   min="0"
-                  max="20"
+                  max="25"
                   step="1"
                   value={bot.leverage}
                   onChange={(event) => onConfig(bot.id, { leverage: Number(event.target.value) })}
@@ -612,6 +659,9 @@ const DEFAULT_PROTECTOR = { active: true, triggerDrop: 4, buySize: 15, maxBuys: 
 function SpotPositions({ prices, connected }) {
   const positionsFromDb = useQuery(api.spot_positions.listMyPositions);
   const [positions, setPositions] = React.useState(INITIAL_SPOT_POSITIONS);
+  const [hlOpen, setHlOpen] = React.useState(false);
+  const [hlSearch, setHlSearch] = React.useState('');
+  const { allPrices, connected: hlConnected } = useHyperliquidAllMids();
 
   React.useEffect(() => {
     if (positionsFromDb === undefined) return;
@@ -647,6 +697,37 @@ function SpotPositions({ prices, connected }) {
         <span className="pill">BTC / ETH</span>
         <span className={`pill${connected ? ' green' : ''}`}>{connected ? 'HL en vivo' : 'Conectando...'}</span>
       </div>
+      <div className="hl-market-toggle">
+        <button className="mini-btn" onClick={() => setHlOpen(v => !v)}>
+          {hlOpen ? 'Ocultar mercado HL' : `Ver mercado HL (${Object.keys(allPrices).length} assets)`}
+        </button>
+        <span className={`pill${hlConnected ? ' green' : ''}`} style={{ marginLeft: 8 }}>
+          {hlConnected ? 'En vivo' : 'Conectando...'}
+        </span>
+      </div>
+      {hlOpen && (
+        <div className="hl-market">
+          <input
+            className="hl-search"
+            placeholder="Buscar asset..."
+            value={hlSearch}
+            onChange={e => setHlSearch(e.target.value.toUpperCase())}
+          />
+          <div className="hl-price-grid">
+            {Object.entries(allPrices)
+              .filter(([asset]) => !hlSearch || asset.includes(hlSearch))
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([asset, price]) => (
+                <div key={asset} className="hl-price-row">
+                  <span className="hl-asset">{asset}</span>
+                  <span className="hl-price mono">${formatPrice(`${asset}/USDC`, price)}</span>
+                </div>
+              ))
+            }
+          </div>
+        </div>
+      )}
+
       <div className="spot-list">
         {positions.map((position) => {
           const hasPrice = position.currentPrice != null;
@@ -699,6 +780,53 @@ function SpotPositions({ prices, connected }) {
                 onChange={(patch) => updateProtector(position.asset, patch)}
               />
             </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function SimulationHistory({ signals }) {
+  if (!signals || signals.length === 0) {
+    return (
+      <section className="panel">
+        <div className="section-head">
+          <h2>Historial simulado</h2>
+          <span className="pill amber">SIMULACIÓN</span>
+        </div>
+        <p className="network">Sin señales todavía. Los bots activos en simulación dispararán señales automáticamente.</p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="panel">
+      <div className="section-head">
+        <h2>Historial simulado</h2>
+        <span className="pill amber">SIMULACIÓN</span>
+        <span className="pill">{signals.length} señales</span>
+      </div>
+      <div className="signal-list">
+        {signals.slice(0, 20).map((s) => {
+          const date = new Date(s.timestamp);
+          const timeStr = date.toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          const dateStr = date.toLocaleDateString('es', { day: '2-digit', month: '2-digit' });
+          return (
+            <div key={s._id} className="signal-row">
+              <div className="signal-main">
+                <span className="signal-bot">{s.botName ?? '—'}</span>
+                <span className="signal-action">{s.action}</span>
+                <span className={`pill ${s.triggerType === 'manual' ? 'blue' : 'green'}`}>
+                  {s.triggerType === 'manual' ? 'Manual' : 'Auto'}
+                </span>
+              </div>
+              <div className="signal-meta">
+                <span className="mono">{s.asset} @ ${s.price > 0 ? formatPrice(`${s.asset}/USDC`, s.price) : '—'}</span>
+                <span className="network">{s.network}</span>
+                <span className="network">{dateStr} {timeStr}</span>
+              </div>
+            </div>
           );
         })}
       </div>
@@ -840,6 +968,11 @@ function Dashboard({ user, onLogout }) {
   const poolsFromDb = useQuery(api.pools.listPools);
   const { prices, connected } = useHyperliquidPrices();
   const { funding } = useHyperliquidFunding();
+  const simModeConfig = useQuery(api.systemConfig.getConfig, { key: "simulationMode" });
+  const simulationMode = simModeConfig?.value ?? true;
+  const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
+  const signals = useQuery(api.tradesHistory.listSignals, {});
+  const signalCooldownRef = React.useRef({});
 
   // UI-only state que no persiste en Convex (trading config extendida)
   const [localBotState, setLocalBotState] = React.useState({});
@@ -927,6 +1060,43 @@ function Dashboard({ user, onLogout }) {
     }
   }
 
+  async function fireSignal(bot, triggerType, poolsData, pricesData) {
+    try {
+      const { asset, price, network } = getSignalMeta(bot, poolsData, pricesData);
+      await recordSignalMutation({
+        action: bot.action,
+        asset,
+        amount: bot.capitalPerTrade,
+        price,
+        network,
+        botId: bot.id,
+        botName: bot.name,
+        triggerType,
+      });
+    } catch (err) {
+      console.error('recordSignal failed', err);
+    }
+  }
+
+  React.useEffect(() => {
+    if (!simulationMode || !bots.length || !pools.length || !Object.keys(prices).length) return;
+    const COOLDOWN_MS = 5 * 60 * 1000;
+    const now = Date.now();
+    for (const bot of bots) {
+      if (!bot.active || !bot.simulationMode) continue;
+      const lastFired = signalCooldownRef.current[bot.id] ?? 0;
+      if (now - lastFired < COOLDOWN_MS) continue;
+      if (evaluateTrigger(bot, pools, prices)) {
+        signalCooldownRef.current[bot.id] = now;
+        fireSignal(bot, 'auto', pools, prices);
+      }
+    }
+  }, [prices, bots, pools, simulationMode]);
+
+  async function handleManualTrigger(bot) {
+    await fireSignal(bot, 'manual', pools, prices);
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -943,6 +1113,12 @@ function Dashboard({ user, onLogout }) {
           <button className="ghost-btn" onClick={onLogout}>Salir</button>
         </div>
       </header>
+
+      {simulationMode && (
+        <div className="sim-banner">
+          MODO SIMULACIÓN — Sin operaciones reales
+        </div>
+      )}
 
       <main className="main">
         <section className="hero">
@@ -986,6 +1162,7 @@ function Dashboard({ user, onLogout }) {
               </div>
             </section>
             <SpotPositions prices={prices} connected={connected} />
+            <SimulationHistory signals={signals} />
           </div>
 
           <aside className="stack">
@@ -996,7 +1173,7 @@ function Dashboard({ user, onLogout }) {
               </div>
               <div className="bot-list">
                 {bots.map((bot) => (
-                  <BotCard key={bot.id} bot={bot} onSetActive={setBotActive} onMode={setBotMode} onConfig={updateBotConfig} />
+                  <BotCard key={bot.id} bot={bot} onSetActive={setBotActive} onMode={setBotMode} onConfig={updateBotConfig} onManualTrigger={handleManualTrigger} />
                 ))}
               </div>
             </section>

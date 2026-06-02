@@ -251,12 +251,17 @@ function PoolCard({ pool }) {
       </div>
 
       <div className="pool-meta">
-        <Metric label="Liquidez monitoreada" value={formatUsd(pool.liquidity)} />
-        <Metric label="Fees 24h" value={formatUsd(pool.fees24h)} />
+        <Metric label="TVL" value={pool.subgraphTvlUsd != null ? formatUsd(pool.subgraphTvlUsd) : pool.tvl != null ? formatUsd(pool.tvl) : formatUsd(pool.liquidity)} />
+        <Metric label="Volumen 24h" value={pool.subgraphVolumeUsd1d != null ? formatUsd(pool.subgraphVolumeUsd1d) : '—'} />
+        <Metric label="Fees 24h" value={pool.subgraphFeesUsd1d != null ? formatUsd(pool.subgraphFeesUsd1d) : formatUsd(pool.fees24h)} />
         <Metric label={apyLabel} value={`${parts.annual.toFixed(1)}%`} />
-        <Metric label="Cobertura" value={`${Math.round(pool.exposure * 100)}%`} />
         <Metric label="Funding 8h" value={pool.funding != null ? `${(pool.funding * 100).toFixed(4)}%` : '—'} />
       </div>
+      {pool.subgraphUpdatedAt && (
+        <div className="network" style={{ fontSize: 10, marginTop: 4, textAlign: 'right' }}>
+          Subgraph {new Date(pool.subgraphUpdatedAt).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' })}
+        </div>
+      )}
 
     </article>
   );
@@ -951,10 +956,27 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
     setPurchaseForm((prev) => ({ ...prev, [asset]: { qty: '', price: '' } }));
   }
 
+  const portfolioInvested = positions.reduce((s, p) => s + p.dca * p.amount, 0);
+  const portfolioCurrent = positions.reduce((s, p) => s + (p.currentPrice != null ? p.currentPrice * p.amount : 0), 0);
+  const portfolioHasPrices = positions.some((p) => p.currentPrice != null);
+  const portfolioPnl = portfolioHasPrices ? portfolioCurrent - portfolioInvested : null;
+  const portfolioPnlPct = portfolioPnl != null && portfolioInvested > 0 ? (portfolioPnl / portfolioInvested) * 100 : null;
+  const portfolioPositive = portfolioPnl != null && portfolioPnl >= 0;
+
   return (
     <section className="panel">
       <div className="section-head">
         <h2>Posiciones spot</h2>
+        {portfolioHasPrices && (
+          <span className={`spot-calc-value${portfolioPositive ? ' positive' : ' negative'}`} style={{ fontSize: 14 }}>
+            {formatUsd(portfolioCurrent)}
+            {portfolioPnlPct != null && (
+              <span style={{ fontSize: 11, marginLeft: 6, fontWeight: 400 }}>
+                {portfolioPositive ? '+' : ''}{portfolioPnlPct.toFixed(2)}%
+              </span>
+            )}
+          </span>
+        )}
         <span className={`pill${connected ? ' green' : ''}`}>{connected ? 'HL en vivo' : 'Conectando...'}</span>
         <span className={`pill${!simulationMode && tradingEnabled ? ' green' : ' amber'}`}>
           {!simulationMode && tradingEnabled ? 'Ejecución HL' : 'SIM'}

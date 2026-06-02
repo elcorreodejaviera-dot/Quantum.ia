@@ -9,4 +9,10 @@ crons.interval(
   internal.actions.defillama.fetchAndUpdateApys,
 );
 
+crons.interval(
+  "fetch Uniswap V3 subgraph",
+  { minutes: 30 },
+  internal.actions.uniswap.fetchUniswapSubgraphData,
+);
+
 export default crons;

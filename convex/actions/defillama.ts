@@ -51,6 +51,7 @@ export const fetchAndUpdateApys = internalAction({
       volumeUsd1d?: number;
       feeTier?: number;
       pool: string;
+      underlyingTokens?: string[];
     }>;
 
     const candidates = pools.filter(
@@ -68,12 +69,19 @@ export const fetchAndUpdateApys = internalAction({
 
       const best = matches.reduce((a, b) => (b.tvlUsd ?? 0) > (a.tvlUsd ?? 0) ? b : a);
 
+      // DeFiLlama pool IDs for Uniswap V3 use format "0xADDRESS:chain" or plain "0xADDRESS"
+      const rawId = best.pool ?? '';
+      const poolAddress = rawId.startsWith('0x')
+        ? rawId.split(':')[0].toLowerCase()
+        : undefined;
+
       await ctx.runMutation(internal.pools.patchPoolApy, {
         id: cp._id,
         apy: best.apy ?? 0,
         tvl: best.tvlUsd,
         fees1d: estimateFees1d(best),
         defillamaId: best.pool,
+        poolAddress,
       });
     }
   },

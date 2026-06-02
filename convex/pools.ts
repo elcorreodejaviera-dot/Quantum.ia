@@ -25,12 +25,30 @@ export const patchPoolApy = internalMutation({
     tvl: v.optional(v.number()),
     fees1d: v.optional(v.number()),
     defillamaId: v.optional(v.string()),
+    poolAddress: v.optional(v.string()),
   },
-  handler: async (ctx, { id, apy, tvl, fees1d, defillamaId }) => {
+  handler: async (ctx, { id, apy, tvl, fees1d, defillamaId, poolAddress }) => {
     const patch: Record<string, unknown> = { apy, apyUpdatedAt: Date.now() };
     if (tvl !== undefined) patch.tvl = tvl;
     if (fees1d !== undefined) patch.fees1d = fees1d;
     if (defillamaId !== undefined) patch.defillamaId = defillamaId;
+    if (poolAddress !== undefined) patch.poolAddress = poolAddress;
+    await ctx.db.patch(id, patch);
+  },
+});
+
+export const patchPoolSubgraph = internalMutation({
+  args: {
+    id: v.id("pools"),
+    volumeUsd1d: v.optional(v.number()),
+    feesUsd1d: v.optional(v.number()),
+    tvlUsd: v.optional(v.number()),
+  },
+  handler: async (ctx, { id, volumeUsd1d, feesUsd1d, tvlUsd }) => {
+    const patch: Record<string, unknown> = { subgraphUpdatedAt: Date.now() };
+    if (volumeUsd1d !== undefined) patch.subgraphVolumeUsd1d = volumeUsd1d;
+    if (feesUsd1d !== undefined) patch.subgraphFeesUsd1d = feesUsd1d;
+    if (tvlUsd !== undefined) patch.subgraphTvlUsd = tvlUsd;
     await ctx.db.patch(id, patch);
   },
 });

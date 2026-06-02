@@ -35,7 +35,12 @@ export default defineSchema({
     tvl: v.optional(v.number()),
     fees1d: v.optional(v.number()),
     defillamaId: v.optional(v.string()),
+    poolAddress: v.optional(v.string()),
     apyUpdatedAt: v.optional(v.number()),
+    subgraphVolumeUsd1d: v.optional(v.number()),
+    subgraphFeesUsd1d: v.optional(v.number()),
+    subgraphTvlUsd: v.optional(v.number()),
+    subgraphUpdatedAt: v.optional(v.number()),
   }),
 
   bots: defineTable({

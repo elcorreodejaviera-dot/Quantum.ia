@@ -735,11 +735,11 @@ function SpotPositions({ prices, connected }) {
     }
   }
 
-  async function recordSpotSignal(asset, triggerType, price, amount) {
+  const recordSpotSignal = React.useCallback(async (asset, triggerType, price, amount) => {
     try {
       await recordSignalMutation({ action: `DCA compra ${asset}`, asset, amount, price, network: 'Spot', botName: `Bot protector ${asset}`, triggerType });
     } catch (_) {}
-  }
+  }, [recordSignalMutation]);
 
   function updatePosition(asset, patch) {
     setPositions((items) => items.map((item) => item.asset === asset ? { ...item, ...patch } : item));
@@ -747,6 +747,46 @@ function SpotPositions({ prices, connected }) {
   function updateProtector(asset, patch) {
     setPositions((items) => items.map((item) => item.asset === asset ? { ...item, protector: { ...item.protector, ...patch } } : item));
   }
+
+  const [openAssets, setOpenAssets] = React.useState({});
+  function toggleAsset(asset) {
+    setOpenAssets(prev => ({ ...prev, [asset]: !prev[asset] }));
+  }
+
+  // Evaluación automática del bot protector — siempre activa, independiente del colapso
+  const protectorCooldownRef = React.useRef({});
+  const PROTECTOR_COOLDOWN_MS = 60 * 60 * 1000;
+
+  React.useEffect(() => {
+    for (const position of positions) {
+      const protector = position.protector;
+      if (!protector?.active || !position.currentPrice) continue;
+      if (protector.orderType === 'Trigger manual') continue;
+
+      const perpPos = perpPositions[position.asset] ?? null;
+      const hlDca = perpPos?.entryPx > 0 ? perpPos.entryPx : null;
+      const effectiveDca = hlDca ?? position.dca;
+
+      const triggerLevel =
+        protector.orderType === 'Trigger por caída' && effectiveDca
+          ? effectiveDca * (1 - protector.triggerDrop / 100)
+          : protector.orderType === 'Trigger por precio' && protector.triggerPrice > 0
+            ? protector.triggerPrice
+            : null;
+
+      if (!triggerLevel) continue;
+
+      const now = Date.now();
+      const lastFired = protectorCooldownRef.current[position.asset] ?? 0;
+      if (now - lastFired < PROTECTOR_COOLDOWN_MS) continue;
+
+      if (position.currentPrice <= triggerLevel) {
+        protectorCooldownRef.current[position.asset] = now;
+        const buyAmount = (protector.capitalReserve * protector.buySize) / 100;
+        recordSpotSignal(position.asset, 'auto', position.currentPrice, buyAmount);
+      }
+    }
+  }, [positions, perpPositions, recordSpotSignal]);
 
   return (
     <section className="panel">
@@ -836,84 +876,105 @@ function SpotPositions({ prices, connected }) {
           const onChainPnlPct = onChainPnl != null && onChain.total > 0 && position.dca > 0 ? (onChainPnl / (onChain.total * position.dca)) * 100 : null;
           const chainTone = onChainPnl == null ? '' : onChainPnl >= 0 ? 'green' : 'red';
 
+          const isOpen = !!openAssets[position.asset];
+
           return (
             <article className="spot-card" key={position.asset}>
-              <div className="spot-head">
-                <div>
-                  <div className="pair">{position.asset} spot</div>
-                  <div className="network">Precio actual {hasPrice ? `$${formatPrice(`${position.asset}/USDC`, position.currentPrice)}` : '—'}</div>
-                </div>
-                <span className={`pill ${tone}`}>{pnl == null ? 'Sin precio' : pnl >= 0 ? 'Ganancia' : 'Pérdida'}</span>
-              </div>
-
-              {myWallets.length > 0 && (
-                <div className="hl-position-block">
-                  <div className="hl-position-head">
-                    <span className="hl-position-label">Balance wallets</span>
-                    {chainLoading && <span className="network">Cargando...</span>}
-                    {onChainPnl != null && <span className={`pill ${chainTone}`}>{onChainPnl >= 0 ? '+' : ''}{formatUsd(onChainPnl)}</span>}
-                    {onChainPnlPct != null && <span className={`pill ${chainTone}`}>{onChainPnlPct >= 0 ? '+' : ''}{onChainPnlPct.toFixed(2)}%</span>}
-                  </div>
-                  {onChain ? (
-                    <>
-                      <div className="spot-metrics">
-                        <Metric label="Total" value={`${onChain.total.toFixed(6)} ${position.asset}`} />
-                        <Metric label="Valor" value={onChainValue != null ? formatUsd(onChainValue) : '—'} />
-                        <Metric label="Costo DCA" value={position.dca > 0 ? formatUsd(onChain.total * position.dca) : '—'} />
-                        <Metric label="PnL" value={onChainPnl != null ? formatUsd(onChainPnl) : '—'} />
-                      </div>
-                      {Object.entries(onChain.perWallet ?? {}).map(([lbl, bal]) => (
-                        <div key={lbl} className="network" style={{ fontSize: 11, marginTop: 2 }}>{lbl}: {bal.toFixed(6)}</div>
-                      ))}
-                    </>
-                  ) : !chainLoading && (
-                    <p className="network" style={{ margin: '4px 0 0' }}>Sin balance de {position.asset} en las wallets configuradas</p>
+              {/* Botón colapsable — siempre visible */}
+              <button className="spot-collapse-btn" onClick={() => toggleAsset(position.asset)}>
+                <div className="spot-collapse-left">
+                  <span className="spot-collapse-arrow">{isOpen ? '▼' : '▶'}</span>
+                  <span className="pair">{position.asset}</span>
+                  {hasPrice && (
+                    <span className="network">${formatPrice(`${position.asset}/USDC`, position.currentPrice)}</span>
                   )}
+                </div>
+                <div className="spot-collapse-right">
+                  {pnl != null && (
+                    <span className={`pill ${tone}`}>
+                      {pnl >= 0 ? '+' : ''}{formatUsd(pnl)} · {pnlPct?.toFixed(2)}%
+                    </span>
+                  )}
+                  {onChainPnl != null && (
+                    <span className={`pill ${chainTone}`}>
+                      On-chain {onChainPnl >= 0 ? '+' : ''}{onChainPnlPct?.toFixed(2)}%
+                    </span>
+                  )}
+                </div>
+              </button>
 
-                  {perpPos && (
-                    <div style={{ borderTop: '1px solid var(--line)', marginTop: 8, paddingTop: 8 }}>
+              {/* Contenido expandible */}
+              {isOpen && (
+                <>
+                  {myWallets.length > 0 && (
+                    <div className="hl-position-block">
                       <div className="hl-position-head">
-                        <span className="hl-position-label">HL perp</span>
-                        <span className={`pill ${perpPos.size > 0 ? 'green' : 'cyan'}`}>{perpPos.size > 0 ? 'Long' : 'Short'}</span>
-                        <span className={`pill ${hlPnlTone}`}>{perpPos.unrealizedPnl >= 0 ? '+' : ''}{formatUsd(perpPos.unrealizedPnl)}</span>
-                        <span className={`pill ${hlPnlTone}`}>{(perpPos.roe * 100).toFixed(2)}% ROE</span>
+                        <span className="hl-position-label">Balance wallets</span>
+                        {chainLoading && <span className="network">Cargando...</span>}
+                        {onChainPnl != null && <span className={`pill ${chainTone}`}>{onChainPnl >= 0 ? '+' : ''}{formatUsd(onChainPnl)}</span>}
+                        {onChainPnlPct != null && <span className={`pill ${chainTone}`}>{onChainPnlPct >= 0 ? '+' : ''}{onChainPnlPct.toFixed(2)}%</span>}
                       </div>
-                      <div className="spot-metrics">
-                        <Metric label="Tamaño" value={`${Math.abs(perpPos.size).toFixed(4)} ${position.asset}`} />
-                        <Metric label="Entrada" value={`$${formatPrice(`${position.asset}/USDC`, perpPos.entryPx)}`} />
-                        <Metric label="Valor" value={formatUsd(Math.abs(perpPos.positionValue))} />
-                        <Metric label="PnL" value={formatUsd(perpPos.unrealizedPnl)} />
-                      </div>
+                      {onChain ? (
+                        <>
+                          <div className="spot-metrics">
+                            <Metric label="Total" value={`${onChain.total.toFixed(6)} ${position.asset}`} />
+                            <Metric label="Valor" value={onChainValue != null ? formatUsd(onChainValue) : '—'} />
+                            <Metric label="Costo DCA" value={position.dca > 0 ? formatUsd(onChain.total * position.dca) : '—'} />
+                            <Metric label="PnL" value={onChainPnl != null ? formatUsd(onChainPnl) : '—'} />
+                          </div>
+                          {Object.entries(onChain.perWallet ?? {}).map(([lbl, bal]) => (
+                            <div key={lbl} className="network" style={{ fontSize: 11, marginTop: 2 }}>{lbl}: {bal.toFixed(6)}</div>
+                          ))}
+                        </>
+                      ) : !chainLoading && (
+                        <p className="network" style={{ margin: '4px 0 0' }}>Sin balance de {position.asset} en las wallets configuradas</p>
+                      )}
+                      {perpPos && (
+                        <div style={{ borderTop: '1px solid var(--line)', marginTop: 8, paddingTop: 8 }}>
+                          <div className="hl-position-head">
+                            <span className="hl-position-label">HL perp</span>
+                            <span className={`pill ${perpPos.size > 0 ? 'green' : 'cyan'}`}>{perpPos.size > 0 ? 'Long' : 'Short'}</span>
+                            <span className={`pill ${hlPnlTone}`}>{perpPos.unrealizedPnl >= 0 ? '+' : ''}{formatUsd(perpPos.unrealizedPnl)}</span>
+                            <span className={`pill ${hlPnlTone}`}>{(perpPos.roe * 100).toFixed(2)}% ROE</span>
+                          </div>
+                          <div className="spot-metrics">
+                            <Metric label="Tamaño" value={`${Math.abs(perpPos.size).toFixed(4)} ${position.asset}`} />
+                            <Metric label="Entrada" value={`$${formatPrice(`${position.asset}/USDC`, perpPos.entryPx)}`} />
+                            <Metric label="Valor" value={formatUsd(Math.abs(perpPos.positionValue))} />
+                            <Metric label="PnL" value={formatUsd(perpPos.unrealizedPnl)} />
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
-                </div>
-              )}
 
-              <div className="spot-form">
-                <label className="config-field">
-                  <span>Cantidad (manual)</span>
-                  <input type="number" min="0" step="0.01" value={position.amount} onChange={(e) => updatePosition(position.asset, { amount: Number(e.target.value) })} />
-                </label>
-                <label className="config-field">
-                  <span>Precio compra DCA</span>
-                  <input type="number" min="0.00000001" step="1" value={position.dca} onChange={(e) => updatePosition(position.asset, { dca: Number(e.target.value) })} />
-                </label>
-              </div>
-              <div className="spot-metrics">
-                <Metric label="Costo" value={formatUsd(cost)} />
-                <Metric label="Valor actual" value={value != null ? formatUsd(value) : '—'} />
-                <Metric label="PnL" value={pnl != null ? formatUsd(pnl) : '—'} />
-                <Metric label="PnL %" value={pnlPct != null ? `${pnlPct.toFixed(2)}%` : '—'} />
-              </div>
-              <SpotProtectorBot
-                asset={position.asset}
-                protector={position.protector}
-                currentPrice={position.currentPrice}
-                dca={position.dca}
-                hlPosition={perpPos}
-                onChange={(patch) => updateProtector(position.asset, patch)}
-                onFireSignal={(triggerType, price, amount) => recordSpotSignal(position.asset, triggerType, price, amount)}
-              />
+                  <div className="spot-form">
+                    <label className="config-field">
+                      <span>Cantidad (manual)</span>
+                      <input type="number" min="0" step="0.01" value={position.amount} onChange={(e) => updatePosition(position.asset, { amount: Number(e.target.value) })} />
+                    </label>
+                    <label className="config-field">
+                      <span>Precio compra DCA</span>
+                      <input type="number" min="0.00000001" step="1" value={position.dca} onChange={(e) => updatePosition(position.asset, { dca: Number(e.target.value) })} />
+                    </label>
+                  </div>
+                  <div className="spot-metrics">
+                    <Metric label="Costo" value={formatUsd(cost)} />
+                    <Metric label="Valor actual" value={value != null ? formatUsd(value) : '—'} />
+                    <Metric label="PnL" value={pnl != null ? formatUsd(pnl) : '—'} />
+                    <Metric label="PnL %" value={pnlPct != null ? `${pnlPct.toFixed(2)}%` : '—'} />
+                  </div>
+                  <SpotProtectorBot
+                    asset={position.asset}
+                    protector={position.protector}
+                    currentPrice={position.currentPrice}
+                    dca={position.dca}
+                    hlPosition={perpPos}
+                    onChange={(patch) => updateProtector(position.asset, patch)}
+                    onFireSignal={(triggerType, price, amount) => recordSpotSignal(position.asset, triggerType, price, amount)}
+                  />
+                </>
+              )}
             </article>
           );
         })}
@@ -971,14 +1032,10 @@ function SimulationHistory({ signals }) {
 
 function SpotProtectorBot({ asset, protector, onChange, currentPrice, dca, hlPosition, onFireSignal }) {
   const [open, setOpen] = React.useState(false);
-  const cooldownRef = React.useRef(0);
-  const COOLDOWN_MS = 60 * 60 * 1000; // 1 hora entre señales auto
 
-  // DCA efectivo por prioridad: 1) perp HL entryPx, 2) on-chain (dca manual), 3) input manual
   const hlDca = hlPosition?.entryPx > 0 ? hlPosition.entryPx : null;
   const effectiveDca = hlDca ?? dca;
 
-  // triggerLevel unificado para todos los tipos
   const triggerLevel =
     protector.orderType === 'Trigger por caída' && effectiveDca
       ? effectiveDca * (1 - protector.triggerDrop / 100)
@@ -987,21 +1044,6 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, dca, hlPos
         : null;
 
   const isArmed = currentPrice && triggerLevel && currentPrice <= triggerLevel * 1.05;
-
-  // Evaluación automática de trigger en cada tick de precio
-  React.useEffect(() => {
-    if (!protector.active || !currentPrice || !triggerLevel) return;
-    if (protector.orderType === 'Trigger manual') return;
-
-    const now = Date.now();
-    if (now - cooldownRef.current < COOLDOWN_MS) return;
-
-    if (currentPrice <= triggerLevel) {
-      cooldownRef.current = now;
-      const buyAmount = (protector.capitalReserve * protector.buySize) / 100;
-      onFireSignal?.('auto', currentPrice, buyAmount);
-    }
-  }, [currentPrice, triggerLevel, protector.active, protector.orderType, protector.capitalReserve, protector.buySize, onFireSignal]);
 
   function handleManual() {
     const buyAmount = (protector.capitalReserve * protector.buySize) / 100;

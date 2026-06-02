@@ -145,6 +145,13 @@ export default defineSchema({
     .index("by_user_asset", ["userId", "asset"])
     .index("by_user_asset_time", ["userId", "asset", "timestamp"]),
 
+  admin_logs: defineTable({
+    userId: v.string(),
+    action: v.string(),
+    timestamp: v.number(),
+    meta: v.optional(v.any()),
+  }).index("by_timestamp", ["timestamp"]),
+
   system_config: defineTable({
     key: v.string(),
     value: v.any(),

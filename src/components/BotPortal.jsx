@@ -1546,6 +1546,130 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulation
   );
 }
 
+function AdminPanel({ simulationMode, tradingEnabled, onSetSimulation, onSetTrading, onKillSwitch }) {
+  const [killConfirm, setKillConfirm] = React.useState(false);
+  const [tradingConfirm, setTradingConfirm] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState('');
+
+  // Fix 1: limpiar confirmación stale si simulación se activa antes de confirmar
+  React.useEffect(() => {
+    if (simulationMode) setTradingConfirm(false);
+  }, [simulationMode]);
+
+  async function handleKillSwitch() {
+    if (!killConfirm) { setKillConfirm(true); return; }
+    setBusy(true);
+    setError('');
+    try {
+      await onKillSwitch();
+      setKillConfirm(false);
+    } catch (err) {
+      setError(`Kill switch falló: ${err?.message ?? 'error desconocido'}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleToggleSimulation() {
+    setBusy(true);
+    setError('');
+    try {
+      await onSetSimulation(!simulationMode);
+    } catch (err) {
+      setError(`Error simulación: ${err?.message ?? 'error desconocido'}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleToggleTrading() {
+    // Fix 1: guard doble — si simulationMode está activo, bloquear siempre
+    if (simulationMode) { setTradingConfirm(false); return; }
+    if (!tradingEnabled && !tradingConfirm) { setTradingConfirm(true); return; }
+    setBusy(true);
+    setError('');
+    try {
+      await onSetTrading(!tradingEnabled);
+      setTradingConfirm(false);
+    } catch (err) {
+      setError(`Error trading: ${err?.message ?? 'error desconocido'}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="panel admin-panel">
+      <div className="section-head">
+        <h2>Panel Admin</h2>
+        <span className="pill red">ADMIN</span>
+      </div>
+
+      <div className="admin-status">
+        <div className="admin-status-row">
+          <span>Modo simulación</span>
+          <span className={`pill ${simulationMode ? 'amber' : 'green'}`}>{simulationMode ? 'ON' : 'OFF'}</span>
+        </div>
+        <div className="admin-status-row">
+          <span>Trading en vivo</span>
+          <span className={`pill ${tradingEnabled ? 'green' : 'faint'}`}>{tradingEnabled ? 'ACTIVO' : 'DESACTIVADO'}</span>
+        </div>
+      </div>
+
+      {error && <p style={{ color: 'var(--red)', fontSize: 12, margin: '4px 0' }}>{error}</p>}
+
+      <div className="admin-actions">
+        {/* Kill Switch */}
+        <button
+          className={`admin-kill-btn${killConfirm ? ' confirming' : ''}`}
+          onClick={handleKillSwitch}
+          disabled={busy || (!tradingEnabled && simulationMode)}
+        >
+          {killConfirm ? '⚠ Confirmar — DETENER TODO' : '🛑 DETENER TODO'}
+        </button>
+        {killConfirm && (
+          <button className="mini-btn" onClick={() => setKillConfirm(false)}>Cancelar</button>
+        )}
+
+        {/* Simulación toggle */}
+        <div className="admin-toggle-row">
+          <span>Simulación</span>
+          <button className={`mini-btn ${simulationMode ? 'amber' : ''}`} onClick={handleToggleSimulation} disabled={busy}>
+            {simulationMode ? 'Desactivar SIM' : 'Activar SIM'}
+          </button>
+        </div>
+
+        {/* Trading toggle — Fix 1: "Confirmar LIVE" bloqueado si simulationMode es true */}
+        <div className="admin-toggle-row">
+          <span>Trading live</span>
+          {tradingConfirm && !tradingEnabled ? (
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button
+                className="mini-btn active"
+                onClick={handleToggleTrading}
+                disabled={busy || simulationMode}
+              >
+                Confirmar LIVE
+              </button>
+              <button className="mini-btn" onClick={() => setTradingConfirm(false)}>Cancelar</button>
+            </div>
+          ) : (
+            <button
+              className={`mini-btn ${tradingEnabled ? 'active' : ''}`}
+              onClick={handleToggleTrading}
+              disabled={busy || simulationMode}
+              title={simulationMode ? 'Desactiva simulación primero' : ''}
+            >
+              {tradingEnabled ? 'Desactivar LIVE' : 'Activar LIVE'}
+            </button>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function Dashboard({ user, onLogout, userId }) {
   const [network, setNetwork] = React.useState('Todas');
   const [pair, setPair] = React.useState('Todos');
@@ -1561,6 +1685,10 @@ function Dashboard({ user, onLogout, userId }) {
   const simulationMode = simModeConfig?.value ?? true;
   const tradingEnabledConfig = useQuery(api.systemConfig.getConfig, { key: "tradingEnabled" });
   const tradingEnabled = tradingEnabledConfig?.value ?? false;
+  const setSimulationModeMutation = useMutation(api.systemConfig.setSimulationMode);
+  const setTradingEnabledMutation = useMutation(api.systemConfig.setTradingEnabled);
+  const currentUser = useQuery(api.users.getUser, {});
+  const isAdmin = currentUser?.role === 'admin';
   const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
   const signals = useQuery(api.tradesHistory.listSignals, {});
   const signalCooldownRef = React.useRef({});
@@ -1573,6 +1701,17 @@ function Dashboard({ user, onLogout, userId }) {
   const [toasts, setToasts] = React.useState([]);
   const alertCooldownRef = React.useRef({});
   const alertDirectionRef = React.useRef({});
+
+  const logAdminActionMutation = useMutation(api.systemConfig.logAdminAction);
+
+  async function killSwitch() {
+    await setTradingEnabledMutation({ enabled: false });
+    await setSimulationModeMutation({ enabled: true });
+    // log es best-effort — un fallo aquí no debe enmascarar que el kill switch sí se aplicó
+    logAdminActionMutation({ action: 'kill_switch', meta: { triggeredBy: userId } }).catch(
+      (err) => console.error('admin log failed (kill switch was applied)', err)
+    );
+  }
 
   // UI-only state que no persiste en Convex (trading config extendida)
   const [localBotState, setLocalBotState] = React.useState({});
@@ -1868,6 +2007,15 @@ function Dashboard({ user, onLogout, userId }) {
                 ))}
               </div>
             </section>
+            {isAdmin && (
+              <AdminPanel
+                simulationMode={simulationMode}
+                tradingEnabled={tradingEnabled}
+                onSetSimulation={(v) => setSimulationModeMutation({ enabled: v })}
+                onSetTrading={(v) => setTradingEnabledMutation({ enabled: v })}
+                onKillSwitch={killSwitch}
+              />
+            )}
             <SubscriptionPanel />
             <WalletPanel />
             <NetworkLiquidity pools={filteredPools} />

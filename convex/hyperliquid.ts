@@ -33,12 +33,14 @@ export const executePerpMarketOrder = action({
   },
   handler: async (ctx, args) => {
     const user = await ctx.runQuery(internal.users.getCurrentUserInternal, {});
-    const tradingConfig = await ctx.runQuery(internal.systemConfig.getConfigInternal, {
-      key: "tradingEnabled",
-    });
+    const [tradingConfig, simConfig] = await Promise.all([
+      ctx.runQuery(internal.systemConfig.getConfigInternal, { key: "tradingEnabled" }),
+      ctx.runQuery(internal.systemConfig.getConfigInternal, { key: "simulationMode" }),
+    ]);
 
     if (!args.confirmLive) throw new Error("Live execution requires explicit confirmation");
     if (tradingConfig?.value !== true) throw new Error("Live trading is disabled");
+    if (simConfig?.value !== false) throw new Error("Simulation mode is active — live execution blocked");
     if (args.tradeAmount <= 0) throw new Error("tradeAmount must be > 0");
     if (args.price <= 0) throw new Error("price must be > 0");
     if (args.leverage < 1 || args.leverage > 25) throw new Error("leverage must be between 1 and 25");

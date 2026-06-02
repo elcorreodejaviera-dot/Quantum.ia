@@ -2,6 +2,19 @@ import { internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { requireAuth, requireAdmin } from "./helpers";
 
+export const logAdminAction = mutation({
+  args: { action: v.string(), meta: v.optional(v.any()) },
+  handler: async (ctx, { action, meta }) => {
+    const identity = await requireAdmin(ctx);
+    await ctx.db.insert("admin_logs", {
+      userId: identity.subject,
+      action,
+      timestamp: Date.now(),
+      meta,
+    });
+  },
+});
+
 export const getConfig = query({
   args: { key: v.string() },
   handler: async (ctx, { key }) => {

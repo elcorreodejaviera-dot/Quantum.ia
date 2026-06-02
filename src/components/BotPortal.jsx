@@ -923,6 +923,7 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
           const currentVal = hasPrice ? position.currentPrice * position.amount : null;
           const pnl = currentVal != null ? currentVal - invested : null;
           const pnlPositive = pnl != null && pnl >= 0;
+          const pnlPct = pnl != null && invested > 0 ? (pnl / invested) * 100 : null;
 
           return (
             <article className="spot-card" key={position.asset}>
@@ -963,6 +964,14 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
                     <span>Valor actual</span>
                     <span className={`spot-calc-value${currentVal != null ? (pnlPositive ? ' positive' : ' negative') : ''}`}>
                       {currentVal != null ? formatUsd(currentVal) : '—'}
+                    </span>
+                  </div>
+                  <div className="spot-inline-field">
+                    <span>ROI</span>
+                    <span className={`spot-calc-value${pnl != null ? (pnlPositive ? ' positive' : ' negative') : ''}`}>
+                      {pnlPct != null
+                        ? `${pnlPositive ? '+' : ''}${pnlPct.toFixed(2)}% · ${pnlPositive ? '+' : ''}${formatUsd(pnl)}`
+                        : '—'}
                     </span>
                   </div>
                 </div>

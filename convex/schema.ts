@@ -80,7 +80,8 @@ export default defineSchema({
     triggerType: v.optional(v.string()),
   })
     .index("by_userId", ["userId"])
-    .index("by_timestamp", ["timestamp"]),
+    .index("by_timestamp", ["timestamp"])
+    .index("by_user_timestamp", ["userId", "timestamp"]),
 
   alerts: defineTable({
     userId: v.id("users"),

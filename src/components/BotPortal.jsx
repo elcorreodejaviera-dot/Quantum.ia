@@ -656,12 +656,44 @@ function RiskPanel({ pools }) {
 
 const DEFAULT_PROTECTOR = { active: true, triggerDrop: 4, buySize: 15, maxBuys: 3, capitalReserve: 5000, orderType: 'Trigger por caída', takeProfit: 'Rebajar DCA' };
 
+function HLMarketPanel() {
+  const [hlSearch, setHlSearch] = React.useState('');
+  const { allPrices, connected: hlConnected } = useHyperliquidAllMids();
+
+  return (
+    <div className="hl-market">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        <input
+          className="hl-search"
+          placeholder="Buscar asset..."
+          value={hlSearch}
+          onChange={e => setHlSearch(e.target.value.toUpperCase())}
+          style={{ margin: 0, flex: 1 }}
+        />
+        <span className={`pill${hlConnected ? ' green' : ''}`}>
+          {hlConnected ? 'En vivo' : 'Conectando...'}
+        </span>
+      </div>
+      <div className="hl-price-grid">
+        {Object.entries(allPrices)
+          .filter(([asset]) => !hlSearch || asset.includes(hlSearch))
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([asset, price]) => (
+            <div key={asset} className="hl-price-row">
+              <span className="hl-asset">{asset}</span>
+              <span className="hl-price mono">${formatPrice(`${asset}/USDC`, price)}</span>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  );
+}
+
 function SpotPositions({ prices, connected }) {
   const positionsFromDb = useQuery(api.spot_positions.listMyPositions);
   const [positions, setPositions] = React.useState(INITIAL_SPOT_POSITIONS);
   const [hlOpen, setHlOpen] = React.useState(false);
-  const [hlSearch, setHlSearch] = React.useState('');
-  const { allPrices, connected: hlConnected } = useHyperliquidAllMids();
 
   React.useEffect(() => {
     if (positionsFromDb === undefined) return;
@@ -699,34 +731,10 @@ function SpotPositions({ prices, connected }) {
       </div>
       <div className="hl-market-toggle">
         <button className="mini-btn" onClick={() => setHlOpen(v => !v)}>
-          {hlOpen ? 'Ocultar mercado HL' : `Ver mercado HL (${Object.keys(allPrices).length} assets)`}
+          {hlOpen ? 'Ocultar mercado HL' : 'Ver mercado HL'}
         </button>
-        <span className={`pill${hlConnected ? ' green' : ''}`} style={{ marginLeft: 8 }}>
-          {hlConnected ? 'En vivo' : 'Conectando...'}
-        </span>
       </div>
-      {hlOpen && (
-        <div className="hl-market">
-          <input
-            className="hl-search"
-            placeholder="Buscar asset..."
-            value={hlSearch}
-            onChange={e => setHlSearch(e.target.value.toUpperCase())}
-          />
-          <div className="hl-price-grid">
-            {Object.entries(allPrices)
-              .filter(([asset]) => !hlSearch || asset.includes(hlSearch))
-              .sort(([a], [b]) => a.localeCompare(b))
-              .map(([asset, price]) => (
-                <div key={asset} className="hl-price-row">
-                  <span className="hl-asset">{asset}</span>
-                  <span className="hl-price mono">${formatPrice(`${asset}/USDC`, price)}</span>
-                </div>
-              ))
-            }
-          </div>
-        </div>
-      )}
+      {hlOpen && <HLMarketPanel />}
 
       <div className="spot-list">
         {positions.map((position) => {

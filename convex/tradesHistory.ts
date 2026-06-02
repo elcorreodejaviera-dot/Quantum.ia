@@ -1,6 +1,6 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
-import { requireAuth, requireUser } from "./helpers";
+import { requireUser } from "./helpers";
 
 export const recordSignal = mutation({
   args: {
@@ -34,11 +34,12 @@ export const recordSignal = mutation({
 export const listSignals = query({
   args: { limit: v.optional(v.number()) },
   handler: async (ctx, { limit = 50 }) => {
-    await requireAuth(ctx);
+    const user = await requireUser(ctx);
+    const clamped = Math.min(Math.max(limit, 1), 100);
     return await ctx.db
       .query("trades_history")
-      .withIndex("by_timestamp")
+      .withIndex("by_user_timestamp", (q) => q.eq("userId", user._id))
       .order("desc")
-      .take(limit);
+      .take(clamped);
   },
 });

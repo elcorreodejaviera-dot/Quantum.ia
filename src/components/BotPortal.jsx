@@ -735,6 +735,7 @@ function saveProtector(userId, asset, protector) {
 
 function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabled }) {
   const positionsFromDb = useQuery(api.spot_positions.listMyPositions);
+  const updatePositionMutation = useMutation(api.spot_positions.updatePosition);
   const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
   const executeHlOrder = useAction(api.hyperliquid.executePerpMarketOrder);
   const [positions, setPositions] = React.useState(() =>
@@ -804,6 +805,14 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
     }
   }, [positions, recordSpotSignal, simulationMode, tradingEnabled]);
 
+  function updatePositionField(asset, field, value) {
+    setPositions((items) => items.map((item) => (item.asset !== asset ? item : { ...item, [field]: value })));
+    const pos = positions.find((p) => p.asset === asset);
+    if (pos?.id) {
+      updatePositionMutation({ id: pos.id, [field]: value }).catch((err) => console.error('updatePosition failed', err));
+    }
+  }
+
   function updateProtector(asset, patch) {
     setPositions((items) => items.map((item) => {
       if (item.asset !== asset) return item;
@@ -833,16 +842,38 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
 
           return (
             <article className="spot-card" key={position.asset}>
-              <button className="spot-collapse-btn" onClick={() => toggleAsset(position.asset)}>
-                <div className="spot-collapse-left">
+              <div className="spot-collapse-btn">
+                <button className="spot-collapse-toggle" onClick={() => toggleAsset(position.asset)}>
                   <span className="spot-collapse-arrow">{isOpen ? '▼' : '▶'}</span>
                   <span className="pair">{position.asset}</span>
                   {hasPrice && <span className="network">${formatPrice(`${position.asset}/USDC`, position.currentPrice)}</span>}
+                </button>
+                <div className="spot-collapse-inputs">
+                  <label className="spot-inline-field">
+                    <span>Precio DCA</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={position.dca}
+                      onChange={(e) => updatePositionField(position.asset, 'dca', Number(e.target.value))}
+                    />
+                  </label>
+                  <label className="spot-inline-field">
+                    <span>Monto ({position.asset})</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.0001"
+                      value={position.amount}
+                      onChange={(e) => updatePositionField(position.asset, 'amount', Number(e.target.value))}
+                    />
+                  </label>
                 </div>
                 <div className="spot-collapse-right">
                   <span className="pill">{position.protector?.active ? 'Bot activo' : 'Bot pausado'}</span>
                 </div>
-              </button>
+              </div>
 
               {isOpen && (
                 <SpotProtectorBot

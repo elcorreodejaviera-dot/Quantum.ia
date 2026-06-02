@@ -1015,9 +1015,7 @@ button {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px 14px;
-  cursor: pointer;
   color: var(--text);
-  text-align: left;
   transition: border-color 0.15s;
 }
 
@@ -1025,10 +1023,56 @@ button {
   border-color: rgba(0, 200, 5, 0.4);
 }
 
-.spot-collapse-left {
+.spot-collapse-toggle {
   display: flex;
   align-items: center;
   gap: 10px;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.spot-collapse-inputs {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.spot-inline-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+}
+
+.spot-inline-field span {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.spot-inline-field input {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 12px;
+  font-family: var(--mono);
+  height: 26px;
+  padding: 0 6px;
+  width: 90px;
+}
+
+.spot-inline-field input:focus {
+  border-color: rgba(0, 200, 5, 0.5);
+  outline: none;
 }
 
 .spot-collapse-right {
@@ -1037,6 +1081,7 @@ button {
   gap: 6px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  flex-shrink: 0;
 }
 
 .spot-collapse-arrow {

@@ -1796,3 +1796,25 @@ button {
   margin: 12px 0 6px;
   text-transform: uppercase;
 }
+
+.modal-overlay {
+  align-items: center;
+  background: rgba(0, 0, 0, 0.7);
+  bottom: 0;
+  display: flex;
+  justify-content: center;
+  left: 0;
+  position: fixed;
+  right: 0;
+  top: 0;
+  z-index: 1000;
+}
+
+.modal-panel {
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  max-width: 420px;
+  padding: 20px;
+  width: 90%;
+}

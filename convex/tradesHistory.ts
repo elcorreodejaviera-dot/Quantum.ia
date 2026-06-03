@@ -64,6 +64,37 @@ export const recordExecution = internalMutation({
   },
 });
 
+export const recordTestnetExecution = mutation({
+  args: {
+    action: v.string(),
+    asset: v.string(),
+    amount: v.number(),
+    price: v.number(),
+    botName: v.optional(v.string()),
+    triggerType: v.optional(v.string()),
+    exchangeStatus: v.string(),
+    orderId: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx);
+    return await ctx.db.insert("trades_history", {
+      userId: user._id,
+      action: args.action,
+      asset: args.asset,
+      amount: args.amount,
+      price: args.price,
+      simulated: false,
+      network: "testnet",
+      timestamp: Date.now(),
+      botName: args.botName,
+      triggerType: args.triggerType ?? "manual",
+      exchangeStatus: args.exchangeStatus,
+      orderId: args.orderId,
+      source: "client_reported_testnet",
+    });
+  },
+});
+
 export const listSignals = query({
   args: { limit: v.optional(v.number()) },
   handler: async (ctx, { limit = 50 }) => {

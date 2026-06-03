@@ -106,6 +106,7 @@ export default defineSchema({
     exchangeStatus: v.optional(v.string()),
     orderId: v.optional(v.string()),
     exchangeResponse: v.optional(v.any()),
+    source: v.optional(v.string()),
   })
     .index("by_userId", ["userId"])
     .index("by_timestamp", ["timestamp"])

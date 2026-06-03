@@ -2,7 +2,7 @@ import React from 'react'
 import { useUser, useClerk } from '@clerk/clerk-react'
 import { useConvexAuth, useQuery, useMutation, useAction } from 'convex/react'
 import { api } from '../../convex/_generated/api'
-import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState, useWalletBalances, useHLAccountBalance } from '../hooks/useHyperliquid'
+import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState, useWalletBalances, useHLAccountBalance, useMetaMaskSigner, executeHLTestnetOrder } from '../hooks/useHyperliquid'
 
 const IS_TESTNET = import.meta.env.VITE_HL_NETWORK === 'testnet';
 
@@ -1276,12 +1276,59 @@ function AlertsPanel({ alerts, history, onCreate, onDelete }) {
 
 const EVM_RE_PROTECTOR = /^0x[a-fA-F0-9]{40}$/;
 
-function HLAccountPanel({ walletAddress, userLoaded }) {
+function TradeConfirmModal({ trade, onConfirm, onCancel, executing }) {
+  if (!trade) return null;
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="section-head">
+          <h2>Confirmar orden</h2>
+          <span className="pill red">Testnet</span>
+        </div>
+        <div className="futures-grid compact" style={{ marginTop: 12 }}>
+          <Metric label="Activo" value={trade.asset} />
+          <Metric label="Dirección" value={<span className={`pill ${trade.isBuy ? 'green' : 'red'}`}>{trade.isBuy ? 'Long' : 'Short'}</span>} />
+          <Metric label="Tamaño" value={trade.size.toFixed(trade.asset === 'BTC' ? 5 : 4)} />
+          <Metric label="Precio ref." value={`$${trade.price.toLocaleString('en-US', { maximumFractionDigits: 2 })}`} />
+          {trade.leverage != null && <Metric label="Leverage" value={`${trade.leverage}x`} />}
+          {trade.reduceOnly && <Metric label="Tipo" value="Cerrar posición" />}
+        </div>
+        <p className="network" style={{ marginTop: 10, fontSize: 12 }}>
+          MetaMask pedirá tu firma. La orden se ejecutará en Hyperliquid testnet.
+        </p>
+        <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+          <button className="ghost-btn" onClick={onCancel} disabled={executing} style={{ flex: 1 }}>Cancelar</button>
+          <button className="primary-btn" onClick={onConfirm} disabled={executing} style={{ flex: 1 }}>
+            {executing ? 'Firmando…' : 'Confirmar y firmar'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HLAccountPanel({ walletAddress, userLoaded, prices, isAdmin }) {
   const setWalletAddressMutation = useMutation(api.users.setWalletAddress);
   const clearWalletAddressMutation = useMutation(api.users.clearWalletAddress);
+  const recordTestnetExecution = useMutation(api.tradesHistory.recordTestnetExecution);
   const [draft, setDraft] = React.useState(walletAddress ?? '');
   const [saving, setSaving] = React.useState(false);
   const [saveError, setSaveError] = React.useState('');
+
+  // MetaMask
+  const { account: mmAccount, walletClient, connectorType, connectMetaMask, connectWalletConnect, disconnect: disconnectMM, isConnecting, error: mmError } = useMetaMaskSigner();
+
+  // Trade state
+  const [pendingTrade, setPendingTrade] = React.useState(null);
+  const [executing, setExecuting] = React.useState(false);
+  const [tradeError, setTradeError] = React.useState('');
+  const [tradeSuccess, setTradeSuccess] = React.useState('');
+
+  // New order form
+  const [orderAsset, setOrderAsset] = React.useState('BTC');
+  const [orderSide, setOrderSide] = React.useState('Long');
+  const [orderAmount, setOrderAmount] = React.useState('');
+  const [orderLeverage, setOrderLeverage] = React.useState('1');
 
   React.useEffect(() => {
     if (walletAddress != null) setDraft(walletAddress);
@@ -1314,14 +1361,110 @@ function HLAccountPanel({ walletAddress, userLoaded }) {
     }
   }
 
+  function openNewOrder() {
+    const amount = parseFloat(orderAmount);
+    if (!amount || amount <= 0) return;
+    const livePrice = prices?.[orderAsset];
+    if (!livePrice) { setTradeError(`Sin precio live para ${orderAsset}`); return; }
+    setPendingTrade({
+      asset: orderAsset,
+      isBuy: orderSide === 'Long',
+      size: amount / livePrice,
+      price: livePrice,
+      leverage: parseInt(orderLeverage, 10) || 1,
+      reduceOnly: false,
+      usdAmount: amount,
+    });
+    setTradeError('');
+    setTradeSuccess('');
+  }
+
+  function openClosePosition(pos) {
+    const livePrice = prices?.[pos.coin] ?? pos.entryPx;
+    setPendingTrade({
+      asset: pos.coin,
+      isBuy: pos.size < 0,
+      size: Math.abs(pos.size),
+      price: livePrice,
+      leverage: null,
+      reduceOnly: true,
+    });
+    setTradeError('');
+    setTradeSuccess('');
+  }
+
+  async function confirmTrade() {
+    if (!pendingTrade || !walletClient) return;
+    setExecuting(true);
+    setTradeError('');
+    try {
+      const response = await executeHLTestnetOrder({
+        walletClient,
+        asset: pendingTrade.asset,
+        isBuy: pendingTrade.isBuy,
+        size: pendingTrade.size,
+        price: pendingTrade.price,
+        leverage: pendingTrade.leverage,
+        reduceOnly: pendingTrade.reduceOnly,
+      });
+      const statuses = response?.response?.data?.statuses;
+      const first = Array.isArray(statuses) ? statuses[0] : undefined;
+      const orderId = first?.resting?.oid ?? first?.filled?.oid;
+      const status = (response)?.status ?? 'unknown';
+
+      await recordTestnetExecution({
+        action: `${pendingTrade.reduceOnly ? 'Cerrar' : pendingTrade.isBuy ? 'Long' : 'Short'} ${pendingTrade.asset}`,
+        asset: pendingTrade.asset,
+        amount: pendingTrade.usdAmount ?? pendingTrade.size * pendingTrade.price,
+        price: pendingTrade.price,
+        triggerType: 'manual',
+        exchangeStatus: status,
+        orderId: orderId != null ? String(orderId) : undefined,
+      });
+
+      setTradeSuccess(`Orden enviada — ID: ${orderId ?? 'n/a'}`);
+      setPendingTrade(null);
+    } catch (e) {
+      setTradeError(e?.message ?? 'Error ejecutando orden');
+    } finally {
+      setExecuting(false);
+    }
+  }
+
   return (
     <section className="panel">
+      <TradeConfirmModal trade={pendingTrade} onConfirm={confirmTrade} onCancel={() => setPendingTrade(null)} executing={executing} />
+
       <div className="section-head">
         <h2>Cuenta Hyperliquid{IS_TESTNET && <span className="pill red" style={{ marginLeft: 8, fontSize: 11 }}>Testnet</span>}</h2>
         <span className={`pill ${loading ? '' : account ? 'green' : 'faint'}`}>
           {loading ? 'Cargando…' : account ? 'Conectada' : 'Sin wallet'}
         </span>
       </div>
+
+      {/* MetaMask */}
+      {IS_TESTNET && isAdmin && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '8px 0 4px' }}>
+          {mmAccount ? (
+            <>
+              <span className="pill green" style={{ fontSize: 11 }}>
+                {connectorType === 'walletconnect' ? 'WalletConnect' : 'MetaMask'} {mmAccount.slice(0, 6)}…{mmAccount.slice(-4)}
+              </span>
+              <button className="ghost-btn" style={{ padding: '3px 10px', fontSize: 11 }} onClick={disconnectMM}>Desconectar</button>
+            </>
+          ) : (
+            <>
+              <button className="primary-btn" style={{ padding: '5px 12px', fontSize: 12 }} onClick={connectMetaMask} disabled={isConnecting}>
+                {isConnecting ? 'Conectando…' : 'MetaMask'}
+              </button>
+              <button className="ghost-btn" style={{ padding: '5px 12px', fontSize: 12 }} onClick={connectWalletConnect} disabled={isConnecting}>
+                WalletConnect
+              </button>
+            </>
+          )}
+          {mmError && <span style={{ fontSize: 11, color: 'var(--red,#f44)' }}>{mmError}</span>}
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '10px 0 4px', flexWrap: 'wrap' }}>
         <input
@@ -1380,9 +1523,16 @@ function HLAccountPanel({ walletAddress, userLoaded }) {
                 <div key={pos.coin} style={{ padding: '8px 0', borderBottom: '1px solid var(--border,#222)' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
                     <span style={{ fontWeight: 600 }}>{pos.coin}</span>
-                    <span className={`pill ${pos.size > 0 ? 'green' : 'red'}`} style={{ fontSize: 11 }}>
-                      {pos.size > 0 ? 'Long' : 'Short'} {Math.abs(pos.size).toLocaleString('en-US', { maximumFractionDigits: 4 })}
-                    </span>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <span className={`pill ${pos.size > 0 ? 'green' : 'red'}`} style={{ fontSize: 11 }}>
+                        {pos.size > 0 ? 'Long' : 'Short'} {Math.abs(pos.size).toLocaleString('en-US', { maximumFractionDigits: 4 })}
+                      </span>
+                      {IS_TESTNET && isAdmin && mmAccount && (
+                        <button className="ghost-btn" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => openClosePosition(pos)}>
+                          Cerrar
+                        </button>
+                      )}
+                    </div>
                   </div>
                   <div className="futures-grid compact" style={{ gap: 4 }}>
                     <Metric label="Entrada" value={`$${pos.entryPx.toLocaleString('en-US', { maximumFractionDigits: 2 })}`} />
@@ -1395,6 +1545,52 @@ function HLAccountPanel({ walletAddress, userLoaded }) {
               ))}
             </div>
           )}
+
+          {/* Nueva orden — solo en testnet, solo admin, con wallet conectada */}
+          {IS_TESTNET && isAdmin && mmAccount && (
+            <>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 14, marginBottom: 6 }}>
+                <span style={{ fontSize: 12, fontWeight: 600 }}>Nueva orden</span>
+              </div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                <select value={orderAsset} onChange={(e) => setOrderAsset(e.target.value)} style={{ fontSize: 12, padding: '4px 8px' }}>
+                  <option value="BTC">BTC</option>
+                  <option value="ETH">ETH</option>
+                </select>
+                <select value={orderSide} onChange={(e) => setOrderSide(e.target.value)} style={{ fontSize: 12, padding: '4px 8px' }}>
+                  <option value="Long">Long</option>
+                  <option value="Short">Short</option>
+                </select>
+                <input
+                  type="number"
+                  placeholder="USDC"
+                  value={orderAmount}
+                  onChange={(e) => setOrderAmount(e.target.value)}
+                  style={{ width: 80, fontSize: 12, padding: '4px 8px' }}
+                  min="0"
+                />
+                <input
+                  type="number"
+                  placeholder="Lev"
+                  value={orderLeverage}
+                  onChange={(e) => setOrderLeverage(e.target.value)}
+                  style={{ width: 55, fontSize: 12, padding: '4px 8px' }}
+                  min="1" max="25"
+                />
+                <button
+                  className="primary-btn"
+                  style={{ padding: '4px 12px', fontSize: 12 }}
+                  onClick={openNewOrder}
+                  disabled={!orderAmount || parseFloat(orderAmount) <= 0}
+                >
+                  Abrir
+                </button>
+              </div>
+            </>
+          )}
+
+          {tradeError && <p style={{ fontSize: 11, color: 'var(--red,#f44)', marginTop: 8 }}>{tradeError}</p>}
+          {tradeSuccess && <p style={{ fontSize: 11, color: 'var(--green,#4c7)', marginTop: 8 }}>{tradeSuccess}</p>}
 
           {openOrders.length > 0 && (
             <>
@@ -2123,7 +2319,7 @@ function Dashboard({ user, onLogout, userId }) {
             )}
             <SubscriptionPanel />
             <WalletPanel />
-            <HLAccountPanel walletAddress={currentUser?.walletAddress ?? null} userLoaded={userLoaded} />
+            <HLAccountPanel walletAddress={currentUser?.walletAddress ?? null} userLoaded={userLoaded} prices={prices} isAdmin={isAdmin} />
             <NetworkLiquidity pools={filteredPools} />
             <RiskPanel pools={filteredPools} />
           </aside>

@@ -90,6 +90,7 @@ export const recordTestnetExecution = mutation({
       triggerType: args.triggerType ?? "manual",
       exchangeStatus: args.exchangeStatus,
       orderId: args.orderId,
+      source: "client_reported_testnet",
     });
   },
 });

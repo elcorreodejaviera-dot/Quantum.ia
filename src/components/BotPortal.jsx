@@ -1307,7 +1307,7 @@ function TradeConfirmModal({ trade, onConfirm, onCancel, executing }) {
   );
 }
 
-function HLAccountPanel({ walletAddress, userLoaded }) {
+function HLAccountPanel({ walletAddress, userLoaded, prices, isAdmin }) {
   const setWalletAddressMutation = useMutation(api.users.setWalletAddress);
   const clearWalletAddressMutation = useMutation(api.users.clearWalletAddress);
   const recordTestnetExecution = useMutation(api.tradesHistory.recordTestnetExecution);
@@ -1362,17 +1362,15 @@ function HLAccountPanel({ walletAddress, userLoaded }) {
   }
 
   function openNewOrder() {
-    const price = account?.openPositions?.[0] ? null : null; // will use live price from account
     const amount = parseFloat(orderAmount);
     if (!amount || amount <= 0) return;
-    const currentPrice = account ? account.totalNtlPos / (account.openPositions.reduce((s, p) => s + Math.abs(p.size), 0) || 1) : 0;
-    // Use a rough price from existing position or 0 (will show in modal)
-    const refPrice = account?.openPositions?.find(p => p.coin === orderAsset)?.entryPx ?? 0;
+    const livePrice = prices?.[orderAsset];
+    if (!livePrice) { setTradeError(`Sin precio live para ${orderAsset}`); return; }
     setPendingTrade({
       asset: orderAsset,
       isBuy: orderSide === 'Long',
-      size: amount / (refPrice || 1),
-      price: refPrice || amount,
+      size: amount / livePrice,
+      price: livePrice,
       leverage: parseInt(orderLeverage, 10) || 1,
       reduceOnly: false,
       usdAmount: amount,
@@ -1382,11 +1380,12 @@ function HLAccountPanel({ walletAddress, userLoaded }) {
   }
 
   function openClosePosition(pos) {
+    const livePrice = prices?.[pos.coin] ?? pos.entryPx;
     setPendingTrade({
       asset: pos.coin,
       isBuy: pos.size < 0,
       size: Math.abs(pos.size),
-      price: pos.entryPx,
+      price: livePrice,
       leverage: null,
       reduceOnly: true,
     });
@@ -1444,7 +1443,7 @@ function HLAccountPanel({ walletAddress, userLoaded }) {
       </div>
 
       {/* MetaMask */}
-      {IS_TESTNET && (
+      {IS_TESTNET && isAdmin && (
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '8px 0 4px' }}>
           {mmAccount ? (
             <>
@@ -1528,7 +1527,7 @@ function HLAccountPanel({ walletAddress, userLoaded }) {
                       <span className={`pill ${pos.size > 0 ? 'green' : 'red'}`} style={{ fontSize: 11 }}>
                         {pos.size > 0 ? 'Long' : 'Short'} {Math.abs(pos.size).toLocaleString('en-US', { maximumFractionDigits: 4 })}
                       </span>
-                      {IS_TESTNET && mmAccount && (
+                      {IS_TESTNET && isAdmin && mmAccount && (
                         <button className="ghost-btn" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => openClosePosition(pos)}>
                           Cerrar
                         </button>
@@ -1547,8 +1546,8 @@ function HLAccountPanel({ walletAddress, userLoaded }) {
             </div>
           )}
 
-          {/* Nueva orden — solo en testnet con MetaMask conectado */}
-          {IS_TESTNET && mmAccount && (
+          {/* Nueva orden — solo en testnet, solo admin, con wallet conectada */}
+          {IS_TESTNET && isAdmin && mmAccount && (
             <>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 14, marginBottom: 6 }}>
                 <span style={{ fontSize: 12, fontWeight: 600 }}>Nueva orden</span>
@@ -2320,7 +2319,7 @@ function Dashboard({ user, onLogout, userId }) {
             )}
             <SubscriptionPanel />
             <WalletPanel />
-            <HLAccountPanel walletAddress={currentUser?.walletAddress ?? null} userLoaded={userLoaded} />
+            <HLAccountPanel walletAddress={currentUser?.walletAddress ?? null} userLoaded={userLoaded} prices={prices} isAdmin={isAdmin} />
             <NetworkLiquidity pools={filteredPools} />
             <RiskPanel pools={filteredPools} />
           </aside>

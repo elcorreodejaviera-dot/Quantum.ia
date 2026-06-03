@@ -595,6 +595,7 @@ const ASSET_IDS = { BTC: 0, ETH: 1 };
 const IOC_SLIPPAGE = 0.01;
 
 export async function executeHLTestnetOrder({ walletClient, asset, isBuy, size, price, leverage, reduceOnly = false }) {
+  if (!IS_TESTNET) throw new Error('executeHLTestnetOrder solo disponible en modo testnet');
   const assetId = ASSET_IDS[asset.toUpperCase()];
   if (assetId == null) throw new Error(`Asset no soportado: ${asset}`);
   if (!walletClient) throw new Error('MetaMask no conectado');

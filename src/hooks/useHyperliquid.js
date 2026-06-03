@@ -327,11 +327,13 @@ export function useWalletBalances(wallets) {
 
 export function useHLAccountBalance(address) {
   const [account, setAccount] = useState(null);
+  const [openOrders, setOpenOrders] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
   useEffect(() => {
     setAccount(null);
+    setOpenOrders([]);
     setError(null);
     if (!address) return;
     let cancelled = false;
@@ -339,24 +341,45 @@ export function useHLAccountBalance(address) {
     async function fetchAccount() {
       setLoading(true);
       try {
-        const res = await fetch(HL_REST, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type: 'clearinghouseState', user: address }),
-        });
-        if (!res.ok) { if (!cancelled) setError('Error al consultar HL'); return; }
+        const [stateRes, ordersRes] = await Promise.all([
+          fetch(HL_REST, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'clearinghouseState', user: address }),
+          }),
+          fetch(HL_REST, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'openOrders', user: address }),
+          }),
+        ]);
+        if (!stateRes.ok) { if (!cancelled) setError('Error al consultar HL'); return; }
         if (cancelled) return;
-        const data = await res.json();
-        if (!cancelled) {
-          setAccount({
-            accountValue: parseFloat(data.marginSummary?.accountValue ?? 0),
-            withdrawable: parseFloat(data.withdrawable ?? 0),
-            totalNtlPos: parseFloat(data.marginSummary?.totalNtlPos ?? 0),
-            totalMarginUsed: parseFloat(data.marginSummary?.totalMarginUsed ?? 0),
-            openPositions: (data.assetPositions ?? []).filter(p => parseFloat(p.position?.szi ?? 0) !== 0),
-          });
-          setError(null);
-        }
+        const [data, orders] = await Promise.all([
+          stateRes.json(),
+          ordersRes.ok ? ordersRes.json() : Promise.resolve([]),
+        ]);
+        if (cancelled) return;
+        setAccount({
+          accountValue: parseFloat(data.marginSummary?.accountValue ?? 0),
+          withdrawable: parseFloat(data.withdrawable ?? 0),
+          totalNtlPos: parseFloat(data.marginSummary?.totalNtlPos ?? 0),
+          totalMarginUsed: parseFloat(data.marginSummary?.totalMarginUsed ?? 0),
+          openPositions: (data.assetPositions ?? [])
+            .filter(({ position: p }) => parseFloat(p?.szi ?? 0) !== 0)
+            .map(({ position: p }) => ({
+              coin: p.coin,
+              size: parseFloat(p.szi),
+              entryPx: parseFloat(p.entryPx ?? 0),
+              unrealizedPnl: parseFloat(p.unrealizedPnl ?? 0),
+              positionValue: parseFloat(p.positionValue ?? 0),
+              roe: parseFloat(p.returnOnEquity ?? 0),
+              leverage: p.leverage?.value ?? null,
+              liquidationPx: p.liquidationPx ? parseFloat(p.liquidationPx) : null,
+            })),
+        });
+        setOpenOrders(Array.isArray(orders) ? orders : []);
+        setError(null);
       } catch (_) {
         if (!cancelled) setError('Sin conexión con Hyperliquid');
       } finally {
@@ -369,7 +392,7 @@ export function useHLAccountBalance(address) {
     return () => { cancelled = true; clearInterval(interval); };
   }, [address]);
 
-  return { account, loading, error };
+  return { account, openOrders, loading, error };
 }
 
 export function useHyperliquidSpotState(address) {

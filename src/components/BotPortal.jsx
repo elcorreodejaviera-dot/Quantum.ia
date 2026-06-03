@@ -1276,6 +1276,130 @@ function AlertsPanel({ alerts, history, onCreate, onDelete }) {
 
 const EVM_RE_PROTECTOR = /^0x[a-fA-F0-9]{40}$/;
 
+function HLAccountPanel({ walletAddress, userLoaded }) {
+  const setWalletAddressMutation = useMutation(api.users.setWalletAddress);
+  const [draft, setDraft] = React.useState(walletAddress ?? '');
+  const [saving, setSaving] = React.useState(false);
+  const [saveError, setSaveError] = React.useState('');
+
+  React.useEffect(() => {
+    if (walletAddress != null) setDraft(walletAddress);
+  }, [walletAddress]);
+
+  const validWallet = EVM_RE_PROTECTOR.test(draft);
+  const isDirty = draft !== (walletAddress ?? '');
+  const { account, openOrders, loading, error } = useHLAccountBalance(validWallet ? draft : null);
+
+  async function saveWallet() {
+    if (!validWallet) return;
+    setSaving(true);
+    setSaveError('');
+    try {
+      await setWalletAddressMutation({ walletAddress: draft });
+    } catch (e) {
+      setSaveError(e?.message ?? 'Error al guardar');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="panel">
+      <div className="section-head">
+        <h2>Cuenta Hyperliquid{IS_TESTNET && <span className="pill red" style={{ marginLeft: 8, fontSize: 11 }}>Testnet</span>}</h2>
+        <span className={`pill ${loading ? '' : account ? 'green' : 'faint'}`}>
+          {loading ? 'Cargando…' : account ? 'Conectada' : 'Sin wallet'}
+        </span>
+      </div>
+
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '10px 0 4px', flexWrap: 'wrap' }}>
+        <input
+          className="hl-search"
+          style={{ flex: 1, minWidth: 0, margin: 0 }}
+          placeholder="0x... wallet Hyperliquid"
+          value={draft}
+          onChange={(e) => { setDraft(e.target.value.trim()); setSaveError(''); }}
+          disabled={!userLoaded}
+        />
+        {isDirty && (
+          <button
+            className="primary-btn"
+            style={{ padding: '5px 12px', fontSize: 12 }}
+            onClick={saveWallet}
+            disabled={!validWallet || saving}
+          >
+            {saving ? 'Guardando…' : 'Guardar'}
+          </button>
+        )}
+      </div>
+      {draft && !validWallet && (
+        <span style={{ fontSize: 11, color: 'var(--red,#f44)' }}>Dirección EVM inválida</span>
+      )}
+      {saveError && <span style={{ fontSize: 11, color: 'var(--red,#f44)' }}>{saveError}</span>}
+      {error && <p className="network" style={{ color: 'var(--red,#f44)', marginTop: 8 }}>{error}</p>}
+
+      {account && (
+        <>
+          <div className="futures-grid compact" style={{ marginTop: 10 }}>
+            <Metric label="Valor cuenta" value={formatUsd(account.accountValue)} />
+            <Metric label="Retirable" value={formatUsd(account.withdrawable)} />
+            <Metric label="Nocional" value={formatUsd(account.totalNtlPos)} />
+            <Metric label="Margen usado" value={formatUsd(account.totalMarginUsed)} />
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 14, marginBottom: 6 }}>
+            <span style={{ fontSize: 12, fontWeight: 600 }}>Posiciones abiertas</span>
+            <span className="pill">{account.openPositions.length}</span>
+          </div>
+          {account.openPositions.length === 0 ? (
+            <p className="network" style={{ fontSize: 12 }}>Sin posiciones abiertas</p>
+          ) : (
+            <div className="hl-position-list">
+              {account.openPositions.map((pos) => (
+                <div key={pos.coin} style={{ padding: '8px 0', borderBottom: '1px solid var(--border,#222)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                    <span style={{ fontWeight: 600 }}>{pos.coin}</span>
+                    <span className={`pill ${pos.size > 0 ? 'green' : 'red'}`} style={{ fontSize: 11 }}>
+                      {pos.size > 0 ? 'Long' : 'Short'} {Math.abs(pos.size).toLocaleString('en-US', { maximumFractionDigits: 4 })}
+                    </span>
+                  </div>
+                  <div className="futures-grid compact" style={{ gap: 4 }}>
+                    <Metric label="Entrada" value={`$${pos.entryPx.toLocaleString('en-US', { maximumFractionDigits: 2 })}`} />
+                    <Metric label="PnL no real." value={<span style={{ color: pos.unrealizedPnl >= 0 ? 'var(--green,#4c7)' : 'var(--red,#f44)' }}>{formatUsd(pos.unrealizedPnl)}</span>} />
+                    <Metric label="ROE" value={<span style={{ color: pos.roe >= 0 ? 'var(--green,#4c7)' : 'var(--red,#f44)' }}>{(pos.roe * 100).toFixed(2)}%</span>} />
+                    {pos.leverage != null && <Metric label="Leverage" value={`${pos.leverage}x`} />}
+                    {pos.liquidationPx != null && <Metric label="Liquidación" value={`$${pos.liquidationPx.toLocaleString('en-US', { maximumFractionDigits: 2 })}`} />}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {openOrders.length > 0 && (
+            <>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 14, marginBottom: 6 }}>
+                <span style={{ fontSize: 12, fontWeight: 600 }}>Órdenes pendientes</span>
+                <span className="pill">{openOrders.length}</span>
+              </div>
+              <div className="hl-position-list">
+                {openOrders.map((order) => (
+                  <div className="hl-position-row" key={order.oid} style={{ padding: '6px 0' }}>
+                    <span style={{ fontWeight: 600 }}>{order.coin}</span>
+                    <span className={`pill ${order.side === 'B' ? 'green' : 'red'}`} style={{ fontSize: 11 }}>
+                      {order.side === 'B' ? 'Compra' : 'Venta'} {parseFloat(order.sz).toLocaleString('en-US', { maximumFractionDigits: 4 })}
+                    </span>
+                    <span className="mono" style={{ fontSize: 12 }}>${parseFloat(order.limitPx).toLocaleString('en-US', { maximumFractionDigits: 2 })}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulationMode, tradingEnabled, onFireSignal, isAdmin, userLoaded }) {
   const hlWallet = protector.hlWallet ?? '';
   const validWallet = EVM_RE_PROTECTOR.test(hlWallet);
@@ -1358,19 +1482,13 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulation
               </div>
               {hlAccount.openPositions.length > 0 && (
                 <div className="hl-position-list">
-                  {hlAccount.openPositions.slice(0, 4).map((item) => {
-                    const position = item.position ?? {};
-                    const size = parseFloat(position.szi ?? 0);
-                    const entry = parseFloat(position.entryPx ?? 0);
-                    const coin = position.coin ?? '—';
-                    return (
-                      <div className="hl-position-row" key={`${coin}-${position.szi}`}>
-                        <span>{coin}</span>
-                        <span className="mono">{size > 0 ? 'Long' : 'Short'} {Math.abs(size).toLocaleString('en-US', { maximumFractionDigits: 4 })}</span>
-                        <span className="mono">@ ${entry > 0 ? formatPrice(`${coin}/USDC`, entry) : '—'}</span>
-                      </div>
-                    );
-                  })}
+                  {hlAccount.openPositions.slice(0, 4).map((pos) => (
+                    <div className="hl-position-row" key={pos.coin}>
+                      <span>{pos.coin}</span>
+                      <span className="mono">{pos.size > 0 ? 'Long' : 'Short'} {Math.abs(pos.size).toLocaleString('en-US', { maximumFractionDigits: 4 })}</span>
+                      <span className="mono">@ ${pos.entryPx > 0 ? formatPrice(`${pos.coin}/USDC`, pos.entryPx) : '—'}</span>
+                    </div>
+                  ))}
                 </div>
               )}
             </>
@@ -1984,6 +2102,7 @@ function Dashboard({ user, onLogout, userId }) {
             )}
             <SubscriptionPanel />
             <WalletPanel />
+            <HLAccountPanel walletAddress={currentUser?.walletAddress ?? null} userLoaded={userLoaded} />
             <NetworkLiquidity pools={filteredPools} />
             <RiskPanel pools={filteredPools} />
           </aside>

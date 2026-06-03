@@ -74,6 +74,14 @@ export const setWalletAddress = mutation({
   },
 });
 
+export const clearWalletAddress = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const user = await requireUser(ctx);
+    await ctx.db.patch(user._id, { walletAddress: undefined });
+  },
+});
+
 export const updateProfile = mutation({
   args: {
     name: v.optional(v.string()),

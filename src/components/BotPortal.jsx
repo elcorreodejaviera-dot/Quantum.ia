@@ -1278,6 +1278,7 @@ const EVM_RE_PROTECTOR = /^0x[a-fA-F0-9]{40}$/;
 
 function HLAccountPanel({ walletAddress, userLoaded }) {
   const setWalletAddressMutation = useMutation(api.users.setWalletAddress);
+  const clearWalletAddressMutation = useMutation(api.users.clearWalletAddress);
   const [draft, setDraft] = React.useState(walletAddress ?? '');
   const [saving, setSaving] = React.useState(false);
   const [saveError, setSaveError] = React.useState('');
@@ -1300,6 +1301,16 @@ function HLAccountPanel({ walletAddress, userLoaded }) {
       setSaveError(e?.message ?? 'Error al guardar');
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function clearWallet() {
+    setSaveError('');
+    try {
+      await clearWalletAddressMutation({});
+      setDraft('');
+    } catch (e) {
+      setSaveError(e?.message ?? 'Error al borrar');
     }
   }
 
@@ -1329,6 +1340,16 @@ function HLAccountPanel({ walletAddress, userLoaded }) {
             disabled={!validWallet || saving}
           >
             {saving ? 'Guardando…' : 'Guardar'}
+          </button>
+        )}
+        {!isDirty && walletAddress && (
+          <button
+            className="ghost-btn"
+            style={{ padding: '5px 12px', fontSize: 12 }}
+            onClick={clearWallet}
+            disabled={!userLoaded}
+          >
+            Borrar
           </button>
         )}
       </div>

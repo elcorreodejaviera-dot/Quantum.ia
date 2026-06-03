@@ -1288,7 +1288,7 @@ function HLAccountPanel({ walletAddress, userLoaded }) {
 
   const validWallet = EVM_RE_PROTECTOR.test(draft);
   const isDirty = draft !== (walletAddress ?? '');
-  const { account, openOrders, loading, error } = useHLAccountBalance(validWallet ? draft : null);
+  const { account, openOrders, loading, error } = useHLAccountBalance(validWallet ? draft : null, { includeOrders: true });
 
   async function saveWallet() {
     if (!validWallet) return;

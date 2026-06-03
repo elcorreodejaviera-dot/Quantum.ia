@@ -325,7 +325,7 @@ export function useWalletBalances(wallets) {
   return { balances, walletTokens, loading, error };
 }
 
-export function useHLAccountBalance(address) {
+export function useHLAccountBalance(address, { includeOrders = false } = {}) {
   const [account, setAccount] = useState(null);
   const [openOrders, setOpenOrders] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -335,29 +335,33 @@ export function useHLAccountBalance(address) {
     setAccount(null);
     setOpenOrders([]);
     setError(null);
+    setLoading(false);
     if (!address) return;
     let cancelled = false;
 
     async function fetchAccount() {
       setLoading(true);
       try {
-        const [stateRes, ordersRes] = await Promise.all([
+        const requests = [
           fetch(HL_REST, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ type: 'clearinghouseState', user: address }),
           }),
-          fetch(HL_REST, {
+        ];
+        if (includeOrders) {
+          requests.push(fetch(HL_REST, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ type: 'openOrders', user: address }),
-          }),
-        ]);
+          }));
+        }
+        const [stateRes, ordersRes] = await Promise.all(requests);
         if (!stateRes.ok) { if (!cancelled) setError('Error al consultar HL'); return; }
         if (cancelled) return;
         const [data, orders] = await Promise.all([
           stateRes.json(),
-          ordersRes.ok ? ordersRes.json() : Promise.resolve([]),
+          ordersRes?.ok ? ordersRes.json() : Promise.resolve([]),
         ]);
         if (cancelled) return;
         setAccount({

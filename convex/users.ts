@@ -1,4 +1,4 @@
-import { internalQuery, mutation, query } from "./_generated/server";
+import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { requireAdmin, requireAuth, requireUser } from "./helpers";
 
@@ -85,6 +85,21 @@ export const updateProfile = mutation({
       Object.entries(args).filter(([, v]) => v !== undefined)
     );
     await ctx.db.patch(user._id, filtered);
+  },
+});
+
+// Bootstrap: promueve un usuario a admin por su Clerk ID.
+// Solo accesible via CLI: npx convex run users:promoteToAdmin '{"clerkId":"user_xxx"}'
+export const promoteToAdmin = internalMutation({
+  args: { clerkId: v.string() },
+  handler: async (ctx, { clerkId }) => {
+    const user = await ctx.db
+      .query("users")
+      .withIndex("by_clerk_id", (q) => q.eq("clerkId", clerkId))
+      .first();
+    if (!user) throw new Error(`Usuario con clerkId ${clerkId} no encontrado`);
+    await ctx.db.patch(user._id, { role: "admin" });
+    return { promoted: user.email ?? user.clerkId };
   },
 });
 

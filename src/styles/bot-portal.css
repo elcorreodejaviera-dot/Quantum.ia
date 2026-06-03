@@ -864,6 +864,17 @@ button {
 }
 
 /* Simulation banner */
+.testnet-banner {
+  background: rgba(220, 38, 38, 0.15);
+  border-bottom: 1px solid rgba(220, 38, 38, 0.45);
+  color: #f87171;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 8px 24px;
+  text-align: center;
+}
+
 .sim-banner {
   background: rgba(255, 170, 0, 0.12);
   border-bottom: 1px solid rgba(255, 170, 0, 0.35);

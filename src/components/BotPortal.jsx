@@ -4,9 +4,7 @@ import { useConvexAuth, useQuery, useMutation, useAction } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState, useWalletBalances, useHLAccountBalance } from '../hooks/useHyperliquid'
 
-const USERS = [
-  { username: 'admin', password: import.meta.env.VITE_ADMIN_PASSWORD, name: 'Operador principal' },
-];
+const IS_TESTNET = import.meta.env.VITE_HL_NETWORK === 'testnet';
 
 const NETWORKS = ['Todas', 'Arbitrum', 'Base', 'Optimism'];
 const PAIRS = ['Todos', 'BTC/USDC', 'ETH/USDC'];
@@ -88,53 +86,6 @@ function aprParts(annual) {
   };
 }
 
-function Login({ onLogin }) {
-  const [username, setUsername] = React.useState('admin');
-  const [password, setPassword] = React.useState('');
-  const [error, setError] = React.useState('');
-  const [recovery, setRecovery] = React.useState('');
-
-  function submit(event) {
-    event.preventDefault();
-    const user = USERS.find((item) => item.username === username.trim() && item.password === password);
-    if (!user) {
-      setError('Usuario o contraseña incorrectos.');
-      setRecovery('');
-      return;
-    }
-    setError('');
-    setRecovery('');
-    onLogin(user);
-  }
-
-  function forgotPassword() {
-    setError('');
-    setRecovery('Recuperación pendiente: contacta al administrador para restablecer tu contraseña.');
-  }
-
-  return (
-    <main className="login-page">
-      <form className="login-panel" onSubmit={submit}>
-        <div className="brand-row">
-          <div className="brand">Quantum<em>.ia</em></div>
-          <span className="pill">Acceso privado</span>
-        </div>
-        <div className="field">
-          <label htmlFor="username">Usuario</label>
-          <input id="username" value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" />
-        </div>
-        <div className="field">
-          <label htmlFor="password">Contraseña</label>
-          <input id="password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" />
-        </div>
-        <button className="primary-btn" type="submit">Entrar</button>
-        <button className="link-btn" type="button" onClick={forgotPassword}>¿Olvidaste tu contraseña?</button>
-        <p className="error">{error}</p>
-        <p className="recovery">{recovery}</p>
-      </form>
-    </main>
-  );
-}
 
 function Summary({ pools, bots }) {
   const totalLiquidity = pools.reduce((sum, pool) => sum + pool.liquidity, 0);
@@ -1937,6 +1888,11 @@ function Dashboard({ user, onLogout, userId }) {
         </div>
       </header>
 
+      {IS_TESTNET && (
+        <div className="testnet-banner">
+          TESTNET — Sin capital real
+        </div>
+      )}
       {simulationMode && (
         <div className="sim-banner">
           MODO SIMULACIÓN — Sin operaciones reales

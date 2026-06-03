@@ -1,7 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
 
-const WS_URL = 'wss://api.hyperliquid.xyz/ws';
-const HL_REST = 'https://api.hyperliquid.xyz/info';
+const IS_TESTNET = import.meta.env.VITE_HL_NETWORK === 'testnet';
+const WS_URL = IS_TESTNET
+  ? 'wss://api.hyperliquid-testnet.xyz/ws'
+  : 'wss://api.hyperliquid.xyz/ws';
+const HL_REST = IS_TESTNET
+  ? 'https://api.hyperliquid-testnet.xyz/info'
+  : 'https://api.hyperliquid.xyz/info';
 const TRACKED_ASSETS = ['BTC', 'ETH'];
 const MAX_BACKOFF_MS = 30_000;
 

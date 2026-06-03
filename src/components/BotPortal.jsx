@@ -4,6 +4,8 @@ import { useConvexAuth, useQuery, useMutation, useAction } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState, useWalletBalances, useHLAccountBalance } from '../hooks/useHyperliquid'
 
+const IS_TESTNET = import.meta.env.VITE_HL_NETWORK === 'testnet';
+
 const USERS = [
   { username: 'admin', password: import.meta.env.VITE_ADMIN_PASSWORD, name: 'Operador principal' },
 ];
@@ -1937,6 +1939,11 @@ function Dashboard({ user, onLogout, userId }) {
         </div>
       </header>
 
+      {IS_TESTNET && (
+        <div className="testnet-banner">
+          TESTNET — Sin capital real
+        </div>
+      )}
       {simulationMode && (
         <div className="sim-banner">
           MODO SIMULACIÓN — Sin operaciones reales

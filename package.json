@@ -5,6 +5,7 @@
   "description": "Quantum.ia liquidity, spot and hedge bot portal.",
   "scripts": {
     "dev": "vite",
+    "dev:testnet": "VITE_HL_NETWORK=testnet vite",
     "build": "vite build",
     "preview": "vite preview",
     "start": "node server.js"

@@ -1,4 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
+import { createWalletClient, custom } from 'viem';
+import { ExchangeClient, HttpTransport } from '@nktkas/hyperliquid';
+import EthereumProvider from '@walletconnect/ethereum-provider';
 
 const IS_TESTNET = import.meta.env.VITE_HL_NETWORK === 'testnet';
 const WS_URL = IS_TESTNET
@@ -516,4 +519,105 @@ export function useHyperliquidFunding() {
   }, []);
 
   return { funding };
+}
+
+// ─── Wallet signer (MetaMask + WalletConnect) ───────────────────────────────
+
+const WC_PROJECT_ID = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID ?? '';
+const WC_CHAINS = [IS_TESTNET ? 421614 : 42161]; // Arbitrum Sepolia testnet / Arbitrum mainnet
+
+export function useMetaMaskSigner() {
+  const [account, setAccount] = useState(null);
+  const [walletClient, setWalletClient] = useState(null);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [connectorType, setConnectorType] = useState(null); // 'metamask' | 'walletconnect'
+  const [error, setError] = useState(null);
+  const wcProviderRef = useRef(null);
+
+  async function connectMetaMask() {
+    if (!window.ethereum) { setError('MetaMask no está instalado'); return; }
+    setIsConnecting(true);
+    setError(null);
+    try {
+      const [address] = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      const client = createWalletClient({ transport: custom(window.ethereum) });
+      setAccount(address.toLowerCase());
+      setWalletClient(client);
+      setConnectorType('metamask');
+    } catch (e) {
+      setError(e?.message ?? 'Error conectando MetaMask');
+    } finally {
+      setIsConnecting(false);
+    }
+  }
+
+  async function connectWalletConnect() {
+    if (!WC_PROJECT_ID) { setError('Falta VITE_WALLETCONNECT_PROJECT_ID en .env'); return; }
+    setIsConnecting(true);
+    setError(null);
+    try {
+      const provider = await EthereumProvider.init({
+        projectId: WC_PROJECT_ID,
+        chains: WC_CHAINS,
+        showQrModal: true,
+      });
+      await provider.connect();
+      wcProviderRef.current = provider;
+      const [address] = await provider.request({ method: 'eth_requestAccounts' });
+      const client = createWalletClient({ transport: custom(provider) });
+      setAccount(address.toLowerCase());
+      setWalletClient(client);
+      setConnectorType('walletconnect');
+    } catch (e) {
+      setError(e?.message ?? 'Error conectando WalletConnect');
+    } finally {
+      setIsConnecting(false);
+    }
+  }
+
+  async function disconnect() {
+    if (connectorType === 'walletconnect' && wcProviderRef.current) {
+      await wcProviderRef.current.disconnect().catch(() => {});
+      wcProviderRef.current = null;
+    }
+    setAccount(null);
+    setWalletClient(null);
+    setConnectorType(null);
+    setError(null);
+  }
+
+  return { account, walletClient, connectorType, connectMetaMask, connectWalletConnect, disconnect, isConnecting, error };
+}
+
+// ─── Testnet trade execution ─────────────────────────────────────────────────
+
+const ASSET_IDS = { BTC: 0, ETH: 1 };
+const IOC_SLIPPAGE = 0.01;
+
+export async function executeHLTestnetOrder({ walletClient, asset, isBuy, size, price, leverage, reduceOnly = false }) {
+  const assetId = ASSET_IDS[asset.toUpperCase()];
+  if (assetId == null) throw new Error(`Asset no soportado: ${asset}`);
+  if (!walletClient) throw new Error('MetaMask no conectado');
+
+  const transport = new HttpTransport({ isTestnet: IS_TESTNET });
+  const exchange = new ExchangeClient({ transport, wallet: walletClient });
+
+  if (leverage != null && !reduceOnly) {
+    await exchange.updateLeverage({ asset: assetId, isCross: false, leverage: Math.round(leverage) });
+  }
+
+  const limitPrice = isBuy ? price * (1 + IOC_SLIPPAGE) : price * (1 - IOC_SLIPPAGE);
+  const assetUpper = asset.toUpperCase();
+
+  return exchange.order({
+    orders: [{
+      a: assetId,
+      b: isBuy,
+      p: limitPrice.toFixed(assetUpper === 'BTC' ? 0 : 2),
+      s: size.toFixed(assetUpper === 'BTC' ? 5 : 4),
+      r: reduceOnly,
+      t: { limit: { tif: 'Ioc' } },
+    }],
+    grouping: 'na',
+  });
 }

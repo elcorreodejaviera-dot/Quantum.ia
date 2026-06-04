@@ -2256,3 +2256,30 @@ details[open] > .pool-pnl-toggle::before {
   padding: 20px;
   width: 90%;
 }
+
+.scan-modal {
+  max-width: 480px;
+}
+
+.scan-result {
+  margin-top: 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.scan-result-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.scan-result-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}

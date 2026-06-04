@@ -951,6 +951,92 @@ button {
   font-size: 12px;
 }
 
+/* Audit log panel */
+.audit-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 10px;
+}
+
+.audit-filters select,
+.audit-filters input {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 5px 8px;
+  height: 30px;
+}
+
+.audit-date-field {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.audit-table {
+  display: grid;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.audit-header {
+  display: grid;
+  grid-template-columns: 100px 1fr 50px 80px 80px 70px 50px 100px;
+  gap: 8px;
+  padding: 6px 8px;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-bottom: 1px solid var(--line);
+}
+
+.audit-row {
+  display: grid;
+  grid-template-columns: 100px 1fr 50px 80px 80px 70px 50px 100px;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  transition: background 0.1s;
+}
+
+.audit-row:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.audit-row-real {
+  border-color: rgba(0, 200, 5, 0.15);
+  background: rgba(0, 200, 5, 0.03);
+}
+
+.audit-bot {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+@media (max-width: 900px) {
+  .audit-header {
+    display: none;
+  }
+  .audit-row {
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    margin-bottom: 4px;
+  }
+}
+
 /* Multi-wallet manager */
 .wallet-manager {
   border: 1px solid var(--line);

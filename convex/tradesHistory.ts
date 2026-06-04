@@ -107,3 +107,31 @@ export const listSignals = query({
       .take(clamped);
   },
 });
+
+export const listAllSignals = query({
+  args: {
+    asset: v.optional(v.string()),
+    network: v.optional(v.string()),
+    simulated: v.optional(v.boolean()),
+    fromDate: v.optional(v.number()),
+    toDate: v.optional(v.number()),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    await requireAdmin(ctx);
+    const clamped = Math.min(Math.max(args.limit ?? 200, 1), 500);
+    let rows = await ctx.db
+      .query("trades_history")
+      .withIndex("by_timestamp")
+      .order("desc")
+      .take(clamped);
+
+    if (args.asset) rows = rows.filter(r => r.asset === args.asset);
+    if (args.network) rows = rows.filter(r => r.network === args.network);
+    if (args.simulated !== undefined) rows = rows.filter(r => r.simulated === args.simulated);
+    if (args.fromDate) rows = rows.filter(r => r.timestamp >= args.fromDate!);
+    if (args.toDate) rows = rows.filter(r => r.timestamp <= args.toDate!);
+
+    return rows;
+  },
+});

@@ -1218,49 +1218,136 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
   );
 }
 
-function SimulationHistory({ signals }) {
-  if (!signals || signals.length === 0) {
-    return (
-      <section className="panel">
-        <div className="section-head">
-          <h2>Historial simulado</h2>
-          <span className="pill amber">SIMULACIÓN</span>
-        </div>
-        <p className="network">Sin señales todavía. Los bots activos en simulación dispararán señales automáticamente.</p>
-      </section>
-    );
-  }
+function exportCsv(rows) {
+  const headers = ['Fecha', 'Bot', 'Acción', 'Asset', 'Monto (USD)', 'Precio', 'Red', 'Tipo', 'Simulado', 'Estado exchange', 'Order ID'];
+  const lines = rows.map(r => {
+    const d = new Date(r.timestamp).toLocaleString('es');
+    return [
+      d, r.botName ?? '—', r.action, r.asset,
+      r.amount.toFixed(2), r.price > 0 ? r.price.toFixed(2) : '—',
+      r.network, r.triggerType ?? '—',
+      r.simulated ? 'Sí' : 'No',
+      r.exchangeStatus ?? '—', r.orderId ?? '—',
+    ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',');
+  });
+  const csv = [headers.join(','), ...lines].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `audit_log_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function AuditLogPanel({ isAdmin, mySignals }) {
+  const [asset, setAsset] = React.useState('');
+  const [network, setNetwork] = React.useState('');
+  const [simulated, setSimulated] = React.useState('');
+  const [fromDate, setFromDate] = React.useState('');
+  const [toDate, setToDate] = React.useState('');
+
+  const adminLogs = useQuery(
+    api.tradesHistory.listAllSignals,
+    isAdmin ? {
+      asset: asset || undefined,
+      network: network || undefined,
+      simulated: simulated === '' ? undefined : simulated === 'true',
+      fromDate: fromDate ? new Date(fromDate).getTime() : undefined,
+      toDate: toDate ? new Date(toDate + 'T23:59:59').getTime() : undefined,
+    } : 'skip'
+  );
+
+  const rows = isAdmin ? (adminLogs ?? []) : (mySignals ?? []);
+  const title = isAdmin ? 'Logs de auditoría' : 'Historial simulado';
 
   return (
     <section className="panel">
       <div className="section-head">
-        <h2>Historial simulado</h2>
-        <span className="pill amber">SIMULACIÓN</span>
-        <span className="pill">{signals.length} señales</span>
+        <h2>{title}</h2>
+        {isAdmin && <span className="pill red">ADMIN</span>}
+        {!isAdmin && <span className="pill amber">Simulación</span>}
+        <span className="pill">{rows.length} registros</span>
+        {isAdmin && rows.length > 0 && (
+          <button className="mini-btn" onClick={() => exportCsv(rows)}>Exportar CSV</button>
+        )}
       </div>
-      <div className="signal-list">
-        {signals.slice(0, 20).map((s) => {
-          const date = new Date(s.timestamp);
-          const timeStr = date.toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-          const dateStr = date.toLocaleDateString('es', { day: '2-digit', month: '2-digit' });
-          return (
-            <div key={s._id} className="signal-row">
-              <div className="signal-main">
-                <span className="signal-bot">{s.botName ?? '—'}</span>
-                <span className="signal-action">{s.action}</span>
-                <span className={`pill ${s.triggerType === 'manual' ? 'blue' : 'green'}`}>
-                  {s.triggerType === 'manual' ? 'Manual' : 'Auto'}
-                </span>
-              </div>
-              <div className="signal-meta">
-                <span className="mono">{s.asset} @ ${s.price > 0 ? formatPrice(`${s.asset}/USDC`, s.price) : '—'}</span>
-                <span className="network">{s.network}</span>
+
+      {isAdmin && (
+        <div className="audit-filters">
+          <select value={asset} onChange={e => setAsset(e.target.value)}>
+            <option value="">Todos los assets</option>
+            <option value="BTC">BTC</option>
+            <option value="ETH">ETH</option>
+          </select>
+          <select value={network} onChange={e => setNetwork(e.target.value)}>
+            <option value="">Todas las redes</option>
+            <option value="testnet">Testnet</option>
+            <option value="mainnet">Mainnet</option>
+            <option value="Spot">Spot</option>
+          </select>
+          <select value={simulated} onChange={e => setSimulated(e.target.value)}>
+            <option value="">Real + Simulado</option>
+            <option value="true">Solo simulado</option>
+            <option value="false">Solo real</option>
+          </select>
+          <label className="audit-date-field">
+            <span>Desde</span>
+            <input type="date" value={fromDate} onChange={e => setFromDate(e.target.value)} />
+          </label>
+          <label className="audit-date-field">
+            <span>Hasta</span>
+            <input type="date" value={toDate} onChange={e => setToDate(e.target.value)} />
+          </label>
+        </div>
+      )}
+
+      {rows.length === 0 ? (
+        <p className="network" style={{ paddingTop: 8 }}>
+          {isAdmin ? 'Sin registros con los filtros actuales.' : 'Sin señales todavía. Los bots activos en simulación dispararán señales automáticamente.'}
+        </p>
+      ) : (
+        <div className="audit-table">
+          <div className="audit-header">
+            <span>Fecha</span>
+            <span>Bot / Acción</span>
+            <span>Asset</span>
+            <span>Monto</span>
+            <span>Precio</span>
+            <span>Red</span>
+            <span>Tipo</span>
+            {isAdmin && <span>Estado</span>}
+          </div>
+          {rows.map((r) => {
+            const d = new Date(r.timestamp);
+            const dateStr = d.toLocaleDateString('es', { day: '2-digit', month: '2-digit', year: '2-digit' });
+            const timeStr = d.toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' });
+            const isReal = !r.simulated;
+            return (
+              <div key={r._id} className={`audit-row${isReal ? ' audit-row-real' : ''}`}>
                 <span className="network">{dateStr} {timeStr}</span>
+                <div>
+                  <div className="audit-bot">{r.botName ?? '—'}</div>
+                  <div className="network" style={{ fontSize: 11 }}>{r.action}</div>
+                </div>
+                <span className="mono">{r.asset}</span>
+                <span className="mono">{r.amount > 0 ? formatUsd(r.amount) : '—'}</span>
+                <span className="mono">{r.price > 0 ? `$${formatPrice(`${r.asset}/USDC`, r.price)}` : '—'}</span>
+                <span className="network">{r.network}</span>
+                <span className={`pill ${r.simulated ? 'amber' : 'green'}`} style={{ fontSize: 10 }}>
+                  {r.simulated ? 'SIM' : 'REAL'}
+                </span>
+                {isAdmin && (
+                  <span className="network" style={{ fontSize: 11 }}>
+                    {r.exchangeStatus ?? '—'}
+                    {r.orderId && <span className="mono" style={{ display: 'block', fontSize: 10 }}>#{r.orderId}</span>}
+                  </span>
+                )}
               </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      )}
     </section>
   );
 }
@@ -2371,7 +2458,7 @@ function Dashboard({ user, onLogout, userId }) {
               isAdmin={isAdmin}
               userLoaded={userLoaded}
             />
-            <SimulationHistory signals={signals} />
+            <AuditLogPanel isAdmin={isAdmin} mySignals={signals} />
             <AlertsPanel
               alerts={userAlerts}
               history={alertHistory}

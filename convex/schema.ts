@@ -26,6 +26,7 @@ export default defineSchema({
     .index("by_user_permission", ["userId", "permission"]),
 
   pools: defineTable({
+    userId: v.optional(v.id("users")),
     pair: v.string(),
     network: v.string(),
     minRange: v.number(),
@@ -45,7 +46,7 @@ export default defineSchema({
     subgraphFeesUsd1d: v.optional(v.number()),
     subgraphTvlUsd: v.optional(v.number()),
     subgraphUpdatedAt: v.optional(v.number()),
-  }),
+  }).index("by_user", ["userId"]),
 
   bots: defineTable({
     name: v.string(),

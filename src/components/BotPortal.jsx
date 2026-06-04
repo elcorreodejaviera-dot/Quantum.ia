@@ -223,15 +223,13 @@ function PoolCard({ pool, isAdmin }) {
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           {feeTierLabel && <span className="pill" title="Fee tier">{feeTierLabel} fee</span>}
           <span className={`pill ${tone}`}>{pool.status}</span>
-          {isAdmin && (
-            <button
-              className="mini-btn"
-              style={{ fontSize: 11, padding: '2px 8px', color: 'var(--red)', borderColor: 'var(--red)' }}
-              onClick={() => { if (window.confirm(`¿Eliminar pool ${pool.pair} (${pool.network})?`)) deletePoolMutation({ id: pool.id }); }}
-            >
-              ✕
-            </button>
-          )}
+          <button
+            className="mini-btn"
+            style={{ fontSize: 11, padding: '2px 8px', color: 'var(--red)', borderColor: 'var(--red)' }}
+            onClick={() => { if (window.confirm(`¿Eliminar pool ${pool.pair} (${pool.network})?`)) deletePoolMutation({ id: pool.id }); }}
+          >
+            ✕
+          </button>
         </div>
       </div>
 
@@ -2756,11 +2754,9 @@ function Dashboard({ user, onLogout, userId }) {
                   {hasOutOfRangePools && <span className="badge-alert" title="Hay pools fuera de rango"></span>}
                 </h2>
                 <span className="pill">{filteredPools.length} visibles</span>
-                {isAdmin && (
-                  <button className="mini-btn" onClick={() => setScanModalOpen(true)} title="Añadir pool por Token ID">
-                    # Token ID
-                  </button>
-                )}
+                <button className="mini-btn" onClick={() => setScanModalOpen(true)} title="Añadir pool por Token ID">
+                  # Token ID
+                </button>
               </div>
               <div className="pool-grid">
                 {filteredPools.map((pool) => <PoolCard key={pool.id} pool={pool} isAdmin={isAdmin} />)}

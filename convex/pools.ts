@@ -1,13 +1,18 @@
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
-import { requireAdmin } from "./helpers";
+import { requireAdmin, requireUser } from "./helpers";
 
 export const listPools = query({
   args: {},
   handler: async (ctx) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) return [];
-    return await ctx.db.query("pools").collect();
+    const user = await ctx.db
+      .query("users")
+      .withIndex("by_clerk_id", q => q.eq("clerkId", identity.subject))
+      .first();
+    if (!user) return [];
+    return await ctx.db.query("pools").withIndex("by_user", q => q.eq("userId", user._id)).collect();
   },
 });
 
@@ -78,16 +83,18 @@ export const createPool = mutation({
     tokenId: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx);
+    const user = await requireUser(ctx);
     if (args.minRange < 0 || args.maxRange < 0) throw new Error("Los rangos deben ser no negativos.");
     if (args.minRange > args.maxRange) throw new Error("minRange no puede ser mayor que maxRange.");
     if (args.tokenId != null) {
       const existing = await ctx.db.query("pools")
+        .withIndex("by_user", q => q.eq("userId", user._id))
         .filter(q => q.eq(q.field("tokenId"), args.tokenId))
         .first();
       if (existing) throw new Error("Este Token ID ya está siendo monitoreado.");
     }
     return await ctx.db.insert("pools", {
+      userId: user._id as any,
       pair: args.pair,
       network: args.network,
       minRange: args.minRange,
@@ -103,9 +110,10 @@ export const createPool = mutation({
 export const deletePool = mutation({
   args: { id: v.id("pools") },
   handler: async (ctx, { id }) => {
-    await requireAdmin(ctx);
+    const user = await requireUser(ctx);
     const pool = await ctx.db.get(id);
     if (!pool) throw new Error("Pool no encontrado.");
+    if (pool.userId !== user._id && user.role !== "admin") throw new Error("Sin permiso para eliminar este pool.");
     await ctx.db.delete(id);
   },
 });

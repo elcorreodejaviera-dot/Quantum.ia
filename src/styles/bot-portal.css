@@ -1749,6 +1749,10 @@ button {
 @media (max-width: 640px) {
   body { font-size: 13px; }
 
+  .sub-bar-inline {
+    display: none;
+  }
+
   .topbar {
     align-items: flex-start;
     flex-direction: column;

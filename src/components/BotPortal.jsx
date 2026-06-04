@@ -223,11 +223,11 @@ function PoolCard({ pool, isAdmin }) {
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           {feeTierLabel && <span className="pill" title="Fee tier">{feeTierLabel} fee</span>}
           <span className={`pill ${tone}`}>{pool.status}</span>
-          {isAdmin && pool.tokenId != null && (
+          {isAdmin && (
             <button
               className="mini-btn"
               style={{ fontSize: 11, padding: '2px 8px', color: 'var(--red)', borderColor: 'var(--red)' }}
-              onClick={() => { if (window.confirm(`¿Eliminar pool ${pool.pair}?`)) deletePoolMutation({ id: pool.id }); }}
+              onClick={() => { if (window.confirm(`¿Eliminar pool ${pool.pair} (${pool.network})?`)) deletePoolMutation({ id: pool.id }); }}
             >
               ✕
             </button>

@@ -248,7 +248,7 @@ function SubscriptionBar() {
       <div className="sub-stat">
         <span className="sub-stat-label">Cobertura: $0 / {formatUsdCompact(current.coverage)}</span>
         <div className="sub-progress-track">
-          <div className="sub-progress-fill amber" style={{ width: '0%' }} />
+          <div className="sub-progress-fill active" style={{ width: '0%' }} />
         </div>
       </div>
       <div className="sub-stat">

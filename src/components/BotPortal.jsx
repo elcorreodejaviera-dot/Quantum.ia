@@ -977,8 +977,15 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
     setPurchaseForm((prev) => ({ ...prev, [asset]: { qty: '', price: '' } }));
   }
 
-  const portfolioInvested = positions.reduce((s, p) => s + p.dca * p.amount, 0);
-  const portfolioCurrent = positions.reduce((s, p) => s + (p.currentPrice != null ? p.currentPrice * p.amount : 0), 0);
+  const portfolioInvested = positions.reduce((s, p) => {
+    const dca = editingAssets[p.asset] ? (parseFloat(drafts[p.asset]?.dca) || p.dca) : p.dca;
+    const amount = editingAssets[p.asset] ? (parseFloat(drafts[p.asset]?.amount) || p.amount) : p.amount;
+    return s + dca * amount;
+  }, 0);
+  const portfolioCurrent = positions.reduce((s, p) => {
+    const amount = editingAssets[p.asset] ? (parseFloat(drafts[p.asset]?.amount) || p.amount) : p.amount;
+    return s + (p.currentPrice != null ? p.currentPrice * amount : 0);
+  }, 0);
   const portfolioHasPrices = positions.some((p) => p.currentPrice != null);
   const portfolioPnl = portfolioHasPrices ? portfolioCurrent - portfolioInvested : null;
   const portfolioPnlPct = portfolioPnl != null && portfolioInvested > 0 ? (portfolioPnl / portfolioInvested) * 100 : null;

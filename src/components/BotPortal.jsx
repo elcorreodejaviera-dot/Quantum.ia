@@ -1584,9 +1584,14 @@ function ScanTokenIdModal({ onClose, onAdded }) {
   const createPoolMutation = useMutation(api.pools.createPool);
 
   async function handleScan() {
-    const id = parseInt(tokenIdInput.trim(), 10);
-    if (!tokenIdInput.trim() || isNaN(id) || id <= 0) {
-      setError('Introduce un Token ID numérico válido.');
+    const raw = tokenIdInput.trim();
+    if (!raw || !/^\d+$/.test(raw)) {
+      setError('Introduce un Token ID numérico válido (solo dígitos, sin decimales).');
+      return;
+    }
+    const id = Number(raw);
+    if (!Number.isInteger(id) || id <= 0 || id > Number.MAX_SAFE_INTEGER) {
+      setError('Token ID fuera de rango.');
       return;
     }
     setLoading(true);

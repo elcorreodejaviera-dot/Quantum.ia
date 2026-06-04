@@ -23,15 +23,28 @@ const RPC: Record<string, string> = {
 
 const STABLES = new Set(["USDC", "USDT", "DAI", "BUSD", "FRAX", "LUSD", "USDC.e", "USDbC"]);
 
+const RPC_TIMEOUT_MS = 8_000;
+
 async function rpcCall(url: string, to: string, data: string): Promise<string> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", method: "eth_call", params: [{ to, data }, "latest"], id: 1 }),
-  });
-  const json = await res.json() as { result?: string; error?: { message: string } };
-  if (json.error) throw new Error(json.error.message);
-  return json.result ?? "0x";
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "eth_call", params: [{ to, data }, "latest"], id: 1 }),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`RPC ${url} respondió ${res.status} ${res.statusText}`);
+    const json = await res.json() as { result?: string; error?: { message: string } };
+    if (json.error) throw new Error(`eth_call error: ${json.error.message}`);
+    return json.result ?? "0x";
+  } catch (e: unknown) {
+    if (e instanceof Error && e.name === "AbortError") throw new Error(`RPC timeout (${RPC_TIMEOUT_MS}ms): ${url}`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function pad(n: bigint): string { return n.toString(16).padStart(64, "0"); }
@@ -88,6 +101,9 @@ function tickPrice(tick: number, dec0: number, dec1: number): number {
 export const scanPoolByTokenId = action({
   args: { tokenId: v.number(), network: v.string() },
   handler: async (_ctx, { tokenId, network }) => {
+    if (!Number.isFinite(tokenId) || !Number.isInteger(tokenId) || tokenId <= 0 || tokenId > Number.MAX_SAFE_INTEGER)
+      throw new Error("Token ID inválido. Debe ser un entero positivo.");
+
     const rpc = RPC[network];
     const nft = NFT_MANAGER[network];
     const factory = FACTORY[network];
@@ -144,9 +160,8 @@ export const scanPoolByTokenId = action({
       }
     } catch {}
 
-    const status = currentPrice == null ? "Sin precio"
-      : currentPrice < minRange ? "Fuera (Abajo)"
-      : currentPrice > maxRange ? "Fuera (Arriba)"
+    const status = currentPrice == null ? "Sin datos"
+      : (currentPrice < minRange || currentPrice > maxRange) ? "Fuera de rango"
       : "En rango";
 
     return { tokenId, network, pair, feeTier: fee, minRange, maxRange, currentPrice, status, poolAddress };

@@ -79,6 +79,8 @@ export const createPool = mutation({
   },
   handler: async (ctx, args) => {
     await requireAdmin(ctx);
+    if (args.minRange < 0 || args.maxRange < 0) throw new Error("Los rangos deben ser no negativos.");
+    if (args.minRange > args.maxRange) throw new Error("minRange no puede ser mayor que maxRange.");
     if (args.tokenId != null) {
       const existing = await ctx.db.query("pools")
         .filter(q => q.eq(q.field("tokenId"), args.tokenId))

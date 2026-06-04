@@ -1580,7 +1580,7 @@ function ScanTokenIdModal({ onClose, onAdded }) {
   const [error, setError] = React.useState('');
   const [adding, setAdding] = React.useState(false);
 
-  const scanAction = useAction(api.poolScanner.scanPoolByTokenId);
+  const scanAction = useAction(api.actions.poolScanner.scanPoolByTokenId);
   const createPoolMutation = useMutation(api.pools.createPool);
 
   async function handleScan() {

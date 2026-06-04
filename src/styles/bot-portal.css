@@ -241,6 +241,26 @@ button {
   background: rgba(255, 255, 255, 0.88);
 }
 
+[data-theme="light"] .sub-plan-badge {
+  background: rgba(0, 122, 3, 0.1);
+  border-color: rgba(0, 122, 3, 0.4);
+  color: #007a03;
+}
+
+[data-theme="light"] .sub-stat-label {
+  color: var(--muted);
+}
+
+[data-theme="light"] .sub-upgrade-btn {
+  background: rgba(0, 122, 3, 0.08);
+  border-color: rgba(0, 122, 3, 0.4);
+  color: #007a03;
+}
+
+[data-theme="light"] .sub-upgrade-btn:hover {
+  background: rgba(0, 122, 3, 0.16);
+}
+
 .top-left,
 .top-actions,
 .toolbar {
@@ -1749,7 +1769,8 @@ button {
 @media (max-width: 640px) {
   body { font-size: 13px; }
 
-  .sub-bar-inline {
+  .sub-stat,
+  .sub-upgrade-btn {
     display: none;
   }
 

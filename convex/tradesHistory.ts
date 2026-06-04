@@ -1,6 +1,6 @@
 import { internalMutation, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
-import { requireUser } from "./helpers";
+import { requireAdmin, requireUser } from "./helpers";
 
 export const recordSignal = mutation({
   args: {
@@ -76,7 +76,7 @@ export const recordTestnetExecution = mutation({
     orderId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const user = await requireUser(ctx);
+    const user = await requireAdmin(ctx);
     return await ctx.db.insert("trades_history", {
       userId: user._id,
       action: args.action,
@@ -105,5 +105,36 @@ export const listSignals = query({
       .withIndex("by_user_timestamp", (q) => q.eq("userId", user._id))
       .order("desc")
       .take(clamped);
+  },
+});
+
+export const listAllSignals = query({
+  args: {
+    asset: v.optional(v.string()),
+    network: v.optional(v.string()),
+    simulated: v.optional(v.boolean()),
+    fromDate: v.optional(v.number()),
+    toDate: v.optional(v.number()),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    await requireAdmin(ctx);
+    const clamped = Math.min(Math.max(args.limit ?? 500, 1), 500);
+    // Fetch a large buffer, apply filters in memory, then limit — avoids
+    // dropping valid matches that fall outside a pre-truncated window.
+    const buffer = await ctx.db
+      .query("trades_history")
+      .withIndex("by_timestamp")
+      .order("desc")
+      .take(2000);
+
+    let rows = buffer;
+    if (args.asset) rows = rows.filter(r => r.asset === args.asset);
+    if (args.network) rows = rows.filter(r => r.network === args.network);
+    if (args.simulated !== undefined) rows = rows.filter(r => r.simulated === args.simulated);
+    if (args.fromDate) rows = rows.filter(r => r.timestamp >= args.fromDate!);
+    if (args.toDate) rows = rows.filter(r => r.timestamp <= args.toDate!);
+
+    return rows.slice(0, clamped);
   },
 });

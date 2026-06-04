@@ -540,7 +540,7 @@ export function useMetaMaskSigner() {
     setError(null);
     try {
       const [address] = await window.ethereum.request({ method: 'eth_requestAccounts' });
-      const client = createWalletClient({ transport: custom(window.ethereum) });
+      const client = createWalletClient({ account: address, transport: custom(window.ethereum) });
       setAccount(address.toLowerCase());
       setWalletClient(client);
       setConnectorType('metamask');
@@ -564,7 +564,7 @@ export function useMetaMaskSigner() {
       await provider.connect();
       wcProviderRef.current = provider;
       const [address] = await provider.request({ method: 'eth_requestAccounts' });
-      const client = createWalletClient({ transport: custom(provider) });
+      const client = createWalletClient({ account: address, transport: custom(provider) });
       setAccount(address.toLowerCase());
       setWalletClient(client);
       setConnectorType('walletconnect');

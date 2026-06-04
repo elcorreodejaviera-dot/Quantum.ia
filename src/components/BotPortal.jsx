@@ -1252,16 +1252,28 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
   );
 }
 
+const FORMULA_INJECTION_RE = /^[=+\-@]/;
+function sanitizeCsvCell(value) {
+  const s = String(value);
+  return FORMULA_INJECTION_RE.test(s) ? `'${s}` : s;
+}
+
 function exportCsv(rows) {
   const headers = ['Fecha', 'Bot', 'Acción', 'Asset', 'Monto (USD)', 'Precio', 'Red', 'Tipo', 'Simulado', 'Estado exchange', 'Order ID'];
   const lines = rows.map(r => {
     const d = new Date(r.timestamp).toLocaleString('es');
     return [
-      d, r.botName ?? '—', r.action, r.asset,
-      r.amount.toFixed(2), r.price > 0 ? r.price.toFixed(2) : '—',
-      r.network, r.triggerType ?? '—',
+      d,
+      sanitizeCsvCell(r.botName ?? '—'),
+      sanitizeCsvCell(r.action),
+      sanitizeCsvCell(r.asset),
+      r.amount.toFixed(2),
+      r.price > 0 ? r.price.toFixed(2) : '—',
+      sanitizeCsvCell(r.network),
+      sanitizeCsvCell(r.triggerType ?? '—'),
       r.simulated ? 'Sí' : 'No',
-      r.exchangeStatus ?? '—', r.orderId ?? '—',
+      sanitizeCsvCell(r.exchangeStatus ?? '—'),
+      sanitizeCsvCell(r.orderId ?? '—'),
     ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',');
   });
   const csv = [headers.join(','), ...lines].join('\n');
@@ -1289,6 +1301,7 @@ function AuditLogPanel({ isAdmin, mySignals }) {
       simulated: simulated === '' ? undefined : simulated === 'true',
       fromDate: fromDate ? new Date(fromDate).getTime() : undefined,
       toDate: toDate ? new Date(toDate + 'T23:59:59').getTime() : undefined,
+      limit: 500,
     } : 'skip'
   );
 
@@ -1316,8 +1329,10 @@ function AuditLogPanel({ isAdmin, mySignals }) {
           </select>
           <select value={network} onChange={e => setNetwork(e.target.value)}>
             <option value="">Todas las redes</option>
+            <option value="Arbitrum">Arbitrum</option>
+            <option value="Base">Base</option>
+            <option value="Optimism">Optimism</option>
             <option value="testnet">Testnet</option>
-            <option value="mainnet">Mainnet</option>
             <option value="Spot">Spot</option>
           </select>
           <select value={simulated} onChange={e => setSimulated(e.target.value)}>

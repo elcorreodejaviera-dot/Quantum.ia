@@ -421,6 +421,7 @@ button {
 .stack {
   display: grid;
   gap: 14px;
+  align-content: start;
 }
 
 .panel {

@@ -2505,6 +2505,17 @@ function Dashboard({ user, onLogout, userId }) {
         fees24h: p.fees1d ?? mock.fees24h ?? 0,
         price: prices[asset] ?? null,
         funding: funding[asset] ?? null,
+        // Status calculado en tiempo real con precio live — sobreescribe el guardado en Convex
+        status: (() => {
+          const livePrice = prices[asset] ?? null;
+          if (livePrice == null) return p.status ?? 'Sin datos';
+          if (livePrice < p.minRange) return 'Fuera de rango';
+          if (livePrice > p.maxRange) return 'Fuera de rango';
+          const rangeWidth = p.maxRange - p.minRange;
+          const nearEdge = rangeWidth * 0.05;
+          if (livePrice < p.minRange + nearEdge || livePrice > p.maxRange - nearEdge) return 'Cerca del borde';
+          return 'En rango';
+        })(),
       };
     });
   }, [poolsFromDb, prices, funding]);

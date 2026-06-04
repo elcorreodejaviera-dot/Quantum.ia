@@ -184,12 +184,15 @@ function PoolCard({ pool }) {
   const calcTvl = pool.tvl ?? pool.liquidity ?? 0;
   const calcVol = pool.volume1d ?? null;
   const calcFee = pool.feeTier ?? null;
-  const uniswapApr = (calcVol != null && calcFee != null && calcTvl > 0)
+  const rawApr = (Number.isFinite(calcVol) && Number.isFinite(calcFee) && Number.isFinite(calcTvl) && calcTvl > 0)
     ? (calcVol * (calcFee / 1_000_000) * 365 / calcTvl) * 100
     : null;
+  const uniswapApr = Number.isFinite(rawApr) ? rawApr : null;
 
   // Usar APR calculado si está disponible, sino caer en DeFiLlama apy
-  const displayApy = uniswapApr ?? pool.apy ?? 0;
+  const displayApy = Number.isFinite(uniswapApr) ? uniswapApr
+    : Number.isFinite(pool.apy) ? pool.apy
+    : 0;
   const parts = aprParts(displayApy);
   const apyLabel = uniswapApr != null
     ? 'APR (Uniswap)'

@@ -100,6 +100,16 @@ export const createPool = mutation({
   },
 });
 
+export const deletePool = mutation({
+  args: { id: v.id("pools") },
+  handler: async (ctx, { id }) => {
+    await requireAdmin(ctx);
+    const pool = await ctx.db.get(id);
+    if (!pool) throw new Error("Pool no encontrado.");
+    await ctx.db.delete(id);
+  },
+});
+
 export const updatePool = mutation({
   args: {
     id: v.id("pools"),

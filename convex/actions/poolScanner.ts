@@ -22,6 +22,8 @@ const RPC: Record<string, string> = {
 };
 
 const STABLES = new Set(["USDC", "USDT", "DAI", "BUSD", "FRAX", "LUSD", "USDC.e", "USDbC"]);
+const NORMALIZE: Record<string, string> = { WETH: "ETH", WBTC: "BTC" };
+function norm(sym: string): string { return NORMALIZE[sym] ?? sym; }
 
 const RPC_TIMEOUT_MS = 8_000;
 
@@ -134,7 +136,7 @@ export const scanPoolByTokenId = action({
 
     const minRange = invert ? Math.min(1 / pLower, 1 / pUpper) : Math.min(pLower, pUpper);
     const maxRange = invert ? Math.max(1 / pLower, 1 / pUpper) : Math.max(pLower, pUpper);
-    const pair     = invert ? `${t1.symbol}/${t0.symbol}` : `${t0.symbol}/${t1.symbol}`;
+    const pair     = invert ? `${norm(t1.symbol)}/${norm(t0.symbol)}` : `${norm(t0.symbol)}/${norm(t1.symbol)}`;
 
     // Pool address + current price via factory + slot0
     let poolAddress: string | undefined;

@@ -175,7 +175,8 @@ function shortenAddress(addr) {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
-function PoolCard({ pool }) {
+function PoolCard({ pool, isAdmin }) {
+  const deletePoolMutation = useMutation(api.pools.deletePool);
   const hasPrice = pool.price != null;
   const pos = hasPrice
     ? Math.max(4, Math.min(96, ((pool.price - pool.min) / (pool.max - pool.min)) * 100))
@@ -222,6 +223,15 @@ function PoolCard({ pool }) {
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           {feeTierLabel && <span className="pill" title="Fee tier">{feeTierLabel} fee</span>}
           <span className={`pill ${tone}`}>{pool.status}</span>
+          {isAdmin && pool.tokenId != null && (
+            <button
+              className="mini-btn"
+              style={{ fontSize: 11, padding: '2px 8px', color: 'var(--red)', borderColor: 'var(--red)' }}
+              onClick={() => { if (window.confirm(`¿Eliminar pool ${pool.pair}?`)) deletePoolMutation({ id: pool.id }); }}
+            >
+              ✕
+            </button>
+          )}
         </div>
       </div>
 
@@ -2461,12 +2471,24 @@ function Dashboard({ user, onLogout, userId }) {
     }));
   }, [botsFromDb, localBotState]);
 
+  // Normaliza símbolos wrapped (WETH→ETH, WBTC→BTC) para lookup de precios y mock
+  function normalizeAsset(sym) {
+    if (sym === 'WETH') return 'ETH';
+    if (sym === 'WBTC') return 'BTC';
+    return sym;
+  }
+  function normalizePair(pair) {
+    if (!pair) return pair;
+    return pair.split('/').map(normalizeAsset).join('/');
+  }
+
   // Fusionar config de Convex con campos mock (liquidez/APR) e inyectar precio, funding y APY en tiempo real
   const pools = React.useMemo(() => {
     if (!poolsFromDb || poolsFromDb.length === 0) return [];
     return poolsFromDb.map((p) => {
-      const asset = p.pair?.split('/')[0];
-      const mock = POOLS.find((m) => m.pair === p.pair && m.network === p.network) ?? {};
+      const normalizedPair = normalizePair(p.pair);
+      const asset = normalizeAsset(p.pair?.split('/')[0]);
+      const mock = POOLS.find((m) => m.pair === normalizedPair && m.network === p.network) ?? {};
       return {
         liquidity: 0,
         apr: 0,
@@ -2730,7 +2752,7 @@ function Dashboard({ user, onLogout, userId }) {
                 )}
               </div>
               <div className="pool-grid">
-                {filteredPools.map((pool) => <PoolCard key={pool.id} pool={pool} />)}
+                {filteredPools.map((pool) => <PoolCard key={pool.id} pool={pool} isAdmin={isAdmin} />)}
               </div>
             </section>
             <SpotPositions

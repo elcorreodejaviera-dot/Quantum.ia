@@ -252,7 +252,7 @@ function SubscriptionBar() {
         </div>
       </div>
       <div className="sub-stat">
-        <span className="sub-stat-label">Trading: $0 / {formatUsdCompact(current.coverage)}</span>
+        <span className="sub-stat-label">Cobertura de pools: $0 / {formatUsdCompact(current.coverage)}</span>
         <div className="sub-progress-track">
           <div className="sub-progress-fill" style={{ width: '0%' }} />
         </div>

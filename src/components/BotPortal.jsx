@@ -239,31 +239,26 @@ function Metric({ label, value }) {
   );
 }
 
-function SubscriptionPanel() {
-  const current = SUBSCRIPTIONS[2];
+function SubscriptionBar() {
+  const current = SUBSCRIPTIONS[2]; // Pro $50,000
 
   return (
-    <section className="panel">
-      <div className="section-head">
-        <h2>Suscripción</h2>
-        <span className="pill">{current.type}</span>
-      </div>
-      <div className="subscription-current">
-        <div>
-          <div className="label">Cobertura activa</div>
-          <div className="subscription-amount">{formatUsd(current.coverage)}</div>
+    <div className="sub-bar-inline">
+      <span className="sub-plan-badge">{current.type} Online</span>
+      <div className="sub-stat">
+        <span className="sub-stat-label">Cobertura: $0 / {formatUsdCompact(current.coverage)}</span>
+        <div className="sub-progress-track">
+          <div className="sub-progress-fill active" style={{ width: '0%' }} />
         </div>
-        <span className="pill green">Activa</span>
       </div>
-      <div className="subscription-grid">
-        {SUBSCRIPTIONS.map((plan) => (
-          <div className={`subscription-tier ${plan.type === current.type ? 'active' : ''}`} key={plan.type}>
-            <span>{plan.type}</span>
-            <strong>{formatUsd(plan.coverage)}</strong>
-          </div>
-        ))}
+      <div className="sub-stat">
+        <span className="sub-stat-label">Cobertura de pools: $0 / {formatUsdCompact(current.coverage)}</span>
+        <div className="sub-progress-track">
+          <div className="sub-progress-fill" style={{ width: '0%' }} />
+        </div>
       </div>
-    </section>
+      <button className="sub-upgrade-btn">Upgrade</button>
+    </div>
   );
 }
 
@@ -751,6 +746,7 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
   const [openPurchase, setOpenPurchase] = React.useState({});
   const [purchaseForm, setPurchaseForm] = React.useState({});
   const [openHistory, setOpenHistory] = React.useState({});
+  const [editingAssets, setEditingAssets] = React.useState({});
   const [drafts, setDrafts] = React.useState(() => {
     const d = {};
     for (const p of INITIAL_SPOT_POSITIONS) {
@@ -883,6 +879,30 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
     setPurchaseForm((prev) => ({ ...prev, [asset]: { qty: '', price: '' } }));
   }
 
+  function startEdit(asset) {
+    setEditingAssets(prev => ({ ...prev, [asset]: true }));
+  }
+
+  function cancelEdit(asset) {
+    const pos = positions.find(p => p.asset === asset);
+    if (pos) setDrafts(prev => ({ ...prev, [asset]: { dca: String(pos.dca), amount: String(pos.amount) } }));
+    setEditingAssets(prev => ({ ...prev, [asset]: false }));
+  }
+
+  function saveEdit(asset) {
+    const dcaRaw = drafts[asset]?.dca ?? '';
+    const amountRaw = drafts[asset]?.amount ?? '';
+    const dca = parseFloat(dcaRaw);
+    const amount = parseFloat(amountRaw);
+    if (!dcaRaw || isNaN(dca) || dca <= 0 || !amountRaw || isNaN(amount) || amount <= 0) return;
+    const pos = positions.find(p => p.asset === asset);
+    setPositions(items => items.map(item => item.asset !== asset ? item : { ...item, dca, amount }));
+    if (pos?.id) {
+      updatePositionMutation({ id: pos.id, dca, amount }).catch(err => console.error('updatePosition failed', err));
+    }
+    setEditingAssets(prev => ({ ...prev, [asset]: false }));
+  }
+
   function calcNewDCA(currentAmount, currentDCA, addQty, addPrice) {
     const newAmount = currentAmount + addQty;
     const newDCA = (currentAmount * currentDCA + addQty * addPrice) / newAmount;
@@ -945,7 +965,7 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
         )}
         <span className={`pill${connected ? ' green' : ''}`}>{connected ? 'HL en vivo' : 'Conectando...'}</span>
         <span className={`pill${!simulationMode && tradingEnabled ? ' green' : ' amber'}`}>
-          {!simulationMode && tradingEnabled ? 'Ejecución HL' : 'SIM'}
+          {!simulationMode && tradingEnabled ? 'Ejecución HL' : 'Simulación'}
         </span>
       </div>
       <div className="spot-list">
@@ -987,6 +1007,7 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
         {positions.map((position) => {
           const hasPrice = position.currentPrice != null;
           const isOpen = !!openAssets[position.asset];
+          const isEditing = !!editingAssets[position.asset];
           const invested = position.dca * position.amount;
           const currentVal = hasPrice ? position.currentPrice * position.amount : null;
           const pnl = currentVal != null ? currentVal - invested : null;
@@ -1001,55 +1022,25 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
 
           return (
             <article className="spot-card" key={position.asset}>
-              <div className="spot-collapse-btn">
-                <button className="spot-collapse-toggle" onClick={() => toggleAsset(position.asset)}>
-                  <span className="spot-collapse-arrow">{isOpen ? '▼' : '▶'}</span>
+              {/* Cabecera */}
+              <div className="spot-card-header">
+                <div className="spot-card-identity">
                   <span className="pair">{position.asset}</span>
-                  {hasPrice && <span className="network">${formatPrice(`${position.asset}/USDC`, position.currentPrice)}</span>}
-                </button>
-                <div className="spot-collapse-inputs">
-                  <label className="spot-inline-field">
-                    <span>Precio DCA</span>
-                    <input
-                      type="number"
-                      min="0"
-                      step="1"
-                      value={drafts[position.asset]?.dca ?? ''}
-                      onChange={(e) => handleDraftChange(position.asset, 'dca', e.target.value)}
-                      onBlur={() => commitDraft(position.asset, 'dca')}
-                    />
-                  </label>
-                  <label className="spot-inline-field">
-                    <span>Monto ({position.asset})</span>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.0001"
-                      value={drafts[position.asset]?.amount ?? ''}
-                      onChange={(e) => handleDraftChange(position.asset, 'amount', e.target.value)}
-                      onBlur={() => commitDraft(position.asset, 'amount')}
-                    />
-                  </label>
-                  <div className="spot-inline-field">
-                    <span>Invertido</span>
-                    <span className="spot-calc-value">{invested > 0 ? formatUsd(invested) : '—'}</span>
-                  </div>
-                  <div className="spot-inline-field">
-                    <span>Valor actual</span>
-                    <span className={`spot-calc-value${currentVal != null ? (pnlPositive ? ' positive' : ' negative') : ''}`}>
-                      {currentVal != null ? formatUsd(currentVal) : '—'}
+                  {hasPrice && (
+                    <span className="spot-live-price">
+                      ${formatPrice(`${position.asset}/USDC`, position.currentPrice)}
                     </span>
-                  </div>
-                  <div className="spot-inline-field">
-                    <span>ROI</span>
-                    <span className={`spot-calc-value${pnl != null ? (pnlPositive ? ' positive' : ' negative') : ''}`}>
-                      {pnlPct != null
-                        ? `${pnlPositive ? '+' : ''}${pnlPct.toFixed(2)}% · ${pnlPositive ? '+' : ''}${formatUsd(pnl)}`
-                        : '—'}
-                    </span>
-                  </div>
+                  )}
                 </div>
-                <div className="spot-collapse-right">
+                <div className="spot-card-actions">
+                  {isEditing ? (
+                    <>
+                      <button className="mini-btn active" onClick={() => saveEdit(position.asset)}>Guardar</button>
+                      <button className="mini-btn" onClick={() => cancelEdit(position.asset)}>Cancelar</button>
+                    </>
+                  ) : (
+                    <button className="mini-btn" onClick={() => startEdit(position.asset)}>Modificar</button>
+                  )}
                   <button
                     className={`mini-btn${openPurchase[position.asset] ? ' amber' : ''}`}
                     onClick={() => togglePurchase(position.asset)}
@@ -1062,9 +1053,98 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
                   >
                     Historial
                   </button>
+                  <button className="mini-btn" onClick={() => toggleAsset(position.asset)}>
+                    Bot {isOpen ? '▲' : '▼'}
+                  </button>
                   <span className="pill">{position.protector?.active ? 'Bot activo' : 'Bot pausado'}</span>
                 </div>
               </div>
+
+              {/* Métricas bloqueadas */}
+              {!isEditing && (
+                <div className="spot-metrics-display">
+                  <div className="spot-metric-cell">
+                    <span>Precio DCA</span>
+                    <strong>${formatPrice(`${position.asset}/USDC`, position.dca)}</strong>
+                  </div>
+                  <div className="spot-metric-cell">
+                    <span>Monto ({position.asset})</span>
+                    <strong>{position.amount}</strong>
+                  </div>
+                  <div className="spot-metric-cell">
+                    <span>Invertido</span>
+                    <strong>{invested > 0 ? formatUsd(invested) : '—'}</strong>
+                  </div>
+                  <div className="spot-metric-cell">
+                    <span>Valor actual</span>
+                    <strong className={currentVal != null ? (pnlPositive ? 'positive' : 'negative') : ''}>
+                      {currentVal != null ? formatUsd(currentVal) : '—'}
+                    </strong>
+                  </div>
+                  <div className="spot-metric-cell">
+                    <span>ROI</span>
+                    {pnlPct != null ? (
+                      <>
+                        <strong className={pnlPositive ? 'positive' : 'negative'}>
+                          {pnlPositive ? '+' : ''}{pnlPct.toFixed(2)}%
+                        </strong>
+                        <em className={`spot-metric-sub ${pnlPositive ? 'positive' : 'negative'}`}>
+                          {pnlPositive ? '+' : ''}{formatUsd(pnl)}
+                        </em>
+                      </>
+                    ) : <strong>—</strong>}
+                  </div>
+                </div>
+              )}
+
+              {/* Formulario de edición */}
+              {isEditing && (
+                <div className="spot-edit-form">
+                  <div className="spot-edit-field">
+                    <span>Precio DCA</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={drafts[position.asset]?.dca ?? ''}
+                      onChange={(e) => handleDraftChange(position.asset, 'dca', e.target.value)}
+                    />
+                  </div>
+                  <div className="spot-edit-field">
+                    <span>Monto ({position.asset})</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.0001"
+                      value={drafts[position.asset]?.amount ?? ''}
+                      onChange={(e) => handleDraftChange(position.asset, 'amount', e.target.value)}
+                    />
+                  </div>
+                  <div className="spot-edit-field">
+                    <span>Invertido</span>
+                    <strong>{invested > 0 ? formatUsd(invested) : '—'}</strong>
+                  </div>
+                  <div className="spot-edit-field">
+                    <span>Valor actual</span>
+                    <strong className={currentVal != null ? (pnlPositive ? 'positive' : 'negative') : ''}>
+                      {currentVal != null ? formatUsd(currentVal) : '—'}
+                    </strong>
+                  </div>
+                  <div className="spot-edit-field">
+                    <span>ROI</span>
+                    {pnlPct != null ? (
+                      <>
+                        <strong className={pnlPositive ? 'positive' : 'negative'}>
+                          {pnlPositive ? '+' : ''}{pnlPct.toFixed(2)}%
+                        </strong>
+                        <em className={`spot-metric-sub ${pnlPositive ? 'positive' : 'negative'}`}>
+                          {pnlPositive ? '+' : ''}{formatUsd(pnl)}
+                        </em>
+                      </>
+                    ) : <strong>—</strong>}
+                  </div>
+                </div>
+              )}
 
               {openPurchase[position.asset] && (
                 <div className="spot-purchase-form">
@@ -1827,7 +1907,7 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulation
         <button className={`mini-btn ${!protector.active ? 'active' : ''}`} onClick={() => onChange({ active: false })} disabled={!isAdmin}>Pausar</button>
         <button className={`mini-btn ${protector.active ? 'active' : ''}`} onClick={() => onChange({ active: true })} disabled={!isAdmin}>Activar</button>
         <span className={`pill${!simulationMode && tradingEnabled ? ' green' : ' amber'}`}>
-          {!simulationMode && tradingEnabled ? 'LIVE HL' : 'SIM'}
+          {!simulationMode && tradingEnabled ? 'LIVE HL' : 'Simulación'}
         </span>
         {userLoaded && !isAdmin && <span className="pill faint" title="Solo lectura">Lectura</span>}
         {protector.active && isAdmin && (
@@ -2212,6 +2292,7 @@ function Dashboard({ user, onLogout, userId }) {
           <span className="status-dot"></span>
           <div className="brand">Quantum<em>.ia</em></div>
           <span className="pill">Liquidity Hedge</span>
+          <SubscriptionBar />
         </div>
         <div className="top-actions">
           <button className="ghost-btn" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
@@ -2317,7 +2398,6 @@ function Dashboard({ user, onLogout, userId }) {
                 onKillSwitch={killSwitch}
               />
             )}
-            <SubscriptionPanel />
             <WalletPanel />
             <HLAccountPanel walletAddress={currentUser?.walletAddress ?? null} userLoaded={userLoaded} prices={prices} isAdmin={isAdmin} />
             <NetworkLiquidity pools={filteredPools} />

@@ -38,6 +38,13 @@
 
 * { box-sizing: border-box; }
 html, body, #root { min-height: 100%; }
+
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] { -moz-appearance: textfield; }
 body {
   margin: 0;
   background: var(--bg);
@@ -531,12 +538,11 @@ button {
 .pool-meta {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(3, 1fr);
 }
 
 .metric {
   min-width: 0;
-  overflow: hidden;
   padding: 9px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -554,9 +560,6 @@ button {
   margin-top: 5px;
   font-family: var(--mono);
   font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .borrow-health {
@@ -1183,6 +1186,133 @@ button {
   color: var(--text-2);
 }
 
+/* Spot card rediseñada */
+.spot-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.spot-card-identity {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.spot-live-price {
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.spot-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.spot-metrics-display {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+}
+
+.spot-metric-cell {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.spot-metric-cell > span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.spot-metric-cell > strong {
+  display: block;
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.spot-metric-cell > strong.positive { color: var(--green); }
+.spot-metric-cell > strong.negative { color: var(--red); }
+
+.spot-metric-sub {
+  display: block;
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 12px;
+  margin-top: 3px;
+}
+
+.spot-metric-sub.positive { color: var(--green); }
+.spot-metric-sub.negative { color: var(--red); }
+
+.spot-edit-form {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+  align-items: end;
+}
+
+.spot-edit-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.spot-edit-field > span {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.spot-edit-field input {
+  background: var(--panel-2);
+  border: 1px solid rgba(0, 200, 5, 0.5);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 14px;
+  padding: 8px 10px;
+  width: 100%;
+}
+
+.spot-edit-field input:focus {
+  outline: none;
+  border-color: var(--green);
+  box-shadow: 0 0 0 2px rgba(0, 200, 5, 0.15);
+}
+
+.spot-edit-field > strong {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 600;
+  padding: 8px 2px;
+}
+
+.spot-edit-field > strong.positive { color: var(--green); }
+.spot-edit-field > strong.negative { color: var(--red); }
+
 /* HL market panel */
 .hl-market-toggle {
   display: flex;
@@ -1437,52 +1567,88 @@ button {
   gap: 8px;
 }
 
-.subscription-current {
+.sub-bar-inline {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px;
-  border: 1px solid rgba(0, 200, 5, 0.28);
-  border-radius: 8px;
-  background: rgba(0, 200, 5, 0.06);
+  gap: 14px;
+  flex-wrap: wrap;
 }
 
-.subscription-amount {
-  margin-top: 5px;
-  font-family: var(--mono);
-  font-size: 24px;
+.sub-plan-badge {
+  background: rgba(0, 200, 5, 0.15);
+  border: 1px solid rgba(0, 200, 5, 0.5);
+  color: var(--green);
+  font-size: 11px;
   font-weight: 700;
+  padding: 4px 12px;
+  border-radius: 20px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  letter-spacing: 0.04em;
 }
 
-.subscription-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 10px;
+.sub-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
 }
 
-.subscription-tier {
-  display: grid;
-  gap: 4px;
-  padding: 9px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.025);
-}
-
-.subscription-tier.active {
-  border-color: rgba(0, 200, 5, 0.5);
-}
-
-.subscription-tier span {
-  color: var(--muted);
+.sub-stat-label {
   font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.subscription-tier strong {
-  font-family: var(--mono);
-  font-size: 13px;
+.sub-progress-track {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.sub-progress-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.25);
+  transition: width 0.4s ease;
+}
+
+.sub-progress-fill.active {
+  background: var(--green);
+}
+
+.sub-wallets {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.sub-upgrade-btn {
+  margin-left: auto;
+  border: 1px solid rgba(0, 200, 5, 0.5);
+  border-radius: 7px;
+  background: rgba(0, 200, 5, 0.1);
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 14px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.sub-upgrade-btn:hover {
+  background: rgba(0, 200, 5, 0.2);
+  border-color: var(--green);
+}
+
+.sub-bar-footer {
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .risk-table {
@@ -1568,12 +1734,15 @@ button {
     grid-template-columns: 1fr;
   }
 
-  .pool-meta {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
   .metric strong {
     font-size: 12px;
+  }
+}
+
+@media (max-width: 900px) {
+  .spot-metrics-display,
+  .spot-edit-form {
+    grid-template-columns: repeat(3, 1fr);
   }
 }
 
@@ -1607,6 +1776,11 @@ button {
 
   .pool-meta {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .spot-metrics-display,
+  .spot-edit-form {
+    grid-template-columns: repeat(2, 1fr);
   }
 
   .metric strong {

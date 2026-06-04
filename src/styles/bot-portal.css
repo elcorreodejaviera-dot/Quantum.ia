@@ -421,6 +421,7 @@ button {
 .stack {
   display: grid;
   gap: 14px;
+  align-content: start;
 }
 
 .panel {
@@ -984,6 +985,85 @@ button {
   gap: 12px;
   flex-wrap: wrap;
   font-size: 12px;
+}
+
+/* Pool PNL breakdown */
+.pool-pnl {
+  border-top: 1px solid var(--line);
+  margin-top: 8px;
+}
+
+.pool-pnl-toggle {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 7px 0;
+  list-style: none;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pool-pnl-toggle::-webkit-details-marker { display: none; }
+
+.pool-pnl-toggle::before {
+  content: '▶';
+  font-size: 9px;
+  color: var(--faint);
+  transition: transform 0.15s;
+}
+
+details[open] > .pool-pnl-toggle::before {
+  content: '▼';
+}
+
+.pool-pnl-body {
+  display: grid;
+  gap: 12px;
+  padding-bottom: 6px;
+}
+
+.pool-pnl-section {
+  display: grid;
+  gap: 6px;
+}
+
+.pool-pnl-section-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+
+.pool-pnl-section-pending .pool-pnl-section-title {
+  color: var(--faint);
+  opacity: 0.6;
+}
+
+.pool-pnl-section-pending .metric strong {
+  color: var(--faint);
+}
+
+.pool-pnl-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.pool-pnl-grid-4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+@media (max-width: 900px) {
+  .pool-pnl-grid { grid-template-columns: repeat(2, 1fr); }
+  .pool-pnl-grid-4 { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 640px) {
+  .pool-pnl-grid,
+  .pool-pnl-grid-4 { grid-template-columns: repeat(2, 1fr); }
 }
 
 /* Audit log panel */

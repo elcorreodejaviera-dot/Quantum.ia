@@ -77,10 +77,10 @@ export const fetchAndUpdateApys = internalAction({
         ? rawId.split(':')[0].toLowerCase()
         : undefined;
 
-      // poolMeta contiene el fee tier como "0.05%" — convertir a bps (500)
-      const feeTierBps = best.poolMeta
-        ? Math.round(parseFloat(best.poolMeta) * 100)
-        : undefined;
+      // poolMeta contiene el fee tier como "0.3%" — convertir a ppm (3000)
+      // Fórmula: "0.3" / 100 * 1_000_000 = "0.3" * 10_000
+      const rawFee = best.poolMeta ? parseFloat(best.poolMeta) : NaN;
+      const feeTierBps = Number.isFinite(rawFee) ? Math.round(rawFee * 10_000) : undefined;
 
       await ctx.runMutation(internal.pools.patchPoolApy, {
         id: cp._id,

@@ -180,8 +180,23 @@ function PoolCard({ pool }) {
   const pos = hasPrice
     ? Math.max(4, Math.min(96, ((pool.price - pool.min) / (pool.max - pool.min)) * 100))
     : 50;
-  const parts = aprParts(pool.apy ?? 0);
-  const apyLabel = pool.apyUpdatedAt ? 'APY (DeFiLlama)' : 'APY (estimado)';
+  // APR calculado igual que Uniswap: Vol24h × feeTier/1M × 365 / TVL × 100
+  const calcTvl = pool.tvl ?? pool.liquidity ?? 0;
+  const calcVol = pool.volume1d ?? null;
+  const calcFee = pool.feeTier ?? null;
+  const rawApr = (Number.isFinite(calcVol) && Number.isFinite(calcFee) && Number.isFinite(calcTvl) && calcTvl > 0)
+    ? (calcVol * (calcFee / 1_000_000) * 365 / calcTvl) * 100
+    : null;
+  const uniswapApr = Number.isFinite(rawApr) ? rawApr : null;
+
+  // Usar APR calculado si está disponible, sino caer en DeFiLlama apy
+  const displayApy = Number.isFinite(uniswapApr) ? uniswapApr
+    : Number.isFinite(pool.apy) ? pool.apy
+    : 0;
+  const parts = aprParts(displayApy);
+  const apyLabel = uniswapApr != null
+    ? 'APR (Uniswap)'
+    : pool.apyUpdatedAt ? 'APY DeFiLlama' : 'APY estimado';
   const tone = pool.status === 'Fuera de rango' ? 'red' : pool.status === 'Cerca del borde' ? 'amber' : 'green';
   const borrowTone = pool.borrowHealth < 50 ? 'red' : pool.borrowHealth < 70 ? 'amber' : 'green';
   const borrowLabel = pool.borrowHealth < 50 ? 'Riesgo alto' : pool.borrowHealth < 70 ? 'Vigilar' : 'Saludable';
@@ -189,6 +204,13 @@ function PoolCard({ pool }) {
   const feeTierLabel = pool.feeTier != null ? `${(pool.feeTier / 10000).toFixed(2)}%` : null;
   const explorerBase = EXPLORER_URLS[pool.network] ?? null;
   const poolShort = shortenAddress(pool.poolAddress);
+
+  // Desglose PNL — datos protegidos contra NaN/Infinity
+  const fees1d = pool.fees1d ?? pool.fees24h ?? 0;
+  const tvl = pool.tvl ?? pool.liquidity ?? 0;
+  const feeApr = tvl > 0 ? (fees1d / tvl) * 365 * 100 : null;
+  const totalApy = displayApy;
+  const capitalApr = feeApr != null ? totalApy - feeApr : null;
 
   return (
     <article className="pool-card">
@@ -257,6 +279,54 @@ function PoolCard({ pool }) {
           </span>
         )}
       </div>
+
+      <details className="pool-pnl">
+        <summary className="pool-pnl-toggle">Ver desglose PNL</summary>
+        <div className="pool-pnl-body">
+
+          {/* Fees ganadas — datos reales */}
+          <div className="pool-pnl-section">
+            <div className="pool-pnl-section-title">Fees ganadas (dato real 24h)</div>
+            <div className="pool-pnl-grid">
+              <Metric label="Fees 24h" value={formatUsd(fees1d)} />
+              <Metric label="APR Fees" value={feeApr != null ? `${feeApr.toFixed(2)}%` : '—'} />
+              <Metric label="% sobre TVL" value={tvl > 0 ? `${((fees1d / tvl) * 100).toFixed(3)}%` : '—'} />
+            </div>
+          </div>
+
+          {/* Proyección — estimación lineal de fees1d */}
+          <div className="pool-pnl-section">
+            <div className="pool-pnl-section-title">Proyección fees (estimada, base 24h)</div>
+            <div className="pool-pnl-grid pool-pnl-grid-4">
+              <Metric label="Diario" value={formatUsdCompact(fees1d)} />
+              <Metric label="Semanal" value={formatUsdCompact(fees1d * 7)} />
+              <Metric label="Mensual" value={formatUsdCompact(fees1d * 30)} />
+              <Metric label="Anual" value={formatUsdCompact(fees1d * 365)} />
+            </div>
+          </div>
+
+          {/* APR breakdown */}
+          <div className="pool-pnl-section">
+            <div className="pool-pnl-section-title">{apyLabel}</div>
+            <div className="pool-pnl-grid">
+              <Metric label="APR Total" value={`${totalApy.toFixed(1)}%`} />
+              <Metric label="APR Fees" value={feeApr != null ? `${feeApr.toFixed(1)}%` : '—'} />
+              <Metric label="APR Capital (est.)" value={capitalApr != null ? `${capitalApr.toFixed(1)}%` : '—'} />
+            </div>
+          </div>
+
+          {/* Capital — pendiente hasta tener posición LP real del usuario */}
+          <div className="pool-pnl-section pool-pnl-section-pending">
+            <div className="pool-pnl-section-title">Capital (pendiente — requiere posición LP del usuario)</div>
+            <div className="pool-pnl-grid">
+              <Metric label="PNL Capital" value="—" />
+              <Metric label="Invertido" value="—" />
+              <Metric label="Tiempo de vida" value="—" />
+            </div>
+          </div>
+
+        </div>
+      </details>
 
     </article>
   );

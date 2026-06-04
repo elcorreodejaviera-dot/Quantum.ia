@@ -76,7 +76,7 @@ export const recordTestnetExecution = mutation({
     orderId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const user = await requireUser(ctx);
+    const user = await requireAdmin(ctx);
     return await ctx.db.insert("trades_history", {
       userId: user._id,
       action: args.action,

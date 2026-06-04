@@ -1011,8 +1011,10 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
           const hasPrice = position.currentPrice != null;
           const isOpen = !!openAssets[position.asset];
           const isEditing = !!editingAssets[position.asset];
-          const invested = position.dca * position.amount;
-          const currentVal = hasPrice ? position.currentPrice * position.amount : null;
+          const displayDca = isEditing ? (parseFloat(drafts[position.asset]?.dca) || position.dca) : position.dca;
+          const displayAmount = isEditing ? (parseFloat(drafts[position.asset]?.amount) || position.amount) : position.amount;
+          const invested = displayDca * displayAmount;
+          const currentVal = hasPrice ? position.currentPrice * displayAmount : null;
           const pnl = currentVal != null ? currentVal - invested : null;
           const pnlPositive = pnl != null && pnl >= 0;
           const pnlPct = pnl != null && invested > 0 ? (pnl / invested) * 100 : null;
@@ -1449,7 +1451,7 @@ const EVM_RE_PROTECTOR = /^0x[a-fA-F0-9]{40}$/;
 function TradeConfirmModal({ trade, onConfirm, onCancel, executing }) {
   if (!trade) return null;
   return (
-    <div className="modal-overlay" onClick={onCancel}>
+    <div className="modal-overlay" onClick={executing ? undefined : onCancel}>
       <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
         <div className="section-head">
           <h2>Confirmar orden</h2>
@@ -1565,6 +1567,10 @@ function HLAccountPanel({ walletAddress, userLoaded, prices, isAdmin }) {
 
   async function confirmTrade() {
     if (!pendingTrade || !walletClient) return;
+    if (mmAccount && draft && mmAccount.toLowerCase() !== draft.toLowerCase()) {
+      setTradeError(`La wallet conectada (${mmAccount.slice(0,8)}…) no coincide con la wallet escaneada. Reconecta la wallet correcta.`);
+      return;
+    }
     setExecuting(true);
     setTradeError('');
     try {
@@ -1579,8 +1585,9 @@ function HLAccountPanel({ walletAddress, userLoaded, prices, isAdmin }) {
       });
       const statuses = response?.response?.data?.statuses;
       const first = Array.isArray(statuses) ? statuses[0] : undefined;
+      if (first?.error) throw new Error(`Hyperliquid rechazó la orden: ${first.error}`);
       const orderId = first?.resting?.oid ?? first?.filled?.oid;
-      const status = (response)?.status ?? 'unknown';
+      const status = response?.status ?? 'unknown';
 
       await recordTestnetExecution({
         action: `${pendingTrade.reduceOnly ? 'Cerrar' : pendingTrade.isBuy ? 'Long' : 'Short'} ${pendingTrade.asset}`,

@@ -36,6 +36,7 @@ export default defineSchema({
     fees1d: v.optional(v.number()),
     defillamaId: v.optional(v.string()),
     poolAddress: v.optional(v.string()),
+    tokenId: v.optional(v.number()),
     apyUpdatedAt: v.optional(v.number()),
     volume1d: v.optional(v.number()),
     volume7d: v.optional(v.number()),

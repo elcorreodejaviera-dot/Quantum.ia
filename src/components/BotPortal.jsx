@@ -1572,6 +1572,141 @@ function AlertsPanel({ alerts, history, onCreate, onDelete }) {
 
 const EVM_RE_PROTECTOR = /^0x[a-fA-F0-9]{40}$/;
 
+function ScanTokenIdModal({ onClose, onAdded }) {
+  const [tokenIdInput, setTokenIdInput] = React.useState('');
+  const [network, setNetwork] = React.useState('Base');
+  const [result, setResult] = React.useState(null);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState('');
+  const [adding, setAdding] = React.useState(false);
+
+  const scanAction = useAction(api.poolScanner.scanPoolByTokenId);
+  const createPoolMutation = useMutation(api.pools.createPool);
+
+  async function handleScan() {
+    const id = parseInt(tokenIdInput.trim(), 10);
+    if (!tokenIdInput.trim() || isNaN(id) || id <= 0) {
+      setError('Introduce un Token ID numérico válido.');
+      return;
+    }
+    setLoading(true);
+    setError('');
+    setResult(null);
+    try {
+      const data = await scanAction({ tokenId: id, network });
+      setResult(data);
+    } catch (e) {
+      setError(e?.message ?? 'Error escaneando la posición.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleAdd() {
+    if (!result) return;
+    setAdding(true);
+    setError('');
+    try {
+      await createPoolMutation({
+        pair: result.pair,
+        network: result.network,
+        minRange: result.minRange,
+        maxRange: result.maxRange,
+        status: result.status,
+        feeTier: result.feeTier,
+        poolAddress: result.poolAddress,
+        tokenId: result.tokenId,
+      });
+      onAdded?.();
+      onClose();
+    } catch (e) {
+      setError(e?.message ?? 'Error añadiendo el pool.');
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  const tone = result?.status === 'En rango' ? 'green' : result?.status?.startsWith('Fuera') ? 'red' : 'faint';
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-panel scan-modal" onClick={e => e.stopPropagation()}>
+        <div className="section-head">
+          <h2>Buscar por Token ID</h2>
+          <button className="ghost-btn" style={{ padding: '3px 10px', fontSize: 12 }} onClick={onClose}>✕</button>
+        </div>
+        <p className="network" style={{ marginBottom: 14, fontSize: 12 }}>
+          Introduce el Token ID de tu posición LP para añadirla al portal.<br />
+          Lo encuentras en Revert Finance o en el explorador de tu red — es el ID del NFT de Uniswap V3.
+        </p>
+
+        <label className="config-field">
+          <span>Token ID (número)</span>
+          <input
+            type="number"
+            min="1"
+            placeholder="Ej: 5257781"
+            value={tokenIdInput}
+            onChange={e => { setTokenIdInput(e.target.value); setResult(null); setError(''); }}
+            onKeyDown={e => e.key === 'Enter' && handleScan()}
+          />
+        </label>
+
+        <label className="config-field" style={{ marginTop: 10 }}>
+          <span>Cadena</span>
+          <select value={network} onChange={e => { setNetwork(e.target.value); setResult(null); setError(''); }}>
+            <option value="Base">Base</option>
+            <option value="Arbitrum">Arbitrum</option>
+            <option value="Optimism">Optimism</option>
+          </select>
+        </label>
+
+        <button
+          className="primary-btn"
+          style={{ width: '100%', marginTop: 14, padding: '10px' }}
+          onClick={handleScan}
+          disabled={loading || !tokenIdInput.trim()}
+        >
+          {loading ? 'Buscando...' : 'Buscar Posición'}
+        </button>
+
+        {error && <p style={{ color: 'var(--red)', fontSize: 12, marginTop: 8 }}>{error}</p>}
+
+        {result && (
+          <div className="scan-result">
+            <div className="scan-result-header">
+              <div>
+                <span className="pair">{result.pair}</span>
+                {result.feeTier && (
+                  <span className="pill" style={{ marginLeft: 8, fontSize: 11 }}>
+                    {(result.feeTier / 10000).toFixed(2)}%
+                  </span>
+                )}
+                <span className={`pill ${tone}`} style={{ marginLeft: 6, fontSize: 11 }}>{result.status}</span>
+              </div>
+            </div>
+            <div className="scan-result-meta">
+              <span>Rango: ${result.minRange.toLocaleString('en-US', { maximumFractionDigits: 2 })} — ${result.maxRange.toLocaleString('en-US', { maximumFractionDigits: 2 })}</span>
+              {result.currentPrice != null && (
+                <span>Precio: ${result.currentPrice.toLocaleString('en-US', { maximumFractionDigits: 2 })}</span>
+              )}
+              <span>ID: {result.tokenId} | {result.network}</span>
+            </div>
+            <button
+              className="primary-btn"
+              style={{ width: '100%', marginTop: 12, padding: '10px', background: 'var(--amber)', color: '#000', fontWeight: 700 }}
+              onClick={handleAdd}
+              disabled={adding}
+            >
+              {adding ? 'Añadiendo...' : 'Añadir Pool'}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TradeConfirmModal({ trade, onConfirm, onCancel, executing }) {
   if (!trade) return null;
   return (
@@ -2293,6 +2428,7 @@ function Dashboard({ user, onLogout, userId }) {
   const deleteAlertMutation = useMutation(api.alerts.deleteAlert);
   const recordAlertTriggerMutation = useMutation(api.alerts.recordAlertTrigger);
   const [toasts, setToasts] = React.useState([]);
+  const [scanModalOpen, setScanModalOpen] = React.useState(false);
   const alertCooldownRef = React.useRef({});
   const alertDirectionRef = React.useRef({});
 
@@ -2566,6 +2702,13 @@ function Dashboard({ user, onLogout, userId }) {
           </div>
         </section>
 
+        {scanModalOpen && (
+          <ScanTokenIdModal
+            onClose={() => setScanModalOpen(false)}
+            onAdded={() => addToast('Pool añadido correctamente.')}
+          />
+        )}
+
         <div className="content-grid">
           <div className="stack">
             <section className="panel">
@@ -2575,6 +2718,11 @@ function Dashboard({ user, onLogout, userId }) {
                   {hasOutOfRangePools && <span className="badge-alert" title="Hay pools fuera de rango"></span>}
                 </h2>
                 <span className="pill">{filteredPools.length} visibles</span>
+                {isAdmin && (
+                  <button className="mini-btn" onClick={() => setScanModalOpen(true)} title="Añadir pool por Token ID">
+                    # Token ID
+                  </button>
+                )}
               </div>
               <div className="pool-grid">
                 {filteredPools.map((pool) => <PoolCard key={pool.id} pool={pool} />)}

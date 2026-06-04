@@ -66,6 +66,38 @@ export const patchPoolSubgraph = internalMutation({
   },
 });
 
+export const createPool = mutation({
+  args: {
+    pair: v.string(),
+    network: v.string(),
+    minRange: v.number(),
+    maxRange: v.number(),
+    status: v.string(),
+    feeTier: v.optional(v.number()),
+    poolAddress: v.optional(v.string()),
+    tokenId: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    await requireAdmin(ctx);
+    if (args.tokenId != null) {
+      const existing = await ctx.db.query("pools")
+        .filter(q => q.eq(q.field("tokenId"), args.tokenId))
+        .first();
+      if (existing) throw new Error("Este Token ID ya está siendo monitoreado.");
+    }
+    return await ctx.db.insert("pools", {
+      pair: args.pair,
+      network: args.network,
+      minRange: args.minRange,
+      maxRange: args.maxRange,
+      status: args.status,
+      feeTier: args.feeTier,
+      poolAddress: args.poolAddress,
+      tokenId: args.tokenId,
+    });
+  },
+});
+
 export const updatePool = mutation({
   args: {
     id: v.id("pools"),

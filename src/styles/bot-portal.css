@@ -1594,17 +1594,23 @@ button {
   flex-wrap: wrap;
 }
 
+.sub-badge-chevron {
+  display: none;
+}
+
 .sub-plan-badge {
   background: rgba(0, 200, 5, 0.15);
   border: 1px solid rgba(0, 200, 5, 0.5);
   color: var(--green);
   font-size: 11px;
   font-weight: 700;
+  font-family: inherit;
   padding: 4px 12px;
   border-radius: 20px;
   white-space: nowrap;
   flex-shrink: 0;
   letter-spacing: 0.04em;
+  cursor: pointer;
 }
 
 .sub-stat {
@@ -1772,6 +1778,38 @@ button {
   .sub-stat,
   .sub-upgrade-btn {
     display: none;
+  }
+
+  .top-left {
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  .sub-badge-chevron {
+    display: inline;
+    font-size: 9px;
+    margin-left: 4px;
+    opacity: 0.7;
+  }
+
+  .sub-mobile-open {
+    flex-wrap: wrap;
+    width: 100%;
+    gap: 10px;
+    padding: 4px 0;
+  }
+
+  .sub-mobile-open .sub-stat {
+    display: flex;
+    min-width: 0;
+    flex: 1 1 45%;
+  }
+
+  .sub-mobile-open .sub-upgrade-btn {
+    display: block;
+    margin-left: 0;
+    width: 100%;
+    text-align: center;
   }
 
   .topbar {

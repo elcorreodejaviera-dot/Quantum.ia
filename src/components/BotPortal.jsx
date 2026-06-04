@@ -241,10 +241,13 @@ function Metric({ label, value }) {
 
 function SubscriptionBar() {
   const current = SUBSCRIPTIONS[2]; // Pro $50,000
+  const [mobileOpen, setMobileOpen] = React.useState(false);
 
   return (
-    <div className="sub-bar-inline">
-      <span className="sub-plan-badge">{current.type} Online</span>
+    <div className={`sub-bar-inline${mobileOpen ? ' sub-mobile-open' : ''}`}>
+      <button className="sub-plan-badge" onClick={() => setMobileOpen(v => !v)}>
+        {current.type} Online <span className="sub-badge-chevron">{mobileOpen ? '▲' : '▼'}</span>
+      </button>
       <div className="sub-stat">
         <span className="sub-stat-label">Cobertura: $0 / {formatUsdCompact(current.coverage)}</span>
         <div className="sub-progress-track">

@@ -561,6 +561,41 @@ button {
   grid-template-columns: repeat(3, 1fr);
 }
 
+.pool-info {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.pool-info-label {
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+  margin-right: 2px;
+}
+
+.pool-info-link {
+  color: var(--muted);
+  text-decoration: none;
+  transition: color 0.15s;
+}
+
+.pool-info-link:hover {
+  color: var(--green);
+  text-decoration: underline;
+}
+
+.pool-info-ts {
+  margin-left: auto;
+  color: var(--faint);
+  font-size: 10px;
+}
+
 .metric {
   min-width: 0;
   padding: 9px;

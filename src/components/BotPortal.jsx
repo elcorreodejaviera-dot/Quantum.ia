@@ -156,6 +156,25 @@ function NetworkLiquidity({ pools }) {
   );
 }
 
+const EXPLORER_URLS = {
+  Arbitrum: 'https://arbiscan.io/address/',
+  Base: 'https://basescan.org/address/',
+  Optimism: 'https://optimistic.etherscan.io/address/',
+};
+
+function dexName(defillamaId) {
+  if (!defillamaId) return 'Uniswap v3';
+  if (defillamaId.includes('uniswap-v3')) return 'Uniswap v3';
+  if (defillamaId.includes('uniswap-v2')) return 'Uniswap v2';
+  if (defillamaId.includes('curve')) return 'Curve';
+  return defillamaId.split('-').map(w => w[0]?.toUpperCase() + w.slice(1)).join(' ');
+}
+
+function shortenAddress(addr) {
+  if (!addr) return null;
+  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
+}
+
 function PoolCard({ pool }) {
   const hasPrice = pool.price != null;
   const pos = hasPrice
@@ -168,6 +187,8 @@ function PoolCard({ pool }) {
   const borrowLabel = pool.borrowHealth < 50 ? 'Riesgo alto' : pool.borrowHealth < 70 ? 'Vigilar' : 'Saludable';
 
   const feeTierLabel = pool.feeTier != null ? `${(pool.feeTier / 10000).toFixed(2)}%` : null;
+  const explorerBase = EXPLORER_URLS[pool.network] ?? null;
+  const poolShort = shortenAddress(pool.poolAddress);
 
   return (
     <article className="pool-card">
@@ -220,11 +241,22 @@ function PoolCard({ pool }) {
         <Metric label={apyLabel} value={`${parts.annual.toFixed(1)}%`} />
         <Metric label="Funding" value={pool.funding != null ? `${(pool.funding * 100).toFixed(4)}%` : '—'} />
       </div>
-      {pool.apyUpdatedAt && (
-        <div className="network" style={{ fontSize: 10, marginTop: 4, textAlign: 'right' }}>
-          DeFiLlama {new Date(pool.apyUpdatedAt).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' })}
-        </div>
-      )}
+      <div className="pool-info">
+        <span><span className="pool-info-label">Chain:</span> {pool.network}</span>
+        <span><span className="pool-info-label">DEX:</span> {dexName(pool.defillamaId)}</span>
+        {poolShort && (
+          explorerBase
+            ? <a className="pool-info-link" href={`${explorerBase}${pool.poolAddress}`} target="_blank" rel="noopener noreferrer">
+                <span className="pool-info-label">Pool:</span> {poolShort}
+              </a>
+            : <span><span className="pool-info-label">Pool:</span> {poolShort}</span>
+        )}
+        {pool.apyUpdatedAt && (
+          <span className="pool-info-ts">
+            DeFiLlama {new Date(pool.apyUpdatedAt).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' })}
+          </span>
+        )}
+      </div>
 
     </article>
   );

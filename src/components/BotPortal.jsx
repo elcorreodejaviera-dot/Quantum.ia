@@ -180,8 +180,20 @@ function PoolCard({ pool }) {
   const pos = hasPrice
     ? Math.max(4, Math.min(96, ((pool.price - pool.min) / (pool.max - pool.min)) * 100))
     : 50;
-  const parts = aprParts(pool.apy ?? 0);
-  const apyLabel = pool.apyUpdatedAt ? 'APY total DeFiLlama' : 'APY estimado';
+  // APR calculado igual que Uniswap: Vol24h × feeTier/1M × 365 / TVL × 100
+  const calcTvl = pool.tvl ?? pool.liquidity ?? 0;
+  const calcVol = pool.volume1d ?? null;
+  const calcFee = pool.feeTier ?? null;
+  const uniswapApr = (calcVol != null && calcFee != null && calcTvl > 0)
+    ? (calcVol * (calcFee / 1_000_000) * 365 / calcTvl) * 100
+    : null;
+
+  // Usar APR calculado si está disponible, sino caer en DeFiLlama apy
+  const displayApy = uniswapApr ?? pool.apy ?? 0;
+  const parts = aprParts(displayApy);
+  const apyLabel = uniswapApr != null
+    ? 'APR (Uniswap)'
+    : pool.apyUpdatedAt ? 'APY DeFiLlama' : 'APY estimado';
   const tone = pool.status === 'Fuera de rango' ? 'red' : pool.status === 'Cerca del borde' ? 'amber' : 'green';
   const borrowTone = pool.borrowHealth < 50 ? 'red' : pool.borrowHealth < 70 ? 'amber' : 'green';
   const borrowLabel = pool.borrowHealth < 50 ? 'Riesgo alto' : pool.borrowHealth < 70 ? 'Vigilar' : 'Saludable';
@@ -194,7 +206,7 @@ function PoolCard({ pool }) {
   const fees1d = pool.fees1d ?? pool.fees24h ?? 0;
   const tvl = pool.tvl ?? pool.liquidity ?? 0;
   const feeApr = tvl > 0 ? (fees1d / tvl) * 365 * 100 : null;
-  const totalApy = pool.apy ?? 0;
+  const totalApy = displayApy;
   const capitalApr = feeApr != null ? totalApy - feeApr : null;
 
   return (

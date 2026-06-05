@@ -81,6 +81,8 @@ export const createPool = mutation({
     feeTier: v.optional(v.number()),
     poolAddress: v.optional(v.string()),
     tokenId: v.optional(v.number()),
+    initialLiquidityUsd: v.optional(v.number()),
+    initialLiquidityAt: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
@@ -103,7 +105,18 @@ export const createPool = mutation({
       feeTier: args.feeTier,
       poolAddress: args.poolAddress,
       tokenId: args.tokenId,
+      initialLiquidityUsd: args.initialLiquidityUsd,
+      initialLiquidityAt: args.initialLiquidityAt,
     });
+  },
+});
+
+export const patchPoolInitialLiquidity = internalMutation({
+  args: { id: v.id("pools"), initialLiquidityUsd: v.number(), initialLiquidityAt: v.number() },
+  handler: async (ctx, { id, initialLiquidityUsd, initialLiquidityAt }) => {
+    const pool = await ctx.db.get(id);
+    if (!pool || pool.initialLiquidityUsd != null) return; // nunca sobreescribir el histórico
+    await ctx.db.patch(id, { initialLiquidityUsd, initialLiquidityAt });
   },
 });
 

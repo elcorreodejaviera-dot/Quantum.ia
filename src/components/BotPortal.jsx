@@ -72,6 +72,7 @@ function formatUsdCompact(value) {
   return `$${value.toFixed(0)}`;
 }
 
+
 function formatPrice(pair, value) {
   const max = pair.startsWith('BTC') ? 0 : 2;
   return value.toLocaleString('en-US', { maximumFractionDigits: max });
@@ -182,7 +183,7 @@ function PoolCard({ pool, isAdmin }) {
     ? Math.max(4, Math.min(96, ((pool.price - pool.min) / (pool.max - pool.min)) * 100))
     : 50;
   // APR calculado igual que Uniswap: Vol24h × feeTier/1M × 365 / TVL × 100
-  const calcTvl = pool.tvl ?? pool.liquidity ?? 0;
+  const calcTvl = pool.tvl ?? 0;
   const calcVol = pool.volume1d ?? null;
   const calcFee = pool.feeTier ?? null;
   const rawApr = (Number.isFinite(calcVol) && Number.isFinite(calcFee) && Number.isFinite(calcTvl) && calcTvl > 0)
@@ -199,8 +200,9 @@ function PoolCard({ pool, isAdmin }) {
     ? 'APR (Uniswap)'
     : pool.apyUpdatedAt ? 'APY DeFiLlama' : 'APY estimado';
   const tone = pool.status === 'Fuera de rango' ? 'red' : pool.status === 'Cerca del borde' ? 'amber' : 'green';
-  const borrowTone = pool.borrowHealth < 50 ? 'red' : pool.borrowHealth < 70 ? 'amber' : 'green';
-  const borrowLabel = pool.borrowHealth < 50 ? 'Riesgo alto' : pool.borrowHealth < 70 ? 'Vigilar' : 'Saludable';
+  const hasBorrowData = pool.borrowHealth > 0;
+  const borrowTone = !hasBorrowData ? 'faint' : pool.borrowHealth < 50 ? 'red' : pool.borrowHealth < 70 ? 'amber' : 'green';
+  const borrowLabel = !hasBorrowData ? 'Sin datos' : pool.borrowHealth < 50 ? 'Riesgo alto' : pool.borrowHealth < 70 ? 'Vigilar' : 'Saludable';
 
   const feeTierLabel = pool.feeTier != null ? `${(pool.feeTier / 10000).toFixed(2)}%` : null;
   const explorerBase = EXPLORER_URLS[pool.network] ?? null;
@@ -208,10 +210,15 @@ function PoolCard({ pool, isAdmin }) {
 
   // Desglose PNL — datos protegidos contra NaN/Infinity
   const fees1d = pool.fees1d ?? pool.fees24h ?? 0;
-  const tvl = pool.tvl ?? pool.liquidity ?? 0;
+  const tvl = pool.tvl ?? 0;
   const feeApr = tvl > 0 ? (fees1d / tvl) * 365 * 100 : null;
   const totalApy = displayApy;
   const capitalApr = feeApr != null ? totalApy - feeApr : null;
+  // Fees estimadas del usuario — proporcional a su posición dentro del pool total
+  const userLiquidity = pool.liquidity;
+  const userShare = tvl > 0 && userLiquidity > 0 ? userLiquidity / tvl : null;
+  const userFees1d = userShare != null ? fees1d * userShare : null;
+
 
   return (
     <article className="pool-card">
@@ -239,8 +246,8 @@ function PoolCard({ pool, isAdmin }) {
           <strong>{borrowLabel}</strong>
         </div>
         <div className="borrow-main">
-          <span>{pool.borrowHealth}%</span>
-          <strong>{pool.leverageRevert.toFixed(1)}x</strong>
+          <span>{hasBorrowData ? `${pool.borrowHealth}%` : '—'}</span>
+          <strong>{hasBorrowData ? `${pool.leverageRevert.toFixed(1)}x` : '—'}</strong>
         </div>
         <div className="borrow-track" aria-label="Salud borrow">
           <div className={`borrow-fill ${borrowTone}`} style={{ width: `${pool.borrowHealth}%` }}></div>
@@ -289,49 +296,35 @@ function PoolCard({ pool, isAdmin }) {
       </div>
 
       <details className="pool-pnl">
-        <summary className="pool-pnl-toggle">Ver desglose PNL</summary>
+        <summary className="pool-pnl-toggle">Proyección fees</summary>
         <div className="pool-pnl-body">
 
-          {/* Fees ganadas — datos reales */}
+          {/* PROYECCIÓN FEES — fracción del usuario en los fees de la red */}
           <div className="pool-pnl-section">
-            <div className="pool-pnl-section-title">Fees ganadas (dato real 24h)</div>
-            <div className="pool-pnl-grid">
-              <Metric label="Fees 24h" value={formatUsd(fees1d)} />
-              <Metric label="APR Fees" value={feeApr != null ? `${feeApr.toFixed(2)}%` : '—'} />
-              <Metric label="% sobre TVL" value={tvl > 0 ? `${((fees1d / tvl) * 100).toFixed(3)}%` : '—'} />
+            <div className="pool-pnl-section-title">
+              Fees estimadas (tu posición
+              {userShare != null ? ` · ${(userShare * 100).toFixed(3)}% del pool` : ''})
             </div>
-          </div>
-
-          {/* Proyección — estimación lineal de fees1d */}
-          <div className="pool-pnl-section">
-            <div className="pool-pnl-section-title">Proyección fees (estimada, base 24h)</div>
             <div className="pool-pnl-grid pool-pnl-grid-4">
-              <Metric label="Diario" value={formatUsdCompact(fees1d)} />
-              <Metric label="Semanal" value={formatUsdCompact(fees1d * 7)} />
-              <Metric label="Mensual" value={formatUsdCompact(fees1d * 30)} />
-              <Metric label="Anual" value={formatUsdCompact(fees1d * 365)} />
+              <Metric label="Diario"
+                value={userFees1d != null ? `${formatUsdCompact(userFees1d)} (${feeApr != null ? (feeApr / 365).toFixed(3) : '0.000'}%)` : '—'} />
+              <Metric label="Semanal"
+                value={userFees1d != null ? `${formatUsdCompact(userFees1d * 7)} (${feeApr != null ? (feeApr / 52).toFixed(2) : '0.00'}%)` : '—'} />
+              <Metric label="Mensual"
+                value={userFees1d != null ? `${formatUsdCompact(userFees1d * 30)} (${feeApr != null ? (feeApr / 12).toFixed(2) : '0.00'}%)` : '—'} />
+              <Metric label="Anual"
+                value={userFees1d != null ? `${formatUsdCompact(userFees1d * 365)} (${feeApr != null ? feeApr.toFixed(1) : '0.0'}%)` : '—'} />
             </div>
           </div>
 
-          {/* APR breakdown */}
-          <div className="pool-pnl-section">
-            <div className="pool-pnl-section-title">{apyLabel}</div>
-            <div className="pool-pnl-grid">
-              <Metric label="APR Total" value={`${totalApy.toFixed(1)}%`} />
-              <Metric label="APR Fees" value={feeApr != null ? `${feeApr.toFixed(1)}%` : '—'} />
-              <Metric label="APR Capital (est.)" value={capitalApr != null ? `${capitalApr.toFixed(1)}%` : '—'} />
+          {(pool.tokenId != null) && (
+            <div className="pool-info" style={{ marginTop: 8 }}>
+              <span><span className="pool-info-label">NFT:</span> #{pool.tokenId}</span>
+              <a className="pool-info-link" href={`https://app.uniswap.org/pools/${pool.tokenId}`} target="_blank" rel="noopener noreferrer">
+                Ver en Uniswap
+              </a>
             </div>
-          </div>
-
-          {/* Capital — pendiente hasta tener posición LP real del usuario */}
-          <div className="pool-pnl-section pool-pnl-section-pending">
-            <div className="pool-pnl-section-title">Capital (pendiente — requiere posición LP del usuario)</div>
-            <div className="pool-pnl-grid">
-              <Metric label="PNL Capital" value="—" />
-              <Metric label="Invertido" value="—" />
-              <Metric label="Tiempo de vida" value="—" />
-            </div>
-          </div>
+          )}
 
         </div>
       </details>
@@ -1590,6 +1583,7 @@ function ScanTokenIdModal({ onClose, onAdded }) {
 
   const scanAction = useAction(api.actions.poolScanner.scanPoolByTokenId);
   const createPoolMutation = useMutation(api.pools.createPool);
+  const fetchPositionAction = useAction(api.actions.poolScanner.fetchPositionLiquidity);
 
   async function handleScan() {
     const raw = tokenIdInput.trim();
@@ -1620,6 +1614,17 @@ function ScanTokenIdModal({ onClose, onAdded }) {
     setAdding(true);
     setError('');
     try {
+      let initialLiquidityUsd;
+      let initialLiquidityAt;
+      if (result.currentPrice != null && result.currentPrice > 0) {
+        try {
+          const pd = await fetchPositionAction({ tokenId: result.tokenId, network: result.network, priceUsd: result.currentPrice });
+          if (pd.liquidityUsd > 0) {
+            initialLiquidityUsd = pd.liquidityUsd;
+            initialLiquidityAt = Date.now();
+          }
+        } catch {} // no fatal — el pool se añade sin capital inicial si falla la RPC
+      }
       await createPoolMutation({
         pair: result.pair,
         network: result.network,
@@ -1629,6 +1634,8 @@ function ScanTokenIdModal({ onClose, onAdded }) {
         feeTier: result.feeTier,
         poolAddress: result.poolAddress,
         tokenId: result.tokenId,
+        initialLiquidityUsd,
+        initialLiquidityAt,
       });
       onAdded?.();
       onClose();
@@ -2447,6 +2454,31 @@ function Dashboard({ user, onLogout, userId }) {
 
   const logAdminActionMutation = useMutation(api.systemConfig.logAdminAction);
 
+  const fetchPositionAction = useAction(api.actions.poolScanner.fetchPositionLiquidity);
+  const [positionData, setPositionData] = React.useState({});
+  const positionFetchedRef = React.useRef({});
+  const POSITION_TTL_MS = 5 * 60 * 1000;
+
+  React.useEffect(() => {
+    if (!poolsFromDb?.length || !Object.keys(prices).length) return;
+    const now = Date.now();
+    for (const p of poolsFromDb) {
+      if (!p.tokenId) continue;
+      const key = String(p._id);
+      if (now - (positionFetchedRef.current[key] ?? 0) < POSITION_TTL_MS) continue;
+      const asset = normalizeAsset(p.pair?.split('/')[0]);
+      const priceUsd = prices[asset];
+      if (!priceUsd) continue;
+      positionFetchedRef.current[key] = now;
+      fetchPositionAction({ tokenId: p.tokenId, network: p.network, priceUsd })
+        .then(result => setPositionData(prev => ({ ...prev, [p._id]: result })))
+        .catch(err => {
+          delete positionFetchedRef.current[key];
+          console.error('fetchPositionLiquidity failed', err);
+        });
+    }
+  }, [poolsFromDb, prices]);
+
   async function killSwitch() {
     await setTradingEnabledMutation({ enabled: false });
     await setSimulationModeMutation({ enabled: true });
@@ -2487,6 +2519,7 @@ function Dashboard({ user, onLogout, userId }) {
       const normalizedPair = normalizePair(p.pair);
       const asset = normalizeAsset(p.pair?.split('/')[0]);
       const mock = POOLS.find((m) => m.pair === normalizedPair && m.network === p.network) ?? {};
+      const pd = positionData[p._id];
       return {
         liquidity: 0,
         apr: 0,
@@ -2503,6 +2536,8 @@ function Dashboard({ user, onLogout, userId }) {
         fees24h: p.fees1d ?? mock.fees24h ?? 0,
         price: prices[asset] ?? null,
         funding: funding[asset] ?? null,
+        // Posición LP real del usuario sobreescribe mock cuando está disponible
+        ...(pd != null ? { liquidity: pd.liquidityUsd, exposure: pd.exposure } : {}),
         // Status calculado en tiempo real con precio live — sobreescribe el guardado en Convex
         status: (() => {
           const livePrice = prices[asset] ?? null;
@@ -2516,7 +2551,7 @@ function Dashboard({ user, onLogout, userId }) {
         })(),
       };
     });
-  }, [poolsFromDb, prices, funding]);
+  }, [poolsFromDb, prices, funding, positionData]);
 
   React.useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);

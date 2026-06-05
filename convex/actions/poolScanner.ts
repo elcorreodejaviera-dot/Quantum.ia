@@ -169,3 +169,87 @@ export const scanPoolByTokenId = action({
     return { tokenId, network, pair, feeTier: fee, minRange, maxRange, currentPrice, status, poolAddress };
   },
 });
+
+export const fetchPositionLiquidity = action({
+  args: { tokenId: v.number(), network: v.string(), priceUsd: v.number() },
+  handler: async (_ctx, { tokenId, network, priceUsd }) => {
+    const rpc = RPC[network];
+    const nft = NFT_MANAGER[network];
+    const factory = FACTORY[network];
+    if (!rpc || !nft || !factory) return { liquidityUsd: 0, exposure: 0 };
+    if (!Number.isFinite(priceUsd) || priceUsd <= 0) return { liquidityUsd: 0, exposure: 0 };
+
+    let posRaw: string;
+    try {
+      posRaw = (await rpcCall(rpc, nft, "0x99fbab88" + pad(BigInt(tokenId)))).slice(2);
+    } catch { return { liquidityUsd: 0, exposure: 0 }; }
+    if (posRaw.length < 64 * 12) return { liquidityUsd: 0, exposure: 0 };
+
+    const token0addr = addrAt(posRaw, 2);
+    const token1addr = addrAt(posRaw, 3);
+    const fee        = Number(uintAt(posRaw, 4));
+    const tickLower  = Number(intAt(posRaw, 5));
+    const tickUpper  = Number(intAt(posRaw, 6));
+    const liqRaw     = uintAt(posRaw, 7);
+
+    if (liqRaw === 0n) return { liquidityUsd: 0, exposure: 0 };
+
+    let t0: { symbol: string; decimals: number };
+    let t1: { symbol: string; decimals: number };
+    try {
+      [t0, t1] = await Promise.all([tokenInfo(rpc, token0addr), tokenInfo(rpc, token1addr)]);
+    } catch { return { liquidityUsd: 0, exposure: 0 }; }
+
+    let sp: number;
+    try {
+      const getPoolData = "0x1698ee82" +
+        token0addr.slice(2).padStart(64, "0") +
+        token1addr.slice(2).padStart(64, "0") +
+        pad(BigInt(fee));
+      const poolRaw = (await rpcCall(rpc, factory, getPoolData)).slice(2);
+      const poolAddr = "0x" + poolRaw.slice(24);
+      if (poolAddr === "0x0000000000000000000000000000000000000000") return { liquidityUsd: 0, exposure: 0 };
+      const s0 = (await rpcCall(rpc, poolAddr.toLowerCase(), "0x3850c7bd")).slice(2);
+      sp = Number(uintAt(s0, 0)) / 2 ** 96;
+    } catch { return { liquidityUsd: 0, exposure: 0 }; }
+
+    if (!Number.isFinite(sp) || sp <= 0) return { liquidityUsd: 0, exposure: 0 };
+
+    // Sqrt prices at tick bounds (raw, not decimal-adjusted — same units as sp)
+    const sa = Math.sqrt(Math.pow(1.0001, tickLower));
+    const sb = Math.sqrt(Math.pow(1.0001, tickUpper));
+    if (sa >= sb) return { liquidityUsd: 0, exposure: 0 };
+
+    const L = Number(liqRaw);
+
+    // Uniswap V3 amounts in raw (smallest) token units
+    let amount0_raw = 0, amount1_raw = 0;
+    if (sp <= sa) {
+      amount0_raw = L * (sb - sa) / (sa * sb);
+    } else if (sp >= sb) {
+      amount1_raw = L * (sb - sa);
+    } else {
+      amount0_raw = L * (sb - sp) / (sp * sb);
+      amount1_raw = L * (sp - sa);
+    }
+
+    const amount0 = amount0_raw / Math.pow(10, t0.decimals);
+    const amount1 = amount1_raw / Math.pow(10, t1.decimals);
+
+    const invert = STABLES.has(t0.symbol);
+    // invert=true: token0 is stable (USDC), token1 is base (WETH/WBTC)
+    const liquidityUsd = invert
+      ? amount0 + amount1 * priceUsd
+      : amount0 * priceUsd + amount1;
+
+    if (!Number.isFinite(liquidityUsd) || liquidityUsd <= 0) return { liquidityUsd: 0, exposure: 0 };
+
+    const baseValue = invert ? amount1 * priceUsd : amount0 * priceUsd;
+    const exposure = Math.min(1, Math.max(0, baseValue / liquidityUsd));
+
+    return {
+      liquidityUsd: Math.round(liquidityUsd * 100) / 100,
+      exposure: Math.round(exposure * 1000) / 1000,
+    };
+  },
+});

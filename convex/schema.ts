@@ -46,6 +46,8 @@ export default defineSchema({
     subgraphFeesUsd1d: v.optional(v.number()),
     subgraphTvlUsd: v.optional(v.number()),
     subgraphUpdatedAt: v.optional(v.number()),
+    initialLiquidityUsd: v.optional(v.number()),
+    initialLiquidityAt: v.optional(v.number()),
   }).index("by_user", ["userId"]),
 
   bots: defineTable({

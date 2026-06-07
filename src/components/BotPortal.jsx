@@ -2457,7 +2457,7 @@ function Dashboard({ user, onLogout, userId }) {
   const fetchPositionAction = useAction(api.actions.poolScanner.fetchPositionLiquidity);
   const [positionData, setPositionData] = React.useState({});
   const positionFetchedRef = React.useRef({});
-  const POSITION_TTL_MS = 5 * 60 * 1000;
+  const POSITION_TTL_MS = 30 * 1000;
 
   React.useEffect(() => {
     if (!poolsFromDb?.length || !Object.keys(prices).length) return;

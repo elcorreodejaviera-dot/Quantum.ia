@@ -2463,15 +2463,16 @@ function Dashboard({ user, onLogout, userId }) {
     if (!poolsFromDb?.length || !Object.keys(prices).length) return;
     const now = Date.now();
     for (const p of poolsFromDb) {
-      if (!p.tokenId) continue;
+      if (!p.tokenId) { console.log('[LP] skip (no tokenId)', p.pair); continue; }
       const key = String(p._id);
-      if (now - (positionFetchedRef.current[key] ?? 0) < POSITION_TTL_MS) continue;
+      if (now - (positionFetchedRef.current[key] ?? 0) < POSITION_TTL_MS) { console.log('[LP] skip (TTL activo)', p.pair); continue; }
       const asset = normalizeAsset(p.pair?.split('/')[0]);
       const priceUsd = prices[asset];
-      if (!priceUsd) continue;
+      if (!priceUsd) { console.log('[LP] skip (sin precio)', p.pair, asset, prices); continue; }
+      console.log('[LP] fetching', p.pair, 'tokenId', p.tokenId, 'priceUsd', priceUsd);
       positionFetchedRef.current[key] = now;
       fetchPositionAction({ tokenId: p.tokenId, network: p.network, priceUsd })
-        .then(result => setPositionData(prev => ({ ...prev, [p._id]: result })))
+        .then(result => { console.log('[LP] result', p.pair, result); setPositionData(prev => ({ ...prev, [p._id]: result })); })
         .catch(err => {
           delete positionFetchedRef.current[key];
           console.error('fetchPositionLiquidity failed', err);

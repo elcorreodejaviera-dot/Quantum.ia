@@ -9,6 +9,11 @@ const NFT_MANAGER: Record<string, string> = {
   Base:     "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
 };
 
+const REVERT_VAULT: Record<string, string> = {
+  Base:     "0x36aeae0e411a1e28372e0d66f02e57744ebe7599",
+  Arbitrum: "0x74e6afef5705beb126c6d3bf46f8fad8f3e07825",
+};
+
 const FACTORY: Record<string, string> = {
   Arbitrum: "0x1F98431c8aD98523631AE4a59f267346ea31F984",
   Optimism: "0x1F98431c8aD98523631AE4a59f267346ea31F984",
@@ -259,9 +264,41 @@ export const fetchPositionLiquidity = action({
     const baseValue = invert ? amount1 * priceUsd : amount0 * priceUsd;
     const exposure = Math.min(1, Math.max(0, baseValue / liquidityUsd));
 
+    // Check Revert Finance Lend: ownerOf → loanInfo
+    let borrowHealth = 0;
+    let leverageRevert = 0;
+    const vaultAddr = REVERT_VAULT[network];
+    if (vaultAddr) {
+      try {
+        // ownerOf(uint256) = 0x6352211e
+        const ownerRaw = (await rpcCallWithFallback(rpcs, nft, "0x6352211e" + pad(BigInt(tokenId)))).slice(2);
+        const owner = "0x" + ownerRaw.slice(24).toLowerCase();
+        if (owner === vaultAddr.toLowerCase()) {
+          // loanInfo(uint256) = 0x8349d6be → (debt, fullValue, collateralValue, liquidationCost, liquidationValue)
+          const loanRaw = (await rpcCallWithFallback(rpcs, vaultAddr, "0x8349d6be" + pad(BigInt(tokenId)))).slice(2);
+          if (loanRaw.length >= 64 * 3) {
+            const debt       = uintAt(loanRaw, 0);
+            const fullValue  = uintAt(loanRaw, 1);
+            const collateral = uintAt(loanRaw, 2);
+            if (debt > 0n && collateral > 0n) {
+              const hf = Number(collateral) / Number(debt);
+              borrowHealth = Math.max(0, Math.min(100, Math.round((hf - 1) * 100)));
+              if (fullValue > debt) {
+                leverageRevert = Math.round((Number(fullValue) / (Number(fullValue) - Number(debt))) * 10) / 10;
+              }
+            }
+          }
+        }
+      } catch {
+        // Not in vault or oracle failure — no borrow data
+      }
+    }
+
     return {
       liquidityUsd: Math.round(liquidityUsd * 100) / 100,
       exposure: Math.round(exposure * 1000) / 1000,
+      borrowHealth,
+      leverageRevert,
     };
   },
 });

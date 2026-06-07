@@ -2494,20 +2494,16 @@ function Dashboard({ user, onLogout, userId }) {
     if (!poolsFromDb?.length || !Object.keys(prices).length) return;
     const now = Date.now();
     for (const p of poolsFromDb) {
-      if (!p.tokenId) { console.log('[LP] skip (no tokenId)', p.pair); continue; }
+      if (!p.tokenId) continue;
       const key = String(p._id);
-      if (now - (positionFetchedRef.current[key] ?? 0) < POSITION_TTL_MS) { console.log('[LP] skip (TTL activo)', p.pair); continue; }
+      if (now - (positionFetchedRef.current[key] ?? 0) < POSITION_TTL_MS) continue;
       const asset = normalizeAsset(p.pair?.split('/')[0]);
       const priceUsd = prices[asset];
-      if (!priceUsd) { console.log('[LP] skip (sin precio)', p.pair, asset, prices); continue; }
-      console.log('[LP] fetching', p.pair, 'tokenId', p.tokenId, 'priceUsd', priceUsd);
+      if (!priceUsd) continue;
       positionFetchedRef.current[key] = now;
       fetchPositionAction({ tokenId: p.tokenId, network: p.network, priceUsd, poolAddress: p.poolAddress ?? undefined })
-        .then(result => { console.log('[LP] result', p.pair, result); setPositionData(prev => ({ ...prev, [p._id]: result })); })
-        .catch(err => {
-          delete positionFetchedRef.current[key];
-          console.error('fetchPositionLiquidity failed', err);
-        });
+        .then(result => { setPositionData(prev => ({ ...prev, [p._id]: result })); })
+        .catch(() => { delete positionFetchedRef.current[key]; });
     }
   }, [poolsFromDb, prices]);
 
@@ -2569,7 +2565,11 @@ function Dashboard({ user, onLogout, userId }) {
         price: prices[asset] ?? null,
         funding: funding[asset] ?? null,
         // Posición LP real del usuario sobreescribe mock cuando está disponible
-        ...(pd != null ? { liquidity: pd.liquidityUsd, exposure: pd.exposure } : {}),
+        ...(pd != null ? {
+          liquidity: pd.liquidityUsd,
+          exposure: pd.exposure,
+          ...(pd.borrowHealth > 0 ? { borrowHealth: pd.borrowHealth, leverageRevert: pd.leverageRevert ?? 0 } : {}),
+        } : {}),
         // Status calculado en tiempo real con precio live — sobreescribe el guardado en Convex
         status: (() => {
           const livePrice = prices[asset] ?? null;

@@ -988,6 +988,9 @@ button {
 }
 
 /* Pool PNL breakdown */
+.positive { color: var(--green); }
+.negative { color: var(--red); }
+
 .pool-pnl {
   border-top: 1px solid var(--line);
   margin-top: 8px;

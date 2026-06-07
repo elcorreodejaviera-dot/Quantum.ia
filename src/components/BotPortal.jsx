@@ -307,13 +307,13 @@ function PoolCard({ pool, isAdmin }) {
             </div>
             <div className="pool-pnl-grid pool-pnl-grid-4">
               <Metric label="Diario"
-                value={userFees1d != null ? `${formatUsdCompact(userFees1d)} (${feeApr != null ? (feeApr / 365).toFixed(3) : '0.000'}%)` : '—'} />
+                value={userFees1d != null ? <span className="positive">{formatUsdCompact(userFees1d)} ({feeApr != null ? (feeApr / 365).toFixed(3) : '0.000'}%)</span> : '—'} />
               <Metric label="Semanal"
-                value={userFees1d != null ? `${formatUsdCompact(userFees1d * 7)} (${feeApr != null ? (feeApr / 52).toFixed(2) : '0.00'}%)` : '—'} />
+                value={userFees1d != null ? <span className="positive">{formatUsdCompact(userFees1d * 7)} ({feeApr != null ? (feeApr / 52).toFixed(2) : '0.00'}%)</span> : '—'} />
               <Metric label="Mensual"
-                value={userFees1d != null ? `${formatUsdCompact(userFees1d * 30)} (${feeApr != null ? (feeApr / 12).toFixed(2) : '0.00'}%)` : '—'} />
+                value={userFees1d != null ? <span className="positive">{formatUsdCompact(userFees1d * 30)} ({feeApr != null ? (feeApr / 12).toFixed(2) : '0.00'}%)</span> : '—'} />
               <Metric label="Anual"
-                value={userFees1d != null ? `${formatUsdCompact(userFees1d * 365)} (${feeApr != null ? feeApr.toFixed(1) : '0.0'}%)` : '—'} />
+                value={userFees1d != null ? <span className="positive">{formatUsdCompact(userFees1d * 365)} ({feeApr != null ? feeApr.toFixed(1) : '0.0'}%)</span> : '—'} />
             </div>
           </div>
 

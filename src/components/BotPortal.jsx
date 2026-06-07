@@ -163,6 +163,12 @@ const EXPLORER_URLS = {
   Optimism: 'https://optimistic.etherscan.io/address/',
 };
 
+const UNISWAP_NETWORK = {
+  Arbitrum: 'arbitrum',
+  Base: 'base',
+  Optimism: 'optimism',
+};
+
 function dexName(defillamaId) {
   if (!defillamaId) return 'Uniswap v3';
   if (defillamaId.includes('uniswap-v3')) return 'Uniswap v3';
@@ -342,7 +348,7 @@ function PoolCard({ pool, isAdmin }) {
           {(pool.tokenId != null) && (
             <div className="pool-info" style={{ marginTop: 8 }}>
               <span><span className="pool-info-label">NFT:</span> #{pool.tokenId}</span>
-              <a className="pool-info-link" href={`https://app.uniswap.org/pools/${pool.tokenId}`} target="_blank" rel="noopener noreferrer">
+              <a className="pool-info-link" href={`https://app.uniswap.org/positions/v3/${UNISWAP_NETWORK[pool.network] ?? 'ethereum'}/${pool.tokenId}`} target="_blank" rel="noopener noreferrer">
                 Ver en Uniswap
               </a>
             </div>

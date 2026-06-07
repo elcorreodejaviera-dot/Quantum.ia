@@ -763,13 +763,11 @@ button {
   border-radius: 999px;
   position: relative;
   overflow: hidden;
-  /* segmented gradient: rojo → naranja → ámbar → lima → verde */
+  /* usa los colores del propio portal */
   background: linear-gradient(to right,
-    #ef4444 0%,   #ef4444 20%,
-    #f97316 20%,  #f97316 35%,
-    #f59e0b 35%,  #f59e0b 50%,
-    #84cc16 50%,  #84cc16 65%,
-    #22c55e 65%,  #22c55e 100%
+    var(--red)   0%,  var(--red)   30%,
+    var(--amber) 30%, var(--amber) 62%,
+    var(--green) 62%, var(--green) 100%
   );
 }
 

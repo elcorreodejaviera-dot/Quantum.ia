@@ -15,10 +15,10 @@ const FACTORY: Record<string, string> = {
   Base:     "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
 };
 
-const RPC: Record<string, string> = {
-  Arbitrum: "https://arb1.arbitrum.io/rpc",
-  Optimism: "https://mainnet.optimism.io",
-  Base:     "https://mainnet.base.org",
+const RPC: Record<string, string[]> = {
+  Arbitrum: ["https://arb1.arbitrum.io/rpc", "https://arbitrum-one-rpc.publicnode.com"],
+  Optimism: ["https://mainnet.optimism.io", "https://optimism-rpc.publicnode.com"],
+  Base:     ["https://base-rpc.publicnode.com", "https://base.drpc.org", "https://mainnet.base.org"],
 };
 
 const STABLES = new Set(["USDC", "USDT", "DAI", "BUSD", "FRAX", "LUSD", "USDC.e", "USDbC"]);
@@ -47,6 +47,14 @@ async function rpcCall(url: string, to: string, data: string): Promise<string> {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function rpcCallWithFallback(urls: string[], to: string, data: string): Promise<string> {
+  let lastErr: unknown;
+  for (const url of urls) {
+    try { return await rpcCall(url, to, data); } catch (e) { lastErr = e; }
+  }
+  throw lastErr;
 }
 
 function pad(n: bigint): string { return n.toString(16).padStart(64, "0"); }
@@ -106,13 +114,13 @@ export const scanPoolByTokenId = action({
     if (!Number.isFinite(tokenId) || !Number.isInteger(tokenId) || tokenId <= 0 || tokenId > Number.MAX_SAFE_INTEGER)
       throw new Error("Token ID inválido. Debe ser un entero positivo.");
 
-    const rpc = RPC[network];
+    const rpcs = RPC[network];
     const nft = NFT_MANAGER[network];
     const factory = FACTORY[network];
-    if (!rpc || !nft) throw new Error(`Red no soportada: ${network}`);
+    if (!rpcs || !nft) throw new Error(`Red no soportada: ${network}`);
 
     // positions(uint256) = 0x99fbab88
-    const posRaw = (await rpcCall(rpc, nft, "0x99fbab88" + pad(BigInt(tokenId)))).slice(2);
+    const posRaw = (await rpcCallWithFallback(rpcs, nft, "0x99fbab88" + pad(BigInt(tokenId)))).slice(2);
     if (posRaw.length < 64 * 12) throw new Error("Posición no encontrada. Verifica el Token ID y la red.");
 
     const token0addr = addrAt(posRaw, 2);
@@ -125,8 +133,8 @@ export const scanPoolByTokenId = action({
     if (liquidity === 0n) throw new Error("Posición cerrada (liquidez = 0).");
 
     const [t0, t1] = await Promise.all([
-      tokenInfo(rpc, token0addr),
-      tokenInfo(rpc, token1addr),
+      tokenInfo(rpcs[0], token0addr),
+      tokenInfo(rpcs[0], token1addr),
     ]);
 
     // Prices at range bounds
@@ -147,12 +155,12 @@ export const scanPoolByTokenId = action({
         token0addr.slice(2).padStart(64, "0") +
         token1addr.slice(2).padStart(64, "0") +
         pad(BigInt(fee));
-      const poolRaw = (await rpcCall(rpc, factory, getPoolData)).slice(2);
+      const poolRaw = (await rpcCallWithFallback(rpcs, factory, getPoolData)).slice(2);
       const poolAddr = "0x" + poolRaw.slice(24);
       if (poolAddr !== "0x0000000000000000000000000000000000000000") {
         poolAddress = poolAddr.toLowerCase();
         // slot0() = 0x3850c7bd → sqrtPriceX96
-        const s0 = (await rpcCall(rpc, poolAddress, "0x3850c7bd")).slice(2);
+        const s0 = (await rpcCallWithFallback(rpcs, poolAddress, "0x3850c7bd")).slice(2);
         const sqrtP96 = uintAt(s0, 0);
         const sqrtF = Number(sqrtP96) / 2 ** 96;
         const raw = sqrtF * sqrtF * Math.pow(10, t0.decimals - t1.decimals);
@@ -171,17 +179,17 @@ export const scanPoolByTokenId = action({
 });
 
 export const fetchPositionLiquidity = action({
-  args: { tokenId: v.number(), network: v.string(), priceUsd: v.number() },
-  handler: async (_ctx, { tokenId, network, priceUsd }) => {
-    const rpc = RPC[network];
-    const nft = NFT_MANAGER[network];
+  args: { tokenId: v.number(), network: v.string(), priceUsd: v.number(), poolAddress: v.optional(v.string()) },
+  handler: async (_ctx, { tokenId, network, priceUsd, poolAddress: knownPoolAddress }) => {
+    const rpcs = RPC[network];
+    const nft  = NFT_MANAGER[network];
     const factory = FACTORY[network];
-    if (!rpc || !nft || !factory) return { liquidityUsd: 0, exposure: 0 };
+    if (!rpcs || !nft || !factory) return { liquidityUsd: 0, exposure: 0 };
     if (!Number.isFinite(priceUsd) || priceUsd <= 0) return { liquidityUsd: 0, exposure: 0 };
 
     let posRaw: string;
     try {
-      posRaw = (await rpcCall(rpc, nft, "0x99fbab88" + pad(BigInt(tokenId)))).slice(2);
+      posRaw = (await rpcCallWithFallback(rpcs, nft, "0x99fbab88" + pad(BigInt(tokenId)))).slice(2);
     } catch { return { liquidityUsd: 0, exposure: 0 }; }
     if (posRaw.length < 64 * 12) return { liquidityUsd: 0, exposure: 0 };
 
@@ -197,19 +205,23 @@ export const fetchPositionLiquidity = action({
     let t0: { symbol: string; decimals: number };
     let t1: { symbol: string; decimals: number };
     try {
-      [t0, t1] = await Promise.all([tokenInfo(rpc, token0addr), tokenInfo(rpc, token1addr)]);
+      [t0, t1] = await Promise.all([tokenInfo(rpcs[0], token0addr), tokenInfo(rpcs[0], token1addr)]);
     } catch { return { liquidityUsd: 0, exposure: 0 }; }
 
+    // Usar poolAddress ya conocido para evitar la llamada al factory (ahorra 1 RPC)
     let sp: number;
     try {
-      const getPoolData = "0x1698ee82" +
-        token0addr.slice(2).padStart(64, "0") +
-        token1addr.slice(2).padStart(64, "0") +
-        pad(BigInt(fee));
-      const poolRaw = (await rpcCall(rpc, factory, getPoolData)).slice(2);
-      const poolAddr = "0x" + poolRaw.slice(24);
+      let poolAddr = knownPoolAddress?.toLowerCase();
+      if (!poolAddr) {
+        const getPoolData = "0x1698ee82" +
+          token0addr.slice(2).padStart(64, "0") +
+          token1addr.slice(2).padStart(64, "0") +
+          pad(BigInt(fee));
+        const poolRaw = (await rpcCallWithFallback(rpcs, factory, getPoolData)).slice(2);
+        poolAddr = ("0x" + poolRaw.slice(24)).toLowerCase();
+      }
       if (poolAddr === "0x0000000000000000000000000000000000000000") return { liquidityUsd: 0, exposure: 0 };
-      const s0 = (await rpcCall(rpc, poolAddr.toLowerCase(), "0x3850c7bd")).slice(2);
+      const s0 = (await rpcCallWithFallback(rpcs, poolAddr, "0x3850c7bd")).slice(2);
       sp = Number(uintAt(s0, 0)) / 2 ** 96;
     } catch { return { liquidityUsd: 0, exposure: 0 }; }
 

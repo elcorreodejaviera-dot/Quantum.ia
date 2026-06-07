@@ -2471,7 +2471,7 @@ function Dashboard({ user, onLogout, userId }) {
       if (!priceUsd) { console.log('[LP] skip (sin precio)', p.pair, asset, prices); continue; }
       console.log('[LP] fetching', p.pair, 'tokenId', p.tokenId, 'priceUsd', priceUsd);
       positionFetchedRef.current[key] = now;
-      fetchPositionAction({ tokenId: p.tokenId, network: p.network, priceUsd })
+      fetchPositionAction({ tokenId: p.tokenId, network: p.network, priceUsd, poolAddress: p.poolAddress ?? undefined })
         .then(result => { console.log('[LP] result', p.pair, result); setPositionData(prev => ({ ...prev, [p._id]: result })); })
         .catch(err => {
           delete positionFetchedRef.current[key];

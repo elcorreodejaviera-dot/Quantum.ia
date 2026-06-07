@@ -267,6 +267,10 @@ export const fetchPositionLiquidity = action({
     // Check Revert Finance Lend: ownerOf → loanInfo
     let borrowHealth = 0;
     let leverageRevert = 0;
+    let healthFactor = 0;
+    let amountToRepay = 0;
+    let liquidationThreshold = 0;
+    let availableToBorrow = 0;
     const vaultAddr = REVERT_VAULT[network];
     if (vaultAddr) {
       try {
@@ -280,11 +284,17 @@ export const fetchPositionLiquidity = action({
             const debt       = uintAt(loanRaw, 0);
             const fullValue  = uintAt(loanRaw, 1);
             const collateral = uintAt(loanRaw, 2);
-            if (debt > 0n && collateral > 0n) {
+            if (debt > 0n && collateral > 0n && fullValue > 0n) {
               const hf = Number(collateral) / Number(debt);
-              borrowHealth = Math.max(0, Math.min(100, Math.round((hf - 1) * 100)));
+              borrowHealth   = Math.max(0, Math.min(100, Math.round((hf - 1) * 100)));
+              healthFactor   = Math.round(hf * 100) / 100;
+              amountToRepay  = Math.round(Number(debt) / 1e6 * 100) / 100;
+              // liquidationThreshold = LP value at which collateral = debt
+              liquidationThreshold = Math.round(Number(debt) * Number(fullValue) / Number(collateral) / 1e6 * 100) / 100;
+              // available to borrow ≈ collateral × 95% safety buffer − debt
+              availableToBorrow = Math.max(0, Math.round((Number(collateral) * 0.95 - Number(debt)) / 1e6 * 100) / 100);
               if (fullValue > debt) {
-                leverageRevert = Math.round((Number(fullValue) / (Number(fullValue) - Number(debt))) * 10) / 10;
+                leverageRevert = Math.round(Number(fullValue) / (Number(fullValue) - Number(debt)) * 10) / 10;
               }
             }
           }
@@ -299,6 +309,10 @@ export const fetchPositionLiquidity = action({
       exposure: Math.round(exposure * 1000) / 1000,
       borrowHealth,
       leverageRevert,
+      healthFactor,
+      amountToRepay,
+      liquidationThreshold,
+      availableToBorrow,
     };
   },
 });

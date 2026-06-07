@@ -249,15 +249,29 @@ function PoolCard({ pool, isAdmin }) {
         {hasBorrowData ? (
           <>
             <div className="borrow-main">
-              <span>{pool.borrowHealth}%</span>
+              <span>{pool.healthFactor.toFixed(2)}</span>
               <strong>{pool.leverageRevert.toFixed(1)}x</strong>
             </div>
             <div className="borrow-track" aria-label="Salud borrow">
               <div className={`borrow-fill ${borrowTone}`} style={{ width: `${pool.borrowHealth}%` }}></div>
             </div>
             <div className="borrow-foot">
-              <span>Health factor</span>
-              <span>Revert leverage</span>
+              <span>Loan health</span>
+              <span>Leverage</span>
+            </div>
+            <div className="borrow-details">
+              <div className="borrow-detail-item">
+                <span className="borrow-detail-label">Deuda activa</span>
+                <span className="borrow-detail-value">${pool.amountToRepay.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC</span>
+              </div>
+              <div className="borrow-detail-item">
+                <span className="borrow-detail-label">Valor liquidación</span>
+                <span className="borrow-detail-value negative">${pool.liquidationThreshold.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC</span>
+              </div>
+              <div className="borrow-detail-item">
+                <span className="borrow-detail-label">Disponible borrow</span>
+                <span className="borrow-detail-value positive">${pool.availableToBorrow.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC</span>
+              </div>
             </div>
           </>
         ) : (
@@ -2554,6 +2568,10 @@ function Dashboard({ user, onLogout, userId }) {
         exposure: 0,
         borrowHealth: 0,
         leverageRevert: 0,
+        healthFactor: 0,
+        amountToRepay: 0,
+        liquidationThreshold: 0,
+        availableToBorrow: 0,
         status: 'Sin datos',
         ...mock,
         ...p,
@@ -2568,7 +2586,14 @@ function Dashboard({ user, onLogout, userId }) {
         ...(pd != null ? {
           liquidity: pd.liquidityUsd,
           exposure: pd.exposure,
-          ...(pd.borrowHealth > 0 ? { borrowHealth: pd.borrowHealth, leverageRevert: pd.leverageRevert ?? 0 } : {}),
+          ...(pd.borrowHealth > 0 ? {
+            borrowHealth: pd.borrowHealth,
+            leverageRevert: pd.leverageRevert ?? 0,
+            healthFactor: pd.healthFactor ?? 0,
+            amountToRepay: pd.amountToRepay ?? 0,
+            liquidationThreshold: pd.liquidationThreshold ?? 0,
+            availableToBorrow: pd.availableToBorrow ?? 0,
+          } : {}),
         } : {}),
         // Status calculado en tiempo real con precio live — sobreescribe el guardado en Convex
         status: (() => {

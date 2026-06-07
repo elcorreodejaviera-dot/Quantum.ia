@@ -695,6 +695,33 @@ button {
   margin-top: 8px;
 }
 
+.borrow-details {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.borrow-detail-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.borrow-detail-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.borrow-detail-value {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 .borrow-head,
 .borrow-foot {
   display: flex;

@@ -293,9 +293,8 @@ export const fetchPositionLiquidity = action({
               liquidationThreshold = Math.round(Number(debt) * Number(fullValue) / Number(collateral) / 1e6 * 100) / 100;
               // available to borrow ≈ collateral × 95% safety buffer − debt
               availableToBorrow = Math.max(0, Math.round((Number(collateral) * 0.95 - Number(debt)) / 1e6 * 100) / 100);
-              if (fullValue > debt) {
-                leverageRevert = Math.round(Number(fullValue) / (Number(fullValue) - Number(debt)) * 10) / 10;
-              }
+              // LTV = debt / fullValue (loan-to-value, more honest than leverage)
+              leverageRevert = Math.round(Number(debt) / Number(fullValue) * 1000) / 10;
             }
           }
         }

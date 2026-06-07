@@ -250,7 +250,7 @@ function PoolCard({ pool, isAdmin }) {
           <>
             <div className="borrow-main">
               <span>{pool.healthFactor.toFixed(2)}</span>
-              <strong>{pool.leverageRevert.toFixed(1)}x</strong>
+              <strong>{pool.leverageRevert.toFixed(1)}% LTV</strong>
             </div>
             <div
               className="borrow-track"
@@ -259,7 +259,7 @@ function PoolCard({ pool, isAdmin }) {
             />
             <div className="borrow-foot">
               <span>Loan health</span>
-              <span>Leverage</span>
+              <span>Loan-to-value</span>
             </div>
             <div className="borrow-details">
               <div className="borrow-detail-item">

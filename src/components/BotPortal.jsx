@@ -252,9 +252,11 @@ function PoolCard({ pool, isAdmin }) {
               <span>{pool.healthFactor.toFixed(2)}</span>
               <strong>{pool.leverageRevert.toFixed(1)}x</strong>
             </div>
-            <div className="borrow-track" aria-label="Salud borrow">
-              <div className={`borrow-fill ${borrowTone}`} style={{ width: `${pool.borrowHealth}%` }}></div>
-            </div>
+            <div
+              className="borrow-track"
+              style={{ '--hp': `${pool.borrowHealth}%` }}
+              aria-label={`Loan health ${pool.borrowHealth}%`}
+            />
             <div className="borrow-foot">
               <span>Loan health</span>
               <span>Leverage</span>

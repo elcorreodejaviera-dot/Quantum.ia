@@ -465,95 +465,131 @@ button {
   font-size: 12px;
 }
 
-.range-vertical {
-  min-height: 210px;
+/* ── Range chart (termómetro de precio) ── */
+.range-chart {
   margin: 14px 0 12px;
-  padding: 12px 0;
+  padding: 14px 14px 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background:
-    linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px) 0 0 / 16px 16px,
-    linear-gradient(0deg, rgba(255,255,255,0.03) 1px, transparent 1px) 0 0 / 16px 16px,
+    linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px) 0 0 / 20px 20px,
+    linear-gradient(0deg, rgba(255,255,255,0.02) 1px, transparent 1px) 0 0 / 20px 20px,
     var(--panel-2);
-}
-
-.range-axis {
-  position: relative;
-  width: min(170px, 82%);
-  height: 180px;
-  margin: 0 auto;
-}
-
-.range-axis::before {
-  content: '';
-  position: absolute;
-  left: 50%;
-  top: 0;
-  bottom: 0;
-  width: 1px;
-  background: var(--line-strong);
-}
-
-.range-window {
-  position: absolute;
-  left: 48%;
-  top: 18%;
-  bottom: 16%;
-  width: 34px;
-  transform: translateX(-50%);
-  border: 1px solid rgba(0, 200, 5, 0.5);
-  border-radius: 6px;
-  background:
-    repeating-linear-gradient(
-      to top,
-      rgba(0, 200, 5, 0.18),
-      rgba(0, 200, 5, 0.18) 8px,
-      rgba(0, 200, 5, 0.07) 8px,
-      rgba(0, 200, 5, 0.07) 16px
-    );
-}
-
-.range-price {
-  position: absolute;
-  left: calc(50% + 28px);
   display: flex;
-  align-items: center;
-  gap: 7px;
-  transform: translateY(50%);
-  color: var(--text);
+  flex-direction: column;
+  gap: 10px;
 }
 
-.range-price::before {
-  content: '';
-  width: 26px;
-  height: 1px;
-  background: var(--green);
+.range-chart-inner {
+  display: flex;
+  gap: 10px;
+  height: 200px;
 }
 
-.range-price span {
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.range-price strong {
+.range-chart-labels {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 11px;
+  color: var(--muted);
+  min-width: 72px;
+  padding: 2px 0;
 }
 
-.range-limit {
+.range-chart-max { align-self: flex-start; }
+.range-chart-min { align-self: flex-end; }
+
+.range-chart-bar-wrap {
+  flex: 1;
+  position: relative;
+}
+
+.range-chart-bar {
+  position: absolute;
+  inset: 0;
+  border: 1px solid rgba(0, 200, 5, 0.3);
+  border-radius: 8px;
+  background: rgba(0, 200, 5, 0.04);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.range-chart-fill {
+  width: 100%;
+  background: linear-gradient(to top,
+    rgba(0, 200, 5, 0.55) 0%,
+    rgba(0, 200, 5, 0.25) 70%,
+    rgba(0, 200, 5, 0.08) 100%
+  );
+  transition: height 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+  border-top: 2px solid rgba(0, 200, 5, 0.6);
+}
+
+.range-chart-fill.out {
+  background: linear-gradient(to top, rgba(255, 80, 0, 0.35), rgba(255, 80, 0, 0.08));
+  border-top-color: rgba(255, 80, 0, 0.5);
+}
+
+.range-chart-price-line {
   position: absolute;
   left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  transform: translateY(50%);
+  pointer-events: none;
+}
+
+.range-chart-price-line::before {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--green);
+  opacity: 0.8;
+}
+
+.range-chart-price-line span {
   color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.range-chart-price-line strong {
   font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.range-chart-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.range-chart-footer strong {
+  font-size: 13px;
+  margin-left: 2px;
+}
+
+.range-chart-no-pos {
+  font-style: italic;
   font-size: 11px;
 }
 
-.range-limit.top {
-  top: 0;
-}
-
-.range-limit.bottom {
-  bottom: 0;
+.range-chart-pct {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 11px;
 }
 
 .pool-meta {

@@ -258,15 +258,37 @@ function PoolCard({ pool, isAdmin }) {
         </div>
       </div>
 
-      <div className="range-vertical" aria-label="Rango vertical de liquidez">
-        <div className="range-axis">
-          <span className="range-limit top">${formatPrice(pool.pair, pool.max)}</span>
-          <span className="range-limit bottom">${formatPrice(pool.pair, pool.min)}</span>
-          <div className="range-window"></div>
-          <div className="range-price" style={{ bottom: `${pos}%` }}>
-            <span>Precio</span>
-            <strong>{hasPrice ? `$${formatPrice(pool.pair, pool.price)}` : '—'}</strong>
+      <div className="range-chart" aria-label="Rango de precio">
+        <div className="range-chart-inner">
+          <div className="range-chart-labels">
+            <span className="range-chart-max">${formatPrice(pool.pair, pool.max)}</span>
+            <span className="range-chart-min">${formatPrice(pool.pair, pool.min)}</span>
           </div>
+          <div className="range-chart-bar-wrap">
+            <div className="range-chart-bar">
+              <div
+                className={`range-chart-fill${!hasPrice || pool.status === 'Fuera de rango' ? ' out' : ''}`}
+                style={{ height: `${pos}%` }}
+              />
+            </div>
+            {hasPrice && (
+              <div className="range-chart-price-line" style={{ bottom: `${pos}%` }}>
+                <span>Precio</span>
+                <strong>${formatPrice(pool.pair, pool.price)}</strong>
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="range-chart-footer">
+          {pool.liquidity > 0
+            ? <><span>Posición LP</span><strong className="positive">{formatUsdCompact(pool.liquidity)}</strong></>
+            : <span className="range-chart-no-pos">Posición LP no disponible</span>
+          }
+          {hasPrice && (
+            <span className="range-chart-pct">
+              {Math.round(pos)}% del rango
+            </span>
+          )}
         </div>
       </div>
 

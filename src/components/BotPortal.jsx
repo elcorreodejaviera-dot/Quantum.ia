@@ -10,12 +10,12 @@ const NETWORKS = ['Todas', 'Arbitrum', 'Base', 'Optimism'];
 const PAIRS = ['Todos', 'BTC/USDC', 'ETH/USDC'];
 
 const POOLS = [
-  { id: 1, pair: 'BTC/USDC', network: 'Arbitrum', min: 63200, max: 72400, liquidity: 86240, fees24h: 118, apr: 42.6, exposure: 0.74, borrowHealth: 82, leverageRevert: 2.4, status: 'En rango' },
-  { id: 2, pair: 'ETH/USDC', network: 'Arbitrum', min: 3420, max: 4020, liquidity: 54110, fees24h: 71, apr: 37.2, exposure: 0.62, borrowHealth: 76, leverageRevert: 1.8, status: 'En rango' },
-  { id: 3, pair: 'BTC/USDC', network: 'Base', min: 64600, max: 70100, liquidity: 39220, fees24h: 64, apr: 51.8, exposure: 0.81, borrowHealth: 58, leverageRevert: 3.6, status: 'Cerca del borde' },
-  { id: 4, pair: 'ETH/USDC', network: 'Base', min: 3600, max: 3880, liquidity: 33680, fees24h: 58, apr: 58.4, exposure: 0.77, borrowHealth: 69, leverageRevert: 2.9, status: 'En rango' },
-  { id: 5, pair: 'BTC/USDC', network: 'Optimism', min: 61500, max: 74200, liquidity: 28400, fees24h: 39, apr: 31.7, exposure: 0.49, borrowHealth: 91, leverageRevert: 1.2, status: 'En rango' },
-  { id: 6, pair: 'ETH/USDC', network: 'Optimism', min: 3860, max: 4240, liquidity: 24560, fees24h: 22, apr: 24.9, exposure: 0.88, borrowHealth: 38, leverageRevert: 5.1, status: 'Fuera de rango' },
+  { id: 1, pair: 'BTC/USDC', network: 'Arbitrum', min: 63200, max: 72400, liquidity: 86240, fees24h: 118, apr: 42.6, exposure: 0.74, status: 'En rango' },
+  { id: 2, pair: 'ETH/USDC', network: 'Arbitrum', min: 3420, max: 4020, liquidity: 54110, fees24h: 71, apr: 37.2, exposure: 0.62, status: 'En rango' },
+  { id: 3, pair: 'BTC/USDC', network: 'Base', min: 64600, max: 70100, liquidity: 39220, fees24h: 64, apr: 51.8, exposure: 0.81, status: 'Cerca del borde' },
+  { id: 4, pair: 'ETH/USDC', network: 'Base', min: 3600, max: 3880, liquidity: 33680, fees24h: 58, apr: 58.4, exposure: 0.77, status: 'En rango' },
+  { id: 5, pair: 'BTC/USDC', network: 'Optimism', min: 61500, max: 74200, liquidity: 28400, fees24h: 39, apr: 31.7, exposure: 0.49, status: 'En rango' },
+  { id: 6, pair: 'ETH/USDC', network: 'Optimism', min: 3860, max: 4240, liquidity: 24560, fees24h: 22, apr: 24.9, exposure: 0.88, status: 'Fuera de rango' },
 ];
 
 const INITIAL_BOTS = [
@@ -241,22 +241,30 @@ function PoolCard({ pool, isAdmin }) {
         </div>
       </div>
 
-      <div className={`borrow-health borrow-health-featured ${borrowTone}`}>
+      <div className={`borrow-health borrow-health-featured ${hasBorrowData ? borrowTone : 'inactive'}`}>
         <div className="borrow-head">
-          <span>Salud borrow / revert</span>
-          <strong>{borrowLabel}</strong>
+          <span>Revert Lend {hasBorrowData ? '· Activo' : '· Sin apalancamiento'}</span>
+          {hasBorrowData && <strong>{borrowLabel}</strong>}
         </div>
-        <div className="borrow-main">
-          <span>{hasBorrowData ? `${pool.borrowHealth}%` : '—'}</span>
-          <strong>{hasBorrowData ? `${pool.leverageRevert.toFixed(1)}x` : '—'}</strong>
-        </div>
-        <div className="borrow-track" aria-label="Salud borrow">
-          <div className={`borrow-fill ${borrowTone}`} style={{ width: `${pool.borrowHealth}%` }}></div>
-        </div>
-        <div className="borrow-foot">
-          <span>Health factor</span>
-          <span>Revert leverage</span>
-        </div>
+        {hasBorrowData ? (
+          <>
+            <div className="borrow-main">
+              <span>{pool.borrowHealth}%</span>
+              <strong>{pool.leverageRevert.toFixed(1)}x</strong>
+            </div>
+            <div className="borrow-track" aria-label="Salud borrow">
+              <div className={`borrow-fill ${borrowTone}`} style={{ width: `${pool.borrowHealth}%` }}></div>
+            </div>
+            <div className="borrow-foot">
+              <span>Health factor</span>
+              <span>Revert leverage</span>
+            </div>
+          </>
+        ) : (
+          <div className="borrow-inactive-msg">
+            Este pool no usa Revert Lend — no hay posición apalancada
+          </div>
+        )}
       </div>
 
       <div className="range-chart" aria-label="Rango de precio">

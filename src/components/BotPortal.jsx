@@ -6,7 +6,7 @@ import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, use
 
 const IS_TESTNET = import.meta.env.VITE_HL_NETWORK === 'testnet';
 
-const NETWORKS = ['Todas', 'Arbitrum', 'Base', 'Optimism'];
+const NETWORKS = ['Todas', 'Ethereum', 'Arbitrum', 'Base', 'Optimism'];
 const PAIRS = ['Todos', 'BTC/USDC', 'ETH/USDC'];
 
 const POOLS = [
@@ -122,7 +122,7 @@ function SummaryItem({ label, value, sub }) {
 }
 
 function NetworkLiquidity({ pools }) {
-  const byNetwork = ['Arbitrum', 'Base', 'Optimism'].map((network) => {
+  const byNetwork = ['Ethereum', 'Arbitrum', 'Base', 'Optimism'].map((network) => {
     const networkPools = pools.filter((pool) => pool.network === network);
     const liquidity = networkPools.reduce((sum, pool) => sum + pool.liquidity, 0);
     const fees24h = networkPools.reduce((sum, pool) => sum + pool.fees24h, 0);
@@ -158,6 +158,7 @@ function NetworkLiquidity({ pools }) {
 }
 
 const EXPLORER_URLS = {
+  Ethereum: 'https://etherscan.io/address/',
   Arbitrum: 'https://arbiscan.io/address/',
   Base: 'https://basescan.org/address/',
   Optimism: 'https://optimistic.etherscan.io/address/',
@@ -1454,6 +1455,7 @@ function AuditLogPanel({ isAdmin, mySignals }) {
           </select>
           <select value={network} onChange={e => setNetwork(e.target.value)}>
             <option value="">Todas las redes</option>
+            <option value="Ethereum">Ethereum</option>
             <option value="Arbitrum">Arbitrum</option>
             <option value="Base">Base</option>
             <option value="Optimism">Optimism</option>
@@ -1559,6 +1561,7 @@ function AlertsPanel({ alerts, history, onCreate, onDelete }) {
         {alertType === 'out_of_range' && (
           <select value={alertNetwork} onChange={(e) => setAlertNetwork(e.target.value)}>
             <option value="">Todas las redes</option>
+            <option>Ethereum</option>
             <option>Arbitrum</option>
             <option>Base</option>
             <option>Optimism</option>
@@ -1722,6 +1725,7 @@ function ScanTokenIdModal({ onClose, onAdded }) {
         <label className="config-field" style={{ marginTop: 10 }}>
           <span>Cadena</span>
           <select value={network} onChange={e => { setNetwork(e.target.value); setResult(null); setError(''); }}>
+            <option value="Ethereum">Ethereum</option>
             <option value="Base">Base</option>
             <option value="Arbitrum">Arbitrum</option>
             <option value="Optimism">Optimism</option>

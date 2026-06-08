@@ -4,23 +4,27 @@ import { action } from "../_generated/server";
 import { v } from "convex/values";
 
 const NFT_MANAGER: Record<string, string> = {
+  Ethereum: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
   Arbitrum: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
   Optimism: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
   Base:     "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
 };
 
 const REVERT_VAULT: Record<string, string> = {
+  Ethereum: "0xa2754543f69dC036764bBfad16d2A74F5cD15667",
   Base:     "0x36aeae0e411a1e28372e0d66f02e57744ebe7599",
   Arbitrum: "0x74e6afef5705beb126c6d3bf46f8fad8f3e07825",
 };
 
 const FACTORY: Record<string, string> = {
+  Ethereum: "0x1F98431c8aD98523631AE4a59f267346ea31F984",
   Arbitrum: "0x1F98431c8aD98523631AE4a59f267346ea31F984",
   Optimism: "0x1F98431c8aD98523631AE4a59f267346ea31F984",
   Base:     "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
 };
 
 const RPC: Record<string, string[]> = {
+  Ethereum: ["https://ethereum-rpc.publicnode.com", "https://eth.drpc.org"],
   Arbitrum: ["https://arb1.arbitrum.io/rpc", "https://arbitrum-one-rpc.publicnode.com"],
   Optimism: ["https://mainnet.optimism.io", "https://optimism-rpc.publicnode.com"],
   Base:     ["https://base-rpc.publicnode.com", "https://base.drpc.org", "https://mainnet.base.org"],

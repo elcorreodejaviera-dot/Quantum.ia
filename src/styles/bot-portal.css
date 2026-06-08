@@ -701,7 +701,7 @@ button {
   gap: 4px;
   margin-top: 10px;
   padding-top: 10px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--line);
 }
 
 .borrow-detail-item {
@@ -762,12 +762,13 @@ button {
   height: 10px;
   border-radius: 999px;
   position: relative;
-  overflow: hidden;
+  /* sin overflow:hidden para que el marcador pueda sobresalir */
   /* usa los colores del propio portal */
+  /* breakpoints alineados con los umbrales de borrowTone (50 / 70) */
   background: linear-gradient(to right,
-    var(--red)   0%,  var(--red)   30%,
-    var(--amber) 30%, var(--amber) 62%,
-    var(--green) 62%, var(--green) 100%
+    var(--red)   0%,  var(--red)   50%,
+    var(--amber) 50%, var(--amber) 70%,
+    var(--green) 70%, var(--green) 100%
   );
 }
 
@@ -781,6 +782,22 @@ button {
   bottom: 0;
   background: rgba(0, 0, 0, 0.72);
   border-radius: 0 999px 999px 0;
+  transition: left 0.6s ease;
+}
+
+/* Marcador vertical blanco — punto exacto donde está el préstamo */
+.borrow-track::before {
+  content: '';
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  left: var(--hp, 0%);
+  width: 4px;
+  transform: translateX(-50%);
+  background: #fff;
+  border-radius: 999px;
+  box-shadow: 0 0 5px rgba(0, 0, 0, 0.55);
+  z-index: 2;
   transition: left 0.6s ease;
 }
 

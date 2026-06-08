@@ -48,6 +48,13 @@ export default defineSchema({
     subgraphUpdatedAt: v.optional(v.number()),
     initialLiquidityUsd: v.optional(v.number()),
     initialLiquidityAt: v.optional(v.number()),
+    // Ciclo de vida de la posición LP (detección de cierre on-chain).
+    // closed = la posición se vació/cerró en Uniswap/Revert. Reversible:
+    // si la posición vuelve a recibir liquidez, el cron limpia el flag.
+    closed: v.optional(v.boolean()),
+    closedAt: v.optional(v.number()),           // primer cierre detectado (no se sobrescribe)
+    closureReason: v.optional(v.string()),       // "empty" | "not_found"
+    closureCheckedAt: v.optional(v.number()),    // último chequeo del cron (incluye RPC unavailable)
   }).index("by_user", ["userId"]),
 
   bots: defineTable({
@@ -66,7 +73,13 @@ export default defineSchema({
     triggerPrice: v.optional(v.number()),
     autoLeverage: v.optional(v.boolean()),
     collateral: v.optional(v.string()),
-  }),
+    // Multi-tenancy + vínculo explícito al pool protegido.
+    // Opcionales para no romper bots/seeds existentes (backfill vía migración).
+    userId: v.optional(v.id("users")),
+    poolId: v.optional(v.id("pools")),
+  })
+    .index("by_user", ["userId"])
+    .index("by_pool", ["poolId"]),
 
   wallets: defineTable({
     label: v.string(),

@@ -1,6 +1,8 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
-import { requireAuth, requireAdmin } from "./helpers";
+import type { Id } from "./_generated/dataModel";
+import type { MutationCtx } from "./_generated/server";
+import { requireUser } from "./helpers";
 
 function validateBotNumbers(fields: {
   capitalPerTrade?: number;
@@ -18,11 +20,25 @@ function validateBotNumbers(fields: {
   }
 }
 
+// El pool vinculado debe existir y pertenecer al mismo usuario (o ser admin).
+async function validatePoolOwnership(
+  ctx: MutationCtx,
+  user: { _id: Id<"users">; role: string },
+  poolId: Id<"pools">,
+) {
+  const pool = await ctx.db.get(poolId);
+  if (!pool) throw new Error("El pool vinculado no existe.");
+  if (pool.userId !== user._id && user.role !== "admin") {
+    throw new Error("El pool vinculado no te pertenece.");
+  }
+}
+
 export const listBots = query({
   args: {},
   handler: async (ctx) => {
-    await requireAuth(ctx);
-    return await ctx.db.query("bots").collect();
+    const user = await requireUser(ctx);
+    // Multi-tenancy: cada usuario ve solo sus propios bots.
+    return await ctx.db.query("bots").withIndex("by_user", q => q.eq("userId", user._id)).collect();
   },
 });
 
@@ -43,11 +59,13 @@ export const createBot = mutation({
     triggerPrice: v.optional(v.number()),
     autoLeverage: v.optional(v.boolean()),
     collateral: v.optional(v.string()),
+    poolId: v.optional(v.id("pools")),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx);
+    const user = await requireUser(ctx);
     validateBotNumbers(args);
-    return await ctx.db.insert("bots", args);
+    if (args.poolId !== undefined) await validatePoolOwnership(ctx, user, args.poolId);
+    return await ctx.db.insert("bots", { ...args, userId: user._id });
   },
 });
 
@@ -68,10 +86,17 @@ export const updateBot = mutation({
     triggerPrice: v.optional(v.number()),
     autoLeverage: v.optional(v.boolean()),
     collateral: v.optional(v.string()),
+    poolId: v.optional(v.id("pools")),
   },
   handler: async (ctx, { id, ...fields }) => {
-    await requireAdmin(ctx);
+    const user = await requireUser(ctx);
+    const bot = await ctx.db.get(id);
+    if (!bot) throw new Error("Bot not found");
+    if (bot.userId !== user._id && user.role !== "admin") {
+      throw new Error("Sin permiso para modificar este bot.");
+    }
     validateBotNumbers(fields);
+    if (fields.poolId !== undefined) await validatePoolOwnership(ctx, user, fields.poolId);
     const filtered = Object.fromEntries(
       Object.entries(fields).filter(([, v]) => v !== undefined)
     );
@@ -82,9 +107,12 @@ export const updateBot = mutation({
 export const toggleBot = mutation({
   args: { id: v.id("bots"), active: v.boolean() },
   handler: async (ctx, { id, active }) => {
-    await requireAdmin(ctx);
+    const user = await requireUser(ctx);
     const bot = await ctx.db.get(id);
     if (!bot) throw new Error("Bot not found");
+    if (bot.userId !== user._id && user.role !== "admin") {
+      throw new Error("Sin permiso para modificar este bot.");
+    }
     await ctx.db.patch(id, { active });
   },
 });

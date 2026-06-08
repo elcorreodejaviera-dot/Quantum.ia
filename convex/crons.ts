@@ -15,4 +15,10 @@ crons.interval(
   internal.actions.uniswap.fetchUniswapSubgraphData,
 );
 
+crons.interval(
+  "check pool closures",
+  { minutes: 10 },
+  internal.actions.poolScanner.checkAllPoolClosures,
+);
+
 export default crons;

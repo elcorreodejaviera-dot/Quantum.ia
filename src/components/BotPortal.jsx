@@ -1561,10 +1561,10 @@ function AlertsPanel({ alerts, history, onCreate, onDelete }) {
         {alertType === 'out_of_range' && (
           <select value={alertNetwork} onChange={(e) => setAlertNetwork(e.target.value)}>
             <option value="">Todas las redes</option>
-            <option>Ethereum</option>
-            <option>Arbitrum</option>
-            <option>Base</option>
-            <option>Optimism</option>
+            <option value="Ethereum">Ethereum</option>
+            <option value="Arbitrum">Arbitrum</option>
+            <option value="Base">Base</option>
+            <option value="Optimism">Optimism</option>
           </select>
         )}
         {(alertType === 'apy_below' || alertType === 'price_cross') && (
@@ -1673,7 +1673,10 @@ function ScanTokenIdModal({ onClose, onAdded }) {
             initialLiquidityUsd = pd.liquidityUsd;
             initialLiquidityAt = Date.now();
           }
-        } catch {} // no fatal — el pool se añade sin capital inicial si falla la RPC
+        } catch (e) {
+          // no fatal — el pool se añade sin capital inicial si falla la RPC
+          if (import.meta.env.DEV) console.warn('fetchPositionAction falló al obtener capital inicial:', e);
+        }
       }
       await createPoolMutation({
         pair: result.pair,

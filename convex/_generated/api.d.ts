@@ -14,6 +14,7 @@ import type * as actions_uniswap from "../actions/uniswap.js";
 import type * as alerts from "../alerts.js";
 import type * as bots from "../bots.js";
 import type * as crons from "../crons.js";
+import type * as executionLimits from "../executionLimits.js";
 import type * as executions from "../executions.js";
 import type * as executionsCron from "../executionsCron.js";
 import type * as helpers from "../helpers.js";
@@ -43,6 +44,7 @@ declare const fullApi: ApiFromModules<{
   alerts: typeof alerts;
   bots: typeof bots;
   crons: typeof crons;
+  executionLimits: typeof executionLimits;
   executions: typeof executions;
   executionsCron: typeof executionsCron;
   helpers: typeof helpers;

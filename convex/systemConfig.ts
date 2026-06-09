@@ -1,6 +1,20 @@
 import { internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { requireAuth, requireAdmin } from "./helpers";
+import { LIMIT_DEFAULTS, getLimit } from "./executionLimits";
+
+// Límites efectivos (config o default) para el panel admin — no campos vacíos que diverjan.
+export const getExecutionLimits = query({
+  args: {},
+  handler: async (ctx) => {
+    await requireAdmin(ctx);
+    return {
+      maxNotionalPerOrder: await getLimit(ctx, "maxNotionalPerOrder"),
+      maxNotionalPerUserDaily: await getLimit(ctx, "maxNotionalPerUserDaily"),
+      slBufferPct: await getLimit(ctx, "slBufferPct"),
+    };
+  },
+});
 
 export const logAdminAction = mutation({
   args: { action: v.string(), meta: v.optional(v.any()) },
@@ -92,7 +106,7 @@ export const setMaxNotionalPerOrder = mutation({
   handler: async (ctx, { value }) => {
     await requireAdmin(ctx);
     if (!Number.isFinite(value) || value <= 0) throw new Error("maxNotionalPerOrder debe ser > 0");
-    const daily = await readNum(ctx, "maxNotionalPerUserDaily", 2000);
+    const daily = await readNum(ctx, "maxNotionalPerUserDaily", LIMIT_DEFAULTS.maxNotionalPerUserDaily);
     if (value > daily) throw new Error("maxNotionalPerOrder no puede superar maxNotionalPerUserDaily");
     await upsertConfig(ctx, "maxNotionalPerOrder", value);
   },
@@ -103,7 +117,7 @@ export const setMaxNotionalPerUserDaily = mutation({
   handler: async (ctx, { value }) => {
     await requireAdmin(ctx);
     if (!Number.isFinite(value) || value <= 0) throw new Error("maxNotionalPerUserDaily debe ser > 0");
-    const perOrder = await readNum(ctx, "maxNotionalPerOrder", 500);
+    const perOrder = await readNum(ctx, "maxNotionalPerOrder", LIMIT_DEFAULTS.maxNotionalPerOrder);
     if (value < perOrder) throw new Error("maxNotionalPerUserDaily no puede ser menor que maxNotionalPerOrder");
     await upsertConfig(ctx, "maxNotionalPerUserDaily", value);
   },

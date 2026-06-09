@@ -256,5 +256,6 @@ export default defineSchema({
     .index("by_user_idempotency", ["userId", "idempotencyKey"])
     .index("by_user_created", ["userId", "createdAt"])
     .index("by_status_created", ["status", "createdAt"])
-    .index("by_account", ["hlAccountId"]),   // bloquear revocación con ejecuciones abiertas
+    .index("by_account", ["hlAccountId"])    // bloquear revocación con ejecuciones abiertas
+    .index("by_created", ["createdAt"]),     // observabilidad admin (listRecentExecutions)
 });

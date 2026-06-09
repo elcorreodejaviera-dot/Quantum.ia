@@ -2,7 +2,7 @@ import { internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
-import { requireUser, requireBotManager, deriveBaseAsset } from "./helpers";
+import { requireUser, requireBotManager, deriveBaseAsset, hasPermission } from "./helpers";
 
 function validateBotNumbers(fields: {
   capitalPerTrade?: number;
@@ -287,9 +287,11 @@ export const getOrCreatePoolBot = mutation({
       .withIndex("by_user_pool_kind", (q) =>
         q.eq("userId", user._id).eq("poolId", poolId).eq("kind", kind))
       .first();
+    // Gestionar el bot exige canManageBots (requireBotManager, arriba). Pasarlo a modo REAL exige
+    // ADEMÁS canTradeLive (autorización de trading real, separada). Admin tiene bypass en ambos.
     const resultMode = simulationMode ?? existingBot?.simulationMode ?? true;
-    if (resultMode === false && user.role !== "admin") {
-      throw new Error("Solo un admin puede pasar un bot a modo real.");
+    if (resultMode === false && !(await hasPermission(ctx, user, "canTradeLive"))) {
+      throw new Error("Pasar un bot a modo real requiere el permiso canTradeLive.");
     }
 
     // Exclusividad de cuenta: 1 cuenta = 1 bot (ownership + ningún otro bot la usa).

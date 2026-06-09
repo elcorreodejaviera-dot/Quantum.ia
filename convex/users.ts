@@ -1,6 +1,7 @@
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
-import { requireAdmin, requireAuth, requireUser } from "./helpers";
+import { paginationOptsValidator } from "convex/server";
+import { requireAdmin, requireAuth, requireUser, requireTradeLive } from "./helpers";
 
 export const getCurrentAdminInternal = internalQuery({
   args: {},
@@ -132,5 +133,73 @@ export const getUserPermissions = query({
     return perms.filter(
       (p) => p.granted && (p.expiresAt === undefined || p.expiresAt > now)
     );
+  },
+});
+
+// --- Trading real (canTradeLive) — Fase 3a.1 ---
+
+// Fail-fast para actions: valida canTradeLive del usuario autenticado (auth propagada al runQuery).
+export const assertTradeLiveInternal = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    return await requireTradeLive(ctx);
+  },
+});
+
+// Concede canTradeLive consolidando en UNA fila canónica granted:true (resto a false).
+export const grantTradeLive = mutation({
+  args: { userId: v.id("users") },
+  handler: async (ctx, { userId }) => {
+    const admin = await requireAdmin(ctx);
+    const rows = await ctx.db
+      .query("user_permissions")
+      .withIndex("by_user_permission", (q) =>
+        q.eq("userId", userId).eq("permission", "canTradeLive"))
+      .collect();
+    const now = Date.now();
+    if (rows.length === 0) {
+      await ctx.db.insert("user_permissions", {
+        userId, permission: "canTradeLive", granted: true, grantedAt: now, grantedBy: admin._id,
+      });
+    } else {
+      await ctx.db.patch(rows[0]._id, { granted: true, grantedAt: now, grantedBy: admin._id, expiresAt: undefined });
+      for (const r of rows.slice(1)) if (r.granted) await ctx.db.patch(r._id, { granted: false });
+    }
+  },
+});
+
+// Revoca canTradeLive en TODAS las filas del usuario (el esquema permite duplicados).
+export const revokeTradeLive = mutation({
+  args: { userId: v.id("users") },
+  handler: async (ctx, { userId }) => {
+    await requireAdmin(ctx);
+    const rows = await ctx.db
+      .query("user_permissions")
+      .withIndex("by_user_permission", (q) =>
+        q.eq("userId", userId).eq("permission", "canTradeLive"))
+      .collect();
+    for (const r of rows) if (r.granted) await ctx.db.patch(r._id, { granted: false });
+  },
+});
+
+// Lista usuarios + estado canTradeLive para el panel admin (paginado).
+export const listUsersWithTradeLive = query({
+  args: { paginationOpts: paginationOptsValidator },
+  handler: async (ctx, { paginationOpts }) => {
+    await requireAdmin(ctx);
+    const result = await ctx.db.query("users").paginate(paginationOpts);
+    const now = Date.now();
+    const page = [];
+    for (const u of result.page) {
+      const rows = await ctx.db
+        .query("user_permissions")
+        .withIndex("by_user_permission", (q) =>
+          q.eq("userId", u._id).eq("permission", "canTradeLive"))
+        .collect();
+      const canTradeLive = u.role === "admin"
+        || rows.some((r) => r.granted && (r.expiresAt === undefined || r.expiresAt > now));
+      page.push({ userId: u._id, email: u.email ?? null, name: u.name ?? null, role: u.role, canTradeLive });
+    }
+    return { ...result, page };
   },
 });

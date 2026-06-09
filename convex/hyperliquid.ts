@@ -8,8 +8,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { createHash } from "crypto";
 import { decryptPrivateKey } from "./hlCredentialActions";
 import { hlNetwork, hlIsTestnet, assertExpectedNetwork } from "./hlNetwork";
-
-const SL_BUFFER_PCT_DEFAULT = 0.3;
+import { LIMIT_DEFAULTS } from "./executionLimits";
 // Timeout del envío de órdenes a HL (entrada y SL). Menor que RECONCILE_LEASE_MS (60s) para el SL.
 const HL_ORDER_TIMEOUT_MS = 30_000;
 // Tras enviar (submittedAt), margen amplio antes de cerrar un unknownOid como failed: garantiza
@@ -133,8 +132,8 @@ async function placeStopLoss(
 
 async function slBufferPct(ctx: any): Promise<number> {
   const row = await ctx.runQuery(internal.systemConfig.getConfigInternal, { key: "slBufferPct" });
-  const v = typeof row?.value === "number" ? row.value : SL_BUFFER_PCT_DEFAULT;
-  return Number.isFinite(v) && v >= 0 ? v : SL_BUFFER_PCT_DEFAULT;
+  const v = typeof row?.value === "number" ? row.value : LIMIT_DEFAULTS.slBufferPct;
+  return Number.isFinite(v) && v >= 0 ? v : LIMIT_DEFAULTS.slBufferPct;
 }
 
 function makeClients(privKey: `0x${string}`, isTestnet: boolean) {
@@ -165,7 +164,9 @@ export const executePerpMarketOrder = action({
       ctx.runQuery(internal.systemConfig.getConfigInternal, { key: "simulationMode" }),
     ]);
 
-    if (user.role !== "admin") throw new Error("Admin role required for live execution");
+    // Autorización de trading real (no admin-only): permiso canTradeLive (admin tiene bypass).
+    // Fail-fast aquí; revalidado de forma autoritativa en reserveExecution y markSubmitting.
+    await ctx.runQuery(internal.users.assertTradeLiveInternal, {});
     if (!args.confirmLive) throw new Error("Live execution requires explicit confirmation");
     if (tradingConfig?.value !== true) throw new Error("Live trading is disabled");
     if (simConfig?.value !== false) throw new Error("Simulation mode is active — live execution blocked");
@@ -231,10 +232,30 @@ export const executePerpMarketOrder = action({
       return { ok: true, deduped: true, requestId };
     }
 
+    // Gate (CAS pending→submitting + revalida) ANTES de cualquier efecto HL — incluido
+    // updateLeverage, que es una escritura real en HL.
+    const sub = await ctx.runMutation(internal.executions.markSubmitting, { requestId });
+    if (!sub.ok) {
+      // "blocked": switch/permiso/estado del bot cambió → cerrar failed (sin posición).
+      // "state"/"not_found": otro proceso (cron) ya avanzó → NO tocar.
+      if (sub.reason === "blocked") {
+        await ctx.runMutation(internal.executions.settleExecution, {
+          requestId, status: "failed", error: "blocked at submit (switch/permiso/estado bot)",
+        });
+        return { ok: false, status: "failed", requestId };
+      }
+      return { ok: false, status: "aborted", requestId, reason: sub.reason };
+    }
+
     await exchange.updateLeverage({ asset: assetId, isCross: false, leverage: Math.round(effectiveLeverage) });
 
-    // Lease + envío de la entrada límit IOC al precio server-side (sin slippage).
-    await ctx.runMutation(internal.executions.markSubmitting, { requestId });
+    // Gate ATÓMICO justo antes del envío (updateLeverage pudo tardar >LEASE_MS y el cron tomar el
+    // control). blocked → ya cerrado failed por CAS; state/expired/claimed → no tocar (otro lo maneja).
+    const gate = await ctx.runMutation(internal.executions.gateBeforeOrder, { requestId });
+    if (!gate.ok) {
+      return { ok: false, status: gate.reason === "blocked" ? "failed" : "aborted", requestId, reason: gate.reason };
+    }
+
     let entryResp: unknown;
     const ac = abortAfter(HL_ORDER_TIMEOUT_MS);
     try {

@@ -1,4 +1,5 @@
 import { MutationCtx, QueryCtx } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 
 // Normaliza símbolos wrapped → activo base de HL. Espejo (no-node) del map de
 // convex/actions/poolScanner.ts y BotPortal.jsx. Deriva el baseAsset de un par "WETH/USDC".
@@ -30,18 +31,37 @@ export async function requireAdmin(ctx: QueryCtx | MutationCtx) {
   return user;
 }
 
-// Permite gestionar bots a admins o a usuarios con el permiso canManageBots vigente.
-export async function requireBotManager(ctx: QueryCtx | MutationCtx) {
-  const user = await requireUser(ctx);
-  if (user.role === "admin") return user;
+// ¿El usuario es admin o tiene un permiso vigente? Evalúa TODAS las filas (el esquema permite
+// duplicados): basta una granted y no expirada. Admin tiene bypass implícito.
+export async function hasPermission(
+  ctx: QueryCtx | MutationCtx,
+  user: { _id: Id<"users">; role: string },
+  permission: string,
+): Promise<boolean> {
+  if (user.role === "admin") return true;
   const now = Date.now();
-  // Evaluar TODAS las filas: puede haber una revocada y otra vigente (no asumir unicidad).
   const perms = await ctx.db
     .query("user_permissions")
     .withIndex("by_user_permission", (q) =>
-      q.eq("userId", user._id).eq("permission", "canManageBots"))
+      q.eq("userId", user._id).eq("permission", permission))
     .collect();
-  const ok = perms.some((p) => p.granted && (p.expiresAt === undefined || p.expiresAt > now));
-  if (!ok) throw new Error("Forbidden: requiere permiso canManageBots");
+  return perms.some((p) => p.granted && (p.expiresAt === undefined || p.expiresAt > now));
+}
+
+// Permite gestionar bots a admins o a usuarios con el permiso canManageBots vigente.
+export async function requireBotManager(ctx: QueryCtx | MutationCtx) {
+  const user = await requireUser(ctx);
+  if (!(await hasPermission(ctx, user, "canManageBots"))) {
+    throw new Error("Forbidden: requiere permiso canManageBots");
+  }
+  return user;
+}
+
+// Autorización de trading real (separada de canManageBots). Admin tiene bypass.
+export async function requireTradeLive(ctx: QueryCtx | MutationCtx) {
+  const user = await requireUser(ctx);
+  if (!(await hasPermission(ctx, user, "canTradeLive"))) {
+    throw new Error("Forbidden: requiere permiso canTradeLive");
+  }
   return user;
 }

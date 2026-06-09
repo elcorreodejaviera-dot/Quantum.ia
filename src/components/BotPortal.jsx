@@ -1,6 +1,6 @@
 import React from 'react'
 import { useUser, useClerk } from '@clerk/clerk-react'
-import { useConvexAuth, useQuery, useMutation, useAction } from 'convex/react'
+import { useConvexAuth, useQuery, useMutation, useAction, usePaginatedQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState, useWalletBalances, useHLAccountBalance, useMetaMaskSigner, executeHLTestnetOrder } from '../hooks/useHyperliquid'
 
@@ -178,7 +178,7 @@ function shortenAddress(addr) {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
-function PoolCard({ pool, isAdmin }) {
+function PoolCard({ pool, canManage, canTradeLive }) {
   const deletePoolMutation = useMutation(api.pools.deletePool);
   const allBots = useQuery(api.bots.listBots);
   const savePoolBot = useMutation(api.bots.getOrCreatePoolBot);
@@ -406,18 +406,18 @@ function PoolCard({ pool, isAdmin }) {
         </div>
       </details>
 
-      {isAdmin && (
+      {canManage && (
         <div className="pool-bot-actions" style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-          <BotActionButton label="Proteger" bot={ilBot} busy={botBusy}
+          <BotActionButton label="Proteger" bot={ilBot} busy={botBusy} canTradeLive={canTradeLive}
             onConfig={() => setBotModal('il')} onToggle={() => togglePoolBot(ilBot)} onTest={() => setTestBot(ilBot)} />
-          <BotActionButton label="Trading" bot={tradingBot} busy={botBusy}
+          <BotActionButton label="Trading" bot={tradingBot} busy={botBusy} canTradeLive={canTradeLive}
             onConfig={() => setBotModal('trading')} onToggle={() => togglePoolBot(tradingBot)} onTest={() => setTestBot(tradingBot)} />
         </div>
       )}
 
     </article>
-    {botModal === 'il' && <ProtectionBotModal pool={pool} bot={ilBot} onClose={() => setBotModal(null)} />}
-    {botModal === 'trading' && <TradingBotModal pool={pool} bot={tradingBot} onClose={() => setBotModal(null)} />}
+    {botModal === 'il' && <ProtectionBotModal pool={pool} bot={ilBot} canTradeLive={canTradeLive} onClose={() => setBotModal(null)} />}
+    {botModal === 'trading' && <TradingBotModal pool={pool} bot={tradingBot} canTradeLive={canTradeLive} onClose={() => setBotModal(null)} />}
     {testBot && <TestExecModal bot={testBot} onClose={() => setTestBot(null)} />}
     </>
   );
@@ -1919,7 +1919,7 @@ function serializePoolBotConfig(bot, overrides = {}) {
 }
 
 // Botón de acción de un pool-bot en la PoolCard: estado + configurar/reconfigurar + pausar/activar.
-function BotActionButton({ label, bot, busy, onConfig, onToggle, onTest }) {
+function BotActionButton({ label, bot, busy, canTradeLive, onConfig, onToggle, onTest }) {
   return (
     <div className="pool-bot-action" style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -1939,7 +1939,7 @@ function BotActionButton({ label, bot, busy, onConfig, onToggle, onTest }) {
             {bot.active ? 'Pausar' : 'Activar'}
           </button>
         )}
-        {bot && bot.active && !bot.simulationMode && (
+        {bot && bot.active && !bot.simulationMode && canTradeLive && (
           <button className="mini-btn" onClick={onTest} style={{ color: 'var(--red)', borderColor: 'var(--red)' }}>
             Probar
           </button>
@@ -1973,6 +1973,24 @@ function HLAccountSelect({ accounts, value, onChange }) {
   );
 }
 
+// Toggle de modo real (solo visible con canTradeLive). Banner de beta cuando está activo.
+function RealModeToggle({ realMode, setRealMode, canTradeLive }) {
+  if (!canTradeLive) return null;
+  return (
+    <div className="be-block" style={{ marginTop: 8 }}>
+      <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center' }}>
+        <input type="checkbox" checked={realMode} onChange={(e) => setRealMode(e.target.checked)} />
+        <strong>Modo real (ejecución HL con tu capital)</strong>
+      </label>
+      {realMode && (
+        <p style={{ fontSize: 11, color: 'var(--red)', margin: '4px 0 0' }}>
+          BETA — órdenes reales con tu capital. El stop-loss (stop-limit) puede no llenarse en una caída brusca.
+        </p>
+      )}
+    </div>
+  );
+}
+
 // Filas de take-profits (gainPct / closePct). Cantidad fija según el tipo de bot.
 function TakeProfitRows({ tps, setTps }) {
   const update = (i, field, val) =>
@@ -1998,9 +2016,11 @@ function TakeProfitRows({ tps, setTps }) {
 }
 
 // Modal "Configurar Protección" (bot IL — cobertura short).
-function ProtectionBotModal({ pool, bot, onClose, onSaved }) {
+function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
   const save = useMutation(api.bots.getOrCreatePoolBot);
   const accounts = useQuery(api.hlCredentials.list) ?? [];
+  // Modo real (ejecución HL con capital real): requiere canTradeLive. Por defecto simulación.
+  const [realMode, setRealMode] = React.useState(bot ? !bot.simulationMode : false);
   // Precarga desde el bot existente (reconfigurar) o defaults (crear).
   const [hlAccountId, setHlAccountId] = React.useState(bot?.hlAccountId ?? null);
   const [leverage, setLeverage] = React.useState(bot?.leverage ?? 20);
@@ -2036,6 +2056,7 @@ function ProtectionBotModal({ pool, bot, onClose, onSaved }) {
         tps: tps.filter((t) => t.gainPct > 0 && t.closePct > 0),
         allowReentryFromAbove: !noReentryFromAbove,
         active: bot ? bot.active : true,   // editar conserva el estado; crear activa
+        simulationMode: !(realMode && canTradeLive),   // real solo con permiso
       }));
       onSaved?.(); onClose();
     } catch (e) {
@@ -2124,6 +2145,8 @@ function ProtectionBotModal({ pool, bot, onClose, onSaved }) {
           No proteger cuando reentra al rango desde arriba
         </label>
 
+        <RealModeToggle realMode={realMode} setRealMode={setRealMode} canTradeLive={canTradeLive} />
+
         {error && <p style={{ color: 'var(--red)', fontSize: 12 }}>{error}</p>}
 
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
@@ -2138,9 +2161,10 @@ function ProtectionBotModal({ pool, bot, onClose, onSaved }) {
 }
 
 // Modal "Configurar Trading" (bot breakout long/short).
-function TradingBotModal({ pool, bot, onClose, onSaved }) {
+function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
   const save = useMutation(api.bots.getOrCreatePoolBot);
   const accounts = useQuery(api.hlCredentials.list) ?? [];
+  const [realMode, setRealMode] = React.useState(bot ? !bot.simulationMode : false);
   // Precarga desde el bot existente (reconfigurar) o defaults (crear).
   const [hlAccountId, setHlAccountId] = React.useState(bot?.hlAccountId ?? null);
   const [direction, setDirection] = React.useState(bot?.direction ?? 'long_short');
@@ -2175,6 +2199,7 @@ function TradingBotModal({ pool, bot, onClose, onSaved }) {
         trailingStop, trailingPct,   // estado completo: se persiste siempre (latente si trailing off)
         tps: tps.filter((t) => t.gainPct > 0 && t.closePct > 0),
         autoRearm, active: bot ? bot.active : true,   // editar conserva el estado; crear activa
+        simulationMode: !(realMode && canTradeLive),   // real solo con permiso
       }));
       onSaved?.(); onClose();
     } catch (e) {
@@ -2275,6 +2300,8 @@ function TradingBotModal({ pool, bot, onClose, onSaved }) {
           <input type="checkbox" checked={autoRearm} onChange={(e) => setAutoRearm(e.target.checked)} />
           Auto-rearm — tras SL, el bot vuelve a buscar breakouts automáticamente
         </label>
+
+        <RealModeToggle realMode={realMode} setRealMode={setRealMode} canTradeLive={canTradeLive} />
 
         {error && <p style={{ color: 'var(--red)', fontSize: 12 }}>{error}</p>}
 
@@ -2904,6 +2931,106 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulation
   );
 }
 
+// Límites de ejecución (valores efectivos) — admin.
+function ExecutionLimitsPanel() {
+  const limits = useQuery(api.systemConfig.getExecutionLimits, {});
+  const setPerOrder = useMutation(api.systemConfig.setMaxNotionalPerOrder);
+  const setDaily = useMutation(api.systemConfig.setMaxNotionalPerUserDaily);
+  const setBuffer = useMutation(api.systemConfig.setSlBufferPct);
+  const [perOrder, setPerOrderV] = React.useState('');
+  const [daily, setDailyV] = React.useState('');
+  const [buffer, setBufferV] = React.useState('');
+  const [msg, setMsg] = React.useState('');
+  React.useEffect(() => {
+    if (limits) {
+      setPerOrderV(String(limits.maxNotionalPerOrder));
+      setDailyV(String(limits.maxNotionalPerUserDaily));
+      setBufferV(String(limits.slBufferPct));
+    }
+  }, [limits]);
+  async function apply(fn, val) {
+    setMsg('');
+    try { await fn({ value: Number(val) }); setMsg('Guardado.'); }
+    catch (e) { setMsg(e?.message ?? 'Error'); }
+  }
+  const Row = ({ label, val, set, fn, step, allowZero }) => {
+    const n = Number(val);
+    const valid = Number.isFinite(n) && (allowZero ? n >= 0 : n > 0);
+    return (
+      <label className="config-field" style={{ marginTop: 6 }}><span>{label}</span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <input type="number" step={step ?? '1'} value={val} onChange={(e) => set(e.target.value)} />
+          <button className="mini-btn" onClick={() => apply(fn, val)} disabled={!valid}>Set</button>
+        </div></label>
+    );
+  };
+  return (
+    <div className="be-block" style={{ marginTop: 12 }}>
+      <div className="be-head"><span>Límites de ejecución (efectivos)</span></div>
+      <Row label="Máx nocional por orden (USDC)" val={perOrder} set={setPerOrderV} fn={setPerOrder} />
+      <Row label="Máx nocional diario / usuario (USDC)" val={daily} set={setDailyV} fn={setDaily} />
+      <Row label="Buffer SL (%)" val={buffer} set={setBufferV} fn={setBuffer} step="0.1" allowZero />
+
+      {msg && <span style={{ fontSize: 11 }}>{msg}</span>}
+    </div>
+  );
+}
+
+// Concesión/revocación de canTradeLive — admin (paginado).
+function BetaPermissionsPanel() {
+  const { results, status, loadMore } = usePaginatedQuery(
+    api.users.listUsersWithTradeLive, {}, { initialNumItems: 50 });
+  const grant = useMutation(api.users.grantTradeLive);
+  const revoke = useMutation(api.users.revokeTradeLive);
+  const [msg, setMsg] = React.useState('');
+  async function toggle(u) {
+    setMsg('');
+    try { u.canTradeLive ? await revoke({ userId: u.userId }) : await grant({ userId: u.userId }); }
+    catch (e) { setMsg(e?.message ?? 'Error'); }
+  }
+  return (
+    <div className="be-block" style={{ marginTop: 12 }}>
+      <div className="be-head"><span>Trading real (canTradeLive)</span></div>
+      {results.map((u) => (
+        <div key={u.userId} className="wallet-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '4px 0' }}>
+          <span style={{ fontSize: 12 }}>{u.email ?? u.name ?? u.userId.slice(0, 8)}{u.role === 'admin' ? ' (admin)' : ''}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className={`pill ${u.canTradeLive ? 'green' : 'faint'}`} style={{ fontSize: 10 }}>{u.canTradeLive ? 'SÍ' : 'NO'}</span>
+            {u.role !== 'admin' && <button className="mini-btn" onClick={() => toggle(u)}>{u.canTradeLive ? 'Revocar' : 'Conceder'}</button>}
+          </div>
+        </div>
+      ))}
+      {status === 'CanLoadMore' && <button className="mini-btn" style={{ marginTop: 6 }} onClick={() => loadMore(50)}>Cargar más</button>}
+      {msg && <span style={{ fontSize: 11, color: 'var(--red)' }}>{msg}</span>}
+    </div>
+  );
+}
+
+// Observabilidad de ejecuciones reales (status/error en vivo) — admin. El "dónde falla".
+function ExecutionsObservabilityPanel() {
+  const rows = useQuery(api.executions.listRecentExecutions, { limit: 50 });
+  const color = (s) => (s === 'protected' || s === 'closed') ? 'green'
+    : s === 'failed' ? 'faint' : (s === 'sl_failed' || s === 'unknown') ? 'red' : 'amber';
+  return (
+    <div className="be-block" style={{ marginTop: 12 }}>
+      <div className="be-head"><span>Ejecuciones recientes (diagnóstico)</span></div>
+      {(rows ?? []).length === 0 && <span className="network" style={{ fontSize: 11 }}>Sin ejecuciones.</span>}
+      {(rows ?? []).map((r) => (
+        <div key={r.requestId} style={{ fontSize: 11, padding: '4px 0', borderBottom: '1px solid var(--border,#222)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+            <span><span className={`pill ${color(r.status)}`} style={{ fontSize: 10 }}>{r.status}</span> {r.asset} {r.side} ${typeof r.notional === 'number' ? r.notional.toFixed(2) : r.notional}</span>
+            <span className="network">{r.email ?? String(r.userId).slice(0, 8)} · {r.network}</span>
+          </div>
+          {r.error && <div style={{ color: 'var(--red)' }}>{r.error}</div>}
+          <div className="network">
+            {r.botName ?? ''} · {r.account ?? (r.accountAddress ? `${r.accountAddress.slice(0, 6)}…${r.accountAddress.slice(-4)}` : String(r.hlAccountId).slice(0, 8))} · {new Date(r.updatedAt).toLocaleTimeString('es')}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function AdminPanel({ simulationMode, tradingEnabled, onSetSimulation, onSetTrading, onKillSwitch }) {
   const [killConfirm, setKillConfirm] = React.useState(false);
   const [tradingConfirm, setTradingConfirm] = React.useState(false);
@@ -3024,6 +3151,10 @@ function AdminPanel({ simulationMode, tradingEnabled, onSetSimulation, onSetTrad
           )}
         </div>
       </div>
+
+      <BetaPermissionsPanel />
+      <ExecutionLimitsPanel />
+      <ExecutionsObservabilityPanel />
     </section>
   );
 }
@@ -3051,6 +3182,8 @@ function Dashboard({ user, onLogout, userId }) {
   const userPermissions = useQuery(api.users.getUserPermissions, {});
   // Gestionar bots: admins o usuarios con el permiso canManageBots vigente.
   const canManageBots = isAdmin || (userPermissions ?? []).some((p) => p.permission === 'canManageBots');
+  // Trading real (separado): admins o usuarios con canTradeLive vigente.
+  const canTradeLive = isAdmin || (userPermissions ?? []).some((p) => p.permission === 'canTradeLive');
   const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
   const signals = useQuery(api.tradesHistory.listSignals, {});
   const signalCooldownRef = React.useRef({});
@@ -3426,10 +3559,10 @@ function Dashboard({ user, onLogout, userId }) {
                 </button>
               </div>
               <div className="pool-grid">
-                {filteredPools.map((pool) => <PoolCard key={pool.id} pool={pool} isAdmin={isAdmin} />)}
+                {filteredPools.map((pool) => <PoolCard key={pool.id} pool={pool} canManage={canManageBots} canTradeLive={canTradeLive} />)}
               </div>
             </section>
-            {isAdmin && <HLAccountsPanel />}
+            {canTradeLive && <HLAccountsPanel />}
             <SpotPositions
               prices={prices}
               connected={connected}

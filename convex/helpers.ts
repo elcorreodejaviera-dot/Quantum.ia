@@ -1,5 +1,13 @@
 import { MutationCtx, QueryCtx } from "./_generated/server";
 
+// Normaliza símbolos wrapped → activo base de HL. Espejo (no-node) del map de
+// convex/actions/poolScanner.ts y BotPortal.jsx. Deriva el baseAsset de un par "WETH/USDC".
+const NORMALIZE_ASSET: Record<string, string> = { WETH: "ETH", WBTC: "BTC" };
+export function deriveBaseAsset(pair: string): string {
+  const sym = (pair.split("/")[0] ?? "").trim().toUpperCase();
+  return NORMALIZE_ASSET[sym] ?? sym;
+}
+
 export async function requireAuth(ctx: QueryCtx | MutationCtx) {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) throw new Error("Not authenticated");

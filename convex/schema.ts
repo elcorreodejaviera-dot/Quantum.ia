@@ -97,6 +97,14 @@ export default defineSchema({
     allowReentryFromAbove: v.optional(v.boolean()),// IL: proteger también al reentrar por arriba
     autoRearm: v.optional(v.boolean()),            // reabrir tras SL automáticamente
     tps: v.optional(v.array(v.object({ gainPct: v.number(), closePct: v.number() }))),
+    // Órdenes trigger/límit colocadas en HL (Fase 3). oids para modificar/cancelar.
+    // Opcional/vacío hasta que la colocación real exista (bloqueado por JAV-37).
+    liveOrders: v.optional(v.object({
+      entryOid: v.optional(v.string()),
+      slOid: v.optional(v.string()),
+      tpOids: v.optional(v.array(v.string())),
+      placedAt: v.optional(v.number()),
+    })),
   })
     .index("by_user", ["userId"])
     .index("by_pool", ["poolId"])

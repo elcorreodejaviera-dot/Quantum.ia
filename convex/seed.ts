@@ -40,7 +40,7 @@ export const seedPoolsInternal = internalMutation({
 export const seedInitialData = mutation({
   args: {},
   handler: async (ctx) => {
-    await requireAdmin(ctx);
+    const admin = await requireAdmin(ctx);
 
     const existingPools = await ctx.db.query("pools").first();
     if (!existingPools) {
@@ -49,7 +49,8 @@ export const seedInitialData = mutation({
 
     const existingBots = await ctx.db.query("bots").first();
     if (!existingBots) {
-      for (const bot of SEED_BOTS) await ctx.db.insert("bots", bot);
+      // userId del admin que siembra (consistente con la migración backfillBotsUserId).
+      for (const bot of SEED_BOTS) await ctx.db.insert("bots", { ...bot, userId: admin._id });
     }
 
     const existingWallets = await ctx.db.query("wallets").first();

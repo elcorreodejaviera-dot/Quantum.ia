@@ -93,7 +93,7 @@ export const createPool = mutation({
         .withIndex("by_user", q => q.eq("userId", user._id))
         .filter(q => q.eq(q.field("tokenId"), args.tokenId))
         .first();
-      if (existing) throw new Error("Este Token ID ya está siendo monitoreado.");
+      if (existing) throw new Error("Este Token ID ya está siendo monitoreado. Si cerraste la posición, elimina primero el pool anterior para volver a registrarlo.");
     }
     return await ctx.db.insert("pools", {
       userId: user._id as any,
@@ -127,7 +127,67 @@ export const deletePool = mutation({
     const pool = await ctx.db.get(id);
     if (!pool) throw new Error("Pool no encontrado.");
     if (pool.userId !== user._id && user.role !== "admin") throw new Error("Sin permiso para eliminar este pool.");
+    // Desvincular y pausar atómicamente los bots que protegían este pool, para
+    // no dejar poolId colgante (Convex no aplica claves foráneas).
+    const linkedBots = await ctx.db.query("bots").withIndex("by_pool", q => q.eq("poolId", id)).collect();
+    for (const bot of linkedBots) {
+      await ctx.db.patch(bot._id, { active: false, poolId: undefined });
+    }
     await ctx.db.delete(id);
+  },
+});
+
+// Detección de cierre — mutaciones internas usadas por el cron checkAllPoolClosures.
+
+// Marca el pool como cerrado y pausa atómicamente los bots vinculados.
+// Idempotente: preserva el primer closedAt; closureCheckedAt siempre se refresca.
+export const markPoolClosedAndPauseBots = internalMutation({
+  args: { id: v.id("pools"), reason: v.string() },
+  handler: async (ctx, { id, reason }) => {
+    const pool = await ctx.db.get(id);
+    if (!pool) return;
+    const now = Date.now();
+    await ctx.db.patch(id, {
+      closed: true,
+      closureReason: reason,
+      closureCheckedAt: now,
+      ...(pool.closedAt == null ? { closedAt: now } : {}),
+    });
+    const linkedBots = await ctx.db.query("bots").withIndex("by_pool", q => q.eq("poolId", id)).collect();
+    for (const bot of linkedBots) {
+      if (bot.active) await ctx.db.patch(bot._id, { active: false });
+    }
+  },
+});
+
+// La posición volvió a estar activa: limpia el estado de cierre si lo tenía.
+export const reopenPoolIfClosed = internalMutation({
+  args: { id: v.id("pools") },
+  handler: async (ctx, { id }) => {
+    const pool = await ctx.db.get(id);
+    if (!pool) return;
+    const now = Date.now();
+    if (pool.closed) {
+      // No reactivamos bots automáticamente — el usuario decide reanudar la protección.
+      await ctx.db.patch(id, {
+        closed: false,
+        closureReason: undefined,
+        closedAt: undefined,
+        closureCheckedAt: now,
+      });
+    } else {
+      await ctx.db.patch(id, { closureCheckedAt: now });
+    }
+  },
+});
+
+// RPC no disponible: solo registra que se intentó el chequeo, sin concluir cierre.
+export const touchPoolChecked = internalMutation({
+  args: { id: v.id("pools") },
+  handler: async (ctx, { id }) => {
+    const pool = await ctx.db.get(id);
+    if (!pool) return;
+    await ctx.db.patch(id, { closureCheckedAt: Date.now() });
   },
 });
 

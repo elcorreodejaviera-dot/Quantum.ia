@@ -18,6 +18,7 @@ import type * as helpers from "../helpers.js";
 import type * as hlCredentialActions from "../hlCredentialActions.js";
 import type * as hlCredentials from "../hlCredentials.js";
 import type * as hyperliquid from "../hyperliquid.js";
+import type * as migrations from "../migrations.js";
 import type * as pools from "../pools.js";
 import type * as seed from "../seed.js";
 import type * as spot_positions from "../spot_positions.js";
@@ -43,6 +44,7 @@ declare const fullApi: ApiFromModules<{
   hlCredentialActions: typeof hlCredentialActions;
   hlCredentials: typeof hlCredentials;
   hyperliquid: typeof hyperliquid;
+  migrations: typeof migrations;
   pools: typeof pools;
   seed: typeof seed;
   spot_positions: typeof spot_positions;

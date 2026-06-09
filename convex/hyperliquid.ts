@@ -198,6 +198,9 @@ export const executePerpMarketOrder = action({
     if (!Number.isFinite(effectiveLeverage) || effectiveLeverage < 1 || effectiveLeverage > 25) {
       throw new Error("leverage must be a finite number between 1 and 25");
     }
+    // HL solo acepta leverage ENTERO. El margen debe calcularse con el MISMO valor aplicado,
+    // si no la reserva quedaría por debajo de lo real (Codex: leverage 1.4 → HL 1x, margen /1.4).
+    const appliedLeverage = Math.round(effectiveLeverage);
 
     const credential = await ctx.runQuery(internal.hlCredentials.getAccountByIdInternal, { id: bot.hlAccountId });
     if (!credential) throw new Error("Hyperliquid account not found");
@@ -214,18 +217,54 @@ export const executePerpMarketOrder = action({
 
     const entryCloid = cloid(args.idempotencyKey);
     const slCloid = cloid(args.idempotencyKey, ":sl:0");
+    const tradingAccount = credential.tradingAccountAddress as `0x${string}`;
 
-    // Reserva atómica (idempotency + nocional) ANTES de tocar HL.
+    // (a) Dedupe-check temprano (Codex): un reintento de una solicitud existente se reconcilia SIN
+    // re-evaluar modo/margen (que pudieron cambiar), evitando bloquear su recuperación.
+    const existing = await ctx.runQuery(internal.executions.findByIdempotency, {
+      userId: user._id, idempotencyKey: args.idempotencyKey,
+    });
+    if (existing) {
+      // Misma validación que reserveExecution: una clave reutilizada con otros parámetros es
+      // un conflicto, no un éxito (Codex). Solo se reconcilia si los parámetros coinciden.
+      const same = existing.botId === bot._id && existing.side === args.side
+        && existing.network === hlNetwork() && existing.requestedAmount === args.tradeAmount;
+      if (!same) throw new Error("Conflicto de idempotencia: la clave ya existe con otros parámetros.");
+      if (!["closed", "failed"].includes(existing.status)) {
+        await ctx.runAction(internal.hyperliquid.reconcileExecution, { requestId: existing._id });
+      }
+      return { ok: true, deduped: true, requestId: existing._id };
+    }
+
+    // (b) Gates solo para reserva NUEVA. Gate 1: la cuenta debe estar en modo unified.
+    const abstraction = await info.userAbstraction({ user: tradingAccount });
+    if (abstraction !== "unifiedAccount") {
+      throw new Error("La cuenta HL no está en modo unified; operación bloqueada por seguridad.");
+    }
+    // Colateral conservador SIN doble conteo (Codex): solo USDC spot LIBRE (total − hold, ≥0).
+    // El margen ya comprometido por otras ejecuciones de la cuenta lo descuenta reserveExecution
+    // de forma ATÓMICA (anti-carrera). HL sigue siendo la autoridad final del margen.
+    const spotState = await info.spotClearinghouseState({ user: tradingAccount });
+    const availableCollateral = (spotState.balances ?? [])
+      .filter((b) => b.coin === "USDC")
+      .reduce((s, b) => s + Math.max(0, parseFloat(b.total ?? "0") - parseFloat(b.hold ?? "0")), 0);
+    const marginRequired = actualNotional / appliedLeverage;
+    if (!Number.isFinite(marginRequired) || marginRequired <= 0) {
+      throw new Error("marginRequired inválido");
+    }
+
+    // (c) Reserva atómica: idempotency + nocional + MARGEN por cuenta, ANTES de tocar HL.
     const reservation = await ctx.runMutation(internal.executions.reserveExecution, {
       userId: user._id, botId: bot._id, idempotencyKey: args.idempotencyKey,
       hlAccountId: bot.hlAccountId, asset, stopLossPct: bot.stopLossPct,
       requestedAmount: args.tradeAmount,
-      notional: actualNotional, side: args.side, network: hlNetwork(),
+      notional: actualNotional, marginRequired, availableCollateral,
+      side: args.side, network: hlNetwork(),
       entryCloid, slCloid,
     });
     const requestId = reservation.requestId;
     if (reservation.alreadyExists) {
-      // No re-ejecutar: reconciliar si no es FINAL (closed/failed). protected se revisa por si cerró.
+      // Carrera: otra ejecución creó la fila entre (a) y (c). Reconciliar si no es FINAL.
       if (!["closed", "failed"].includes(reservation.status)) {
         await ctx.runAction(internal.hyperliquid.reconcileExecution, { requestId });
       }
@@ -247,7 +286,7 @@ export const executePerpMarketOrder = action({
       return { ok: false, status: "aborted", requestId, reason: sub.reason };
     }
 
-    await exchange.updateLeverage({ asset: assetId, isCross: false, leverage: Math.round(effectiveLeverage) });
+    await exchange.updateLeverage({ asset: assetId, isCross: false, leverage: appliedLeverage });
 
     // Gate ATÓMICO justo antes del envío (updateLeverage pudo tardar >LEASE_MS y el cron tomar el
     // control). blocked → ya cerrado failed por CAS; state/expired/claimed → no tocar (otro lo maneja).

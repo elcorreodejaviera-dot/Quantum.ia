@@ -1,4 +1,4 @@
-import { internalQuery, mutation, query } from "./_generated/server";
+import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { requireAuth, requireAdmin } from "./helpers";
 import { LIMIT_DEFAULTS, getLimit } from "./executionLimits";
@@ -92,6 +92,35 @@ async function upsertConfig(ctx: any, key: string, value: number) {
   if (existing) await ctx.db.patch(existing._id, { value });
   else await ctx.db.insert("system_config", { key, value });
 }
+
+// Ops: setear límites desde el CLI/backend (NO accesible desde el cliente — internalMutation).
+// Replica las mismas validaciones que las mutations públicas. Uso operativo de admin con acceso
+// al deployment; el gate de admin de la UI no se evade desde el frontend.
+export const setExecutionLimitInternal = internalMutation({
+  args: {
+    key: v.union(
+      v.literal("maxNotionalPerOrder"),
+      v.literal("maxNotionalPerUserDaily"),
+      v.literal("slBufferPct"),
+    ),
+    value: v.number(),
+  },
+  handler: async (ctx, { key, value }) => {
+    if (!Number.isFinite(value)) throw new Error("value debe ser finito");
+    if (key === "slBufferPct") {
+      if (value < 0 || value > 10) throw new Error("slBufferPct debe estar entre 0 y 10");
+    } else {
+      if (value <= 0) throw new Error(`${key} debe ser > 0`);
+      const perOrder = key === "maxNotionalPerOrder"
+        ? value : await readNum(ctx, "maxNotionalPerOrder", LIMIT_DEFAULTS.maxNotionalPerOrder);
+      const daily = key === "maxNotionalPerUserDaily"
+        ? value : await readNum(ctx, "maxNotionalPerUserDaily", LIMIT_DEFAULTS.maxNotionalPerUserDaily);
+      if (perOrder > daily) throw new Error("maxNotionalPerOrder no puede superar maxNotionalPerUserDaily");
+    }
+    await upsertConfig(ctx, key, value);
+    return { key, value };
+  },
+});
 
 async function readNum(ctx: any, key: string, def: number): Promise<number> {
   const row = await ctx.db

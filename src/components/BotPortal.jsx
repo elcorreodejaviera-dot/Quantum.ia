@@ -930,6 +930,9 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
   const recordPurchaseMutation = useMutation(api.spot_positions.recordPurchase);
   const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
   const executeHlOrder = useAction(api.hyperliquid.executePerpMarketOrder);
+  // Cuenta HL con la que firmar la cobertura. Transitorio: la selección por bot llega en la Parte C
+  // (JAV-41). Hoy `status` devuelve la cuenta conectada; sin cuenta no se ejecuta orden real.
+  const hlCredential = useQuery(api.hlCredentials.status);
   const [positions, setPositions] = React.useState(() =>
     INITIAL_SPOT_POSITIONS.map(p => ({ ...p, protector: loadProtector(userId, p.asset) }))
   );
@@ -977,12 +980,13 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
       const side = protector?.side ?? 'Short';
       const action = `Cobertura ${side} ${asset} ${lev}x SL${sl}%${be}`;
 
-      if (simulationMode || !tradingEnabled) {
+      if (simulationMode || !tradingEnabled || !hlCredential?.id) {
         await recordSignalMutation({ action, asset, amount, price, network: 'Spot', botName: `Bot protector ${asset}`, triggerType });
         return;
       }
 
       await executeHlOrder({
+        hlAccountId: hlCredential.id,
         asset,
         side,
         tradeAmount: amount,
@@ -995,7 +999,7 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
     } catch (error) {
       console.error('Failed to execute spot protector signal', error);
     }
-  }, [executeHlOrder, recordSignalMutation, simulationMode, tradingEnabled]);
+  }, [executeHlOrder, recordSignalMutation, simulationMode, tradingEnabled, hlCredential]);
 
   const EVM_RE_AUTO = /^0x[a-fA-F0-9]{40}$/;
 

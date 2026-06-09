@@ -22,6 +22,9 @@ function orderIdFromResponse(response: unknown): string | undefined {
 
 export const executePerpMarketOrder = action({
   args: {
+    // Cuenta HL con la que se FIRMA esta orden. Obligatoria: evita que la ejecución resuelva
+    // una cuenta arbitraria (.first) cuando el usuario tiene varias cuentas conectadas.
+    hlAccountId: v.id("hl_api_credentials"),
     asset: v.string(),
     side: v.union(v.literal("Long"), v.literal("Short")),
     tradeAmount: v.number(),
@@ -50,10 +53,11 @@ export const executePerpMarketOrder = action({
     const assetId = ASSET_IDS[asset];
     if (assetId == null) throw new Error(`Unsupported HL asset: ${args.asset}`);
 
-    const credential = await ctx.runQuery(internal.hlCredentials.getForUserInternal, {
-      userId: user._id,
+    const credential = await ctx.runQuery(internal.hlCredentials.getAccountByIdInternal, {
+      id: args.hlAccountId,
     });
-    if (!credential) throw new Error("Hyperliquid API wallet is not connected");
+    if (!credential) throw new Error("Hyperliquid account not found");
+    if (credential.userId !== user._id) throw new Error("Account does not belong to this user");
 
     const wallet = privateKeyToAccount(decryptPrivateKey(credential));
     const transport = new HttpTransport();

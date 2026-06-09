@@ -46,19 +46,15 @@ export function decryptPrivateKey(record: {
   return normalizePrivateKey(decrypted);
 }
 
+// DEPRECADO (Fase 1, multi-cuenta). No registra `tradingAccountAddress` (ahora obligatorio en
+// el schema) ni verifica `userRole` ni la unicidad global → incompatible con el contrato nuevo.
+// Bloqueado hasta que la UI migre a `connectAccount` (Parte C). NO reactivar el insert legacy.
 export const save = action({
   args: { privateKey: v.string() },
-  handler: async (ctx, { privateKey }) => {
-    const user = await ctx.runQuery(internal.users.getCurrentUserInternal, {});
-    const normalized = normalizePrivateKey(privateKey);
-    const account = privateKeyToAccount(normalized);
-    const encrypted = encryptPrivateKey(normalized);
-    await ctx.runMutation(internal.hlCredentials.upsertInternal, {
-      userId: user._id,
-      agentAddress: account.address.toLowerCase(),
-      ...encrypted,
-    });
-    return { connected: true, agentAddress: account.address.toLowerCase() };
+  handler: async () => {
+    throw new Error(
+      "Conexión de API wallet actualizada: usa connectAccount (requiere la cuenta principal de Hyperliquid).",
+    );
   },
 });
 

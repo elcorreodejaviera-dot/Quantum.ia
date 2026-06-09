@@ -3612,12 +3612,17 @@ function Dashboard({ user, onLogout, userId }) {
             <span className="pill">3 acciones</span>
               </div>
               <div className="bot-list">
-                {bots.map((bot) => {
+                {/* Solo bots legacy: los bots por pool (kind il/trading) se gestionan en la
+                    tarjeta del pool y NO tienen los campos legacy que usa BotCard (stop, tpSteps). */}
+                {bots.filter((b) => !b.kind).map((bot) => {
                   const linked = bot.poolId ? pools.find((p) => p.id === bot.poolId) : null;
                   return (
                     <BotCard key={bot.id} bot={bot} pools={pools} poolClosed={!!linked?.closed} canManage={canManageBots} onSetActive={setBotActive} onMode={setBotMode} onConfig={updateBotConfig} onManualTrigger={handleManualTrigger} userLoaded={userLoaded} />
                   );
                 })}
+                {bots.filter((b) => !b.kind).length === 0 && (
+                  <p className="network" style={{ padding: '8px 0' }}>Los bots se configuran en cada pool (IL y Trading).</p>
+                )}
               </div>
             </section>
             {isAdmin && (

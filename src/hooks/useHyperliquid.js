@@ -363,8 +363,11 @@ export function useHLAccountBalance(address, { includeOrders = false } = {}) {
           ordersRes?.ok ? ordersRes.json() : Promise.resolve([]),
         ]);
         if (cancelled) return;
-        // Modo unified de HL: el USDC en spot cuenta como colateral para perps. El saldo
-        // "disponible para operar" = withdrawable del perp + USDC spot (lo que muestra la UI de HL).
+        // Modo unified: el USDC en spot PUEDE contar como colateral, pero HL aplica reglas de
+        // margen (haircuts/portfolio margin) que no se pueden calcular fiablemente en cliente.
+        // Por eso NO se suma como "disponible garantizado": withdrawable (perp) es el dato firme,
+        // spotUsdc es informativo, y estimatedTotal es solo una ESTIMACIÓN visual (no para cálculos).
+        // La disponibilidad real se valida server-side antes de cualquier operación (Codex).
         const spotUsdc = (spotData.balances ?? [])
           .filter((b) => b.coin === 'USDC')
           .reduce((s, b) => s + parseFloat(b.total ?? 0), 0);
@@ -373,7 +376,7 @@ export function useHLAccountBalance(address, { includeOrders = false } = {}) {
           accountValue: parseFloat(data.marginSummary?.accountValue ?? 0),
           withdrawable: perpWithdrawable,
           spotUsdc,
-          availableToTrade: perpWithdrawable + spotUsdc,
+          estimatedTotal: perpWithdrawable + spotUsdc,   // solo display, etiquetado "est."
           totalNtlPos: parseFloat(data.marginSummary?.totalNtlPos ?? 0),
           totalMarginUsed: parseFloat(data.marginSummary?.totalMarginUsed ?? 0),
           openPositions: (data.assetPositions ?? [])

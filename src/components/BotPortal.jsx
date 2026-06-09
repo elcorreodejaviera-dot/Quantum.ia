@@ -1965,8 +1965,9 @@ function HLAccountSelect({ accounts, value, onChange }) {
         ))}
       </select>
       {selected && (
-        <span style={{ fontSize: 12, color: (bal?.availableToTrade ?? 0) > 0 ? 'var(--green)' : 'var(--red)' }}>
-          Disponible: {bal ? formatUsd(bal.availableToTrade) : '…'}
+        <span style={{ fontSize: 12, color: (bal?.estimatedTotal ?? 0) > 0 ? 'var(--green)' : 'var(--red)' }}
+          title="Estimado: perp + USDC spot (modo unified). La disponibilidad real se valida al operar.">
+          ≈ {bal ? formatUsd(bal.estimatedTotal) : '…'} est.
         </span>
       )}
     </div>
@@ -2043,8 +2044,10 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
   const effectiveCapital = poolCapital * (1 + bufferPct / 100);
   const thisBotMargin = leverage > 0 ? effectiveCapital / leverage : 0;
   const marginUsed = bal?.totalMarginUsed ?? 0;     // margen usado en la cuenta (no "otros bots")
-  // Modo unified: disponible para operar = withdrawable perp + USDC spot (colateral).
-  const withdrawable = bal?.availableToTrade ?? 0;
+  // Conservador: el margen disponible firme es el del perp (withdrawable). El USDC spot es
+  // colateral estimado en modo unified (haircuts no calculables en cliente) — se muestra aparte.
+  const withdrawable = bal?.withdrawable ?? 0;
+  const spotUsdc = bal?.spotUsdc ?? 0;
   const availableAfter = withdrawable - thisBotMargin;
 
   async function handleSave() {
@@ -2097,12 +2100,19 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
         </div>
 
         {selected && (
-          <div className="futures-grid compact" style={{ marginBottom: 8 }}>
-            <Metric label="Margen usado actual" value={formatUsd(marginUsed)} />
-            <Metric label="Margen este bot" value={formatUsd(thisBotMargin)} />
-            <Metric label="Withdrawable" value={formatUsd(withdrawable)} />
-            <Metric label="Disponible después" value={<span className={availableAfter >= 0 ? 'positive' : 'negative'}>{formatUsd(availableAfter)}</span>} />
-          </div>
+          <>
+            <div className="futures-grid compact" style={{ marginBottom: 4 }}>
+              <Metric label="Margen usado actual" value={formatUsd(marginUsed)} />
+              <Metric label="Margen este bot" value={formatUsd(thisBotMargin)} />
+              <Metric label="Disponible perp" value={formatUsd(withdrawable)} />
+              <Metric label="Disponible después" value={<span className={availableAfter >= 0 ? 'positive' : 'negative'}>{formatUsd(availableAfter)}</span>} />
+            </div>
+            {spotUsdc > 0 && (
+              <span style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 8, display: 'block' }}>
+                + {formatUsd(spotUsdc)} en spot (colateral estimado en modo unified; disponibilidad real validada al operar).
+              </span>
+            )}
+          </>
         )}
 
         <div className="config-field" style={{ padding: '4px 0' }}>
@@ -2392,7 +2402,7 @@ function HLAccountRow({ account, onRevoke }) {
         </div>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span style={{ fontSize: 12 }}>{bal ? formatUsd(bal.availableToTrade) : '…'}</span>
+        <span style={{ fontSize: 12 }} title="Estimado: perp + USDC spot (modo unified)">{bal ? `≈ ${formatUsd(bal.estimatedTotal)} est.` : '…'}</span>
         <button className="mini-btn" onClick={onRevoke}>Revocar</button>
       </div>
     </div>

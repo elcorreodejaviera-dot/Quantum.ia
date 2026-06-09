@@ -1,6 +1,6 @@
 import React from 'react'
 import { useUser, useClerk } from '@clerk/clerk-react'
-import { useConvexAuth, useQuery, useMutation, useAction } from 'convex/react'
+import { useConvexAuth, useQuery, useMutation, useAction, usePaginatedQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState, useWalletBalances, useHLAccountBalance, useMetaMaskSigner, executeHLTestnetOrder } from '../hooks/useHyperliquid'
 
@@ -178,8 +178,27 @@ function shortenAddress(addr) {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
-function PoolCard({ pool, isAdmin }) {
+function PoolCard({ pool, canManage, canTradeLive }) {
   const deletePoolMutation = useMutation(api.pools.deletePool);
+  const allBots = useQuery(api.bots.listBots);
+  const savePoolBot = useMutation(api.bots.getOrCreatePoolBot);
+  const ilBot = (allBots ?? []).find((b) => b.poolId === pool.id && b.kind === 'il') ?? null;
+  const tradingBot = (allBots ?? []).find((b) => b.poolId === pool.id && b.kind === 'trading') ?? null;
+  const [botModal, setBotModal] = React.useState(null);   // 'il' | 'trading' | null
+  const [testBot, setTestBot] = React.useState(null);     // bot a probar (ejecución real)
+  const [botBusy, setBotBusy] = React.useState(false);
+
+  async function togglePoolBot(bot) {
+    if (!bot || botBusy) return;
+    setBotBusy(true);
+    try {
+      await savePoolBot(serializePoolBotConfig(bot, { active: !bot.active }));
+    } catch (e) {
+      window.alert(e?.message ?? 'No se pudo cambiar el estado del bot.');
+    } finally {
+      setBotBusy(false);
+    }
+  }
   const hasPrice = pool.price != null;
   const pos = hasPrice
     ? Math.max(4, Math.min(96, ((pool.price - pool.min) / (pool.max - pool.min)) * 100))
@@ -223,6 +242,7 @@ function PoolCard({ pool, isAdmin }) {
 
 
   return (
+    <>
     <article className="pool-card">
       <div className="pool-title">
         <div>
@@ -386,7 +406,20 @@ function PoolCard({ pool, isAdmin }) {
         </div>
       </details>
 
+      {canManage && (
+        <div className="pool-bot-actions" style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+          <BotActionButton label="Proteger" bot={ilBot} busy={botBusy} canTradeLive={canTradeLive}
+            onConfig={() => setBotModal('il')} onToggle={() => togglePoolBot(ilBot)} onTest={() => setTestBot(ilBot)} />
+          <BotActionButton label="Trading" bot={tradingBot} busy={botBusy} canTradeLive={canTradeLive}
+            onConfig={() => setBotModal('trading')} onToggle={() => togglePoolBot(tradingBot)} onTest={() => setTestBot(tradingBot)} />
+        </div>
+      )}
+
     </article>
+    {botModal === 'il' && <ProtectionBotModal pool={pool} bot={ilBot} canTradeLive={canTradeLive} onClose={() => setBotModal(null)} />}
+    {botModal === 'trading' && <TradingBotModal pool={pool} bot={tradingBot} canTradeLive={canTradeLive} onClose={() => setBotModal(null)} />}
+    {testBot && <TestExecModal bot={testBot} onClose={() => setTestBot(null)} />}
+    </>
   );
 }
 
@@ -929,7 +962,6 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
   const updatePositionMutation = useMutation(api.spot_positions.updatePosition);
   const recordPurchaseMutation = useMutation(api.spot_positions.recordPurchase);
   const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
-  const executeHlOrder = useAction(api.hyperliquid.executePerpMarketOrder);
   const [positions, setPositions] = React.useState(() =>
     INITIAL_SPOT_POSITIONS.map(p => ({ ...p, protector: loadProtector(userId, p.asset) }))
   );
@@ -977,25 +1009,13 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
       const side = protector?.side ?? 'Short';
       const action = `Cobertura ${side} ${asset} ${lev}x SL${sl}%${be}`;
 
-      if (simulationMode || !tradingEnabled) {
-        await recordSignalMutation({ action, asset, amount, price, network: 'Spot', botName: `Bot protector ${asset}`, triggerType });
-        return;
-      }
-
-      await executeHlOrder({
-        asset,
-        side,
-        tradeAmount: amount,
-        price,
-        leverage: lev,
-        stopLoss: sl,
-        triggerType,
-        confirmLive: true,
-      });
+      // El protector spot solo registra señal (simulación). La ejecución real es de los
+      // pool-bots por botId (Parte C / Fase 3, bloqueada por JAV-37).
+      await recordSignalMutation({ action, asset, amount, price, network: 'Spot', botName: `Bot protector ${asset}`, triggerType });
     } catch (error) {
-      console.error('Failed to execute spot protector signal', error);
+      console.error('Failed to record spot protector signal', error);
     }
-  }, [executeHlOrder, recordSignalMutation, simulationMode, tradingEnabled]);
+  }, [recordSignalMutation]);
 
   const EVM_RE_AUTO = /^0x[a-fA-F0-9]{40}$/;
 
@@ -1850,6 +1870,594 @@ function TradeConfirmModal({ trade, onConfirm, onCancel, executing }) {
   );
 }
 
+// --- Bots por pool (Fase 1, Parte C) ---
+
+const BUFFER_OPTIONS = [0, 20, 40, 60, 80, 100];
+const CAPITAL_OPTIONS = [50, 75, 100, 125, 150, 175, 200];
+const BREAKOUT_DIRS = [
+  { v: 'long_short', l: 'LONG + SHORT' },
+  { v: 'long', l: 'Solo LONG' },
+  { v: 'short', l: 'Solo SHORT' },
+];
+
+function poolBaseAsset(pair) {
+  const sym = (pair?.split('/')[0] ?? '').toUpperCase();
+  return sym === 'WETH' ? 'ETH' : sym === 'WBTC' ? 'BTC' : sym;
+}
+
+// Convex rechaza propiedades con valor `undefined` ("undefined is not a valid Convex value").
+// Hay que OMITIR la clave, no asignar undefined. Se aplica a todo arg de mutation/action.
+function pruneUndefined(obj) {
+  return Object.fromEntries(Object.entries(obj).filter(([, val]) => val !== undefined));
+}
+
+// Serializador ÚNICO de la config canónica de un pool-bot para reenviar a getOrCreatePoolBot.
+// Reenvía SIEMPRE el estado completo (incl. hlAccountId y simulationMode) para que pausar/
+// reactivar no desvincule la cuenta ni cambie el modo. overrides ajusta p. ej. { active }.
+function serializePoolBotConfig(bot, overrides = {}) {
+  return pruneUndefined({
+    poolId: bot.poolId,
+    kind: bot.kind,
+    hlAccountId: bot.hlAccountId ?? undefined,
+    direction: bot.direction,
+    leverage: bot.leverage,
+    autoLeverage: bot.autoLeverage,
+    capitalPct: bot.capitalPct,
+    bufferPct: bot.bufferPct,
+    stopLossPct: bot.stopLossPct,
+    breakevenPct: bot.breakevenPct,
+    trailingStop: bot.trailingStop,
+    trailingPct: bot.trailingPct,
+    preTriggerPct: bot.preTriggerPct,
+    allowReentryFromAbove: bot.allowReentryFromAbove,
+    autoRearm: bot.autoRearm,
+    tps: bot.tps,
+    active: bot.active,
+    simulationMode: bot.simulationMode,
+    ...overrides,
+  });
+}
+
+// Botón de acción de un pool-bot en la PoolCard: estado + configurar/reconfigurar + pausar/activar.
+function BotActionButton({ label, bot, busy, canTradeLive, onConfig, onToggle, onTest }) {
+  return (
+    <div className="pool-bot-action" style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <strong style={{ fontSize: 13 }}>{label}</strong>
+        {bot && (
+          <span className={`pill ${bot.active ? 'green' : 'faint'}`} style={{ fontSize: 10 }}>
+            {bot.active ? 'Activo' : 'Pausado'}{bot.simulationMode ? ' · sim' : ''}
+          </span>
+        )}
+      </div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        <button className="mini-btn" onClick={onConfig} style={{ flex: 1 }}>
+          {bot ? 'Reconfigurar' : 'Configurar'}
+        </button>
+        {bot && (
+          <button className="mini-btn" onClick={onToggle} disabled={busy}>
+            {bot.active ? 'Pausar' : 'Activar'}
+          </button>
+        )}
+        {bot && bot.active && !bot.simulationMode && canTradeLive && (
+          <button className="mini-btn" onClick={onTest} style={{ color: 'var(--red)', borderColor: 'var(--red)' }}>
+            Probar
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Selector de cuenta HL (compartido por ambos modales). Muestra el balance de la cuenta elegida.
+function HLAccountSelect({ accounts, value, onChange }) {
+  const selected = accounts.find((a) => a.id === value) ?? null;
+  const { account: bal } = useHLAccountBalance(selected?.tradingAccountAddress ?? null);
+  return (
+    <div className="config-field">
+      <span>Wallet</span>
+      <select value={value ?? ''} onChange={(e) => onChange(e.target.value || null)}>
+        <option value="">Selecciona una cuenta…</option>
+        {accounts.map((a) => (
+          <option key={a.id} value={a.id}>
+            {(a.label ?? 'Cuenta')} ({a.tradingAccountAddress.slice(0, 6)}…{a.tradingAccountAddress.slice(-4)})
+          </option>
+        ))}
+      </select>
+      {selected && (
+        <span style={{ fontSize: 12, color: (bal?.accountValue ?? 0) > 0 ? 'var(--green)' : 'var(--red)' }}>
+          Balance: {bal ? formatUsd(bal.accountValue) : '…'}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Toggle de modo real (solo visible con canTradeLive). Banner de beta cuando está activo.
+function RealModeToggle({ realMode, setRealMode, canTradeLive }) {
+  if (!canTradeLive) return null;
+  return (
+    <div className="be-block" style={{ marginTop: 8 }}>
+      <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center' }}>
+        <input type="checkbox" checked={realMode} onChange={(e) => setRealMode(e.target.checked)} />
+        <strong>Modo real (ejecución HL con tu capital)</strong>
+      </label>
+      {realMode && (
+        <p style={{ fontSize: 11, color: 'var(--red)', margin: '4px 0 0' }}>
+          BETA — órdenes reales con tu capital. El stop-loss (stop-limit) puede no llenarse en una caída brusca.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// Filas de take-profits (gainPct / closePct). Cantidad fija según el tipo de bot.
+function TakeProfitRows({ tps, setTps }) {
+  const update = (i, field, val) =>
+    setTps(tps.map((t, idx) => (idx === i ? { ...t, [field]: Number(val) } : t)));
+  return (
+    <>
+      {tps.map((tp, i) => (
+        <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 6 }}>
+          <label className="config-field" style={{ margin: 0 }}>
+            <span>TP{i + 1} — % ganancia</span>
+            <input type="number" step="0.1" min="0" value={tp.gainPct}
+              onChange={(e) => update(i, 'gainPct', e.target.value)} />
+          </label>
+          <label className="config-field" style={{ margin: 0 }}>
+            <span>TP{i + 1} — % cierre</span>
+            <input type="number" step="1" min="0" value={tp.closePct}
+              onChange={(e) => update(i, 'closePct', e.target.value)} />
+          </label>
+        </div>
+      ))}
+    </>
+  );
+}
+
+// Modal "Configurar Protección" (bot IL — cobertura short).
+function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
+  const save = useMutation(api.bots.getOrCreatePoolBot);
+  const accounts = useQuery(api.hlCredentials.list) ?? [];
+  // Modo real (ejecución HL con capital real): requiere canTradeLive. Por defecto simulación.
+  const [realMode, setRealMode] = React.useState(bot ? !bot.simulationMode : false);
+  // Precarga desde el bot existente (reconfigurar) o defaults (crear).
+  const [hlAccountId, setHlAccountId] = React.useState(bot?.hlAccountId ?? null);
+  const [leverage, setLeverage] = React.useState(bot?.leverage ?? 20);
+  const [autoLeverage, setAutoLeverage] = React.useState(bot?.autoLeverage ?? false);
+  const [bufferPct, setBufferPct] = React.useState(bot?.bufferPct ?? 100);
+  const [stopLossPct, setStopLossPct] = React.useState(bot?.stopLossPct ?? 1);
+  const [breakevenPct, setBreakevenPct] = React.useState(bot?.breakevenPct ?? 0.5);
+  // Distinguir tps undefined (crear → defaults) de tps: [] intencional (reconfigurar → vacío).
+  const [tps, setTps] = React.useState(bot ? (bot.tps ?? []) : [{ gainPct: 0.5, closePct: 40 }, { gainPct: 1.5, closePct: 60 }]);
+  const [noReentryFromAbove, setNoReentryFromAbove] = React.useState(bot?.allowReentryFromAbove === false);
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState('');
+
+  const asset = poolBaseAsset(pool.pair);
+  const selected = accounts.find((a) => a.id === hlAccountId) ?? null;
+  const { account: bal } = useHLAccountBalance(selected?.tradingAccountAddress ?? null);
+
+  const poolCapital = pool.liquidity > 0 ? pool.liquidity : 0;
+  const capitalIsReal = !!pool.liquidityReal;       // false = estimado (mock), no lectura on-chain
+  const effectiveCapital = poolCapital * (1 + bufferPct / 100);
+  const thisBotMargin = leverage > 0 ? effectiveCapital / leverage : 0;
+  const marginUsed = bal?.totalMarginUsed ?? 0;     // margen usado en la cuenta (no "otros bots")
+  const withdrawable = bal?.withdrawable ?? 0;
+  const availableAfter = withdrawable - thisBotMargin;
+
+  async function handleSave() {
+    setError(''); setSaving(true);
+    try {
+      await save(pruneUndefined({
+        poolId: pool.id, kind: 'il', direction: 'short',
+        hlAccountId: hlAccountId ?? undefined,
+        leverage, autoLeverage, bufferPct, stopLossPct, breakevenPct,
+        tps: tps.filter((t) => t.gainPct > 0 && t.closePct > 0),
+        allowReentryFromAbove: !noReentryFromAbove,
+        active: bot ? bot.active : true,   // editar conserva el estado; crear activa
+        simulationMode: !(realMode && canTradeLive),   // real solo con permiso
+      }));
+      onSaved?.(); onClose();
+    } catch (e) {
+      setError(e?.message ?? 'No se pudo activar la protección.');
+    } finally { setSaving(false); }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="section-head">
+          <h2>🛡 Configurar Protección</h2>
+          <button className="ghost-btn" style={{ padding: '3px 10px', fontSize: 12 }} onClick={onClose}>✕</button>
+        </div>
+        <p className="network" style={{ fontSize: 12, marginBottom: 10 }}>
+          {pool.pair} · Rango {formatPrice(pool.pair, pool.min)} – {formatPrice(pool.pair, pool.max)}
+        </p>
+
+        <HLAccountSelect accounts={accounts} value={hlAccountId} onChange={setHlAccountId} />
+
+        <label className="config-field" style={{ marginTop: 8 }}>
+          <span>Perp (SHORT)</span>
+          <input value={`${asset}-PERP`} readOnly />
+        </label>
+
+        <div className="config-field" style={{ padding: '8px 0' }}>
+          <span>Leverage (Isolated)</span>
+          <div className="range-control">
+            <input type="range" min="1" max="20" step="1" value={leverage}
+              onChange={(e) => setLeverage(Number(e.target.value))} />
+            <strong>{leverage}x</strong>
+          </div>
+          <label style={{ fontSize: 12, display: 'flex', gap: 6, alignItems: 'center', marginTop: 4 }}>
+            <input type="checkbox" checked={autoLeverage} onChange={(e) => setAutoLeverage(e.target.checked)} />
+            Permitir auto-ajuste de leverage si el balance es insuficiente
+          </label>
+        </div>
+
+        {selected && (
+          <div className="futures-grid compact" style={{ marginBottom: 8 }}>
+            <Metric label="Margen usado actual" value={formatUsd(marginUsed)} />
+            <Metric label="Margen este bot" value={formatUsd(thisBotMargin)} />
+            <Metric label="Withdrawable" value={formatUsd(withdrawable)} />
+            <Metric label="Disponible después" value={<span className={availableAfter >= 0 ? 'positive' : 'negative'}>{formatUsd(availableAfter)}</span>} />
+          </div>
+        )}
+
+        <div className="config-field" style={{ padding: '4px 0' }}>
+          <span>Buffer de Capital</span>
+          <div className="segmented" style={{ flexWrap: 'wrap' }}>
+            {BUFFER_OPTIONS.map((b) => (
+              <button key={b} aria-pressed={bufferPct === b} onClick={() => setBufferPct(b)}>
+                {b === 0 ? 'Sin' : `+${b}%`}
+              </button>
+            ))}
+          </div>
+          {poolCapital > 0 && (
+            <span style={{ fontSize: 12, color: 'var(--amber)' }}>
+              Posición efectiva: {formatUsd(effectiveCapital)} (pool {formatUsd(poolCapital)}{capitalIsReal ? '' : ' estimado'} + {bufferPct}%)
+            </span>
+          )}
+        </div>
+
+        <label className="config-field" style={{ padding: '4px 0' }}>
+          <span>Stop Loss Fijo (%)</span>
+          <input type="number" step="0.1" min="0" value={stopLossPct}
+            onChange={(e) => setStopLossPct(Number(e.target.value))} />
+        </label>
+
+        <div className="config-field" style={{ padding: '4px 0' }}>
+          <span>Breakeven (% ganancia para mover SL)</span>
+          <div className="range-control">
+            <input type="range" min="0.5" max="3" step="0.1" value={breakevenPct}
+              onChange={(e) => setBreakevenPct(Number(e.target.value))} />
+            <strong>{breakevenPct}%</strong>
+          </div>
+        </div>
+
+        <div className="config-field" style={{ padding: '4px 0' }}>
+          <span>Take Profits (opcional)</span>
+          <TakeProfitRows tps={tps} setTps={setTps} />
+        </div>
+
+        <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center', margin: '10px 0' }}>
+          <input type="checkbox" checked={noReentryFromAbove} onChange={(e) => setNoReentryFromAbove(e.target.checked)} />
+          No proteger cuando reentra al rango desde arriba
+        </label>
+
+        <RealModeToggle realMode={realMode} setRealMode={setRealMode} canTradeLive={canTradeLive} />
+
+        {error && <p style={{ color: 'var(--red)', fontSize: 12 }}>{error}</p>}
+
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <button className="ghost-btn" onClick={onClose} disabled={saving} style={{ flex: 1 }}>Cancelar</button>
+          <button className="primary-btn" onClick={handleSave} disabled={saving || !hlAccountId} style={{ flex: 1 }}>
+            {saving ? 'Guardando…' : (bot ? 'Guardar cambios' : 'Activar Protección')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Modal "Configurar Trading" (bot breakout long/short).
+function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
+  const save = useMutation(api.bots.getOrCreatePoolBot);
+  const accounts = useQuery(api.hlCredentials.list) ?? [];
+  const [realMode, setRealMode] = React.useState(bot ? !bot.simulationMode : false);
+  // Precarga desde el bot existente (reconfigurar) o defaults (crear).
+  const [hlAccountId, setHlAccountId] = React.useState(bot?.hlAccountId ?? null);
+  const [direction, setDirection] = React.useState(bot?.direction ?? 'long_short');
+  const [capitalPct, setCapitalPct] = React.useState(bot?.capitalPct ?? 100);
+  const [preTriggerPct, setPreTriggerPct] = React.useState(bot?.preTriggerPct ?? 0);
+  const [leverage, setLeverage] = React.useState(bot?.leverage ?? 20);
+  const [autoLeverage, setAutoLeverage] = React.useState(bot?.autoLeverage ?? false);
+  const [stopLossPct, setStopLossPct] = React.useState(bot?.stopLossPct ?? 1);
+  const [breakevenPct, setBreakevenPct] = React.useState(bot?.breakevenPct ?? 0.5);
+  const [trailingStop, setTrailingStop] = React.useState(bot?.trailingStop ?? true);
+  const [trailingPct, setTrailingPct] = React.useState(bot?.trailingPct ?? 1);
+  // Distinguir tps undefined (crear → defaults) de tps: [] intencional (reconfigurar → vacío).
+  const [tps, setTps] = React.useState(bot ? (bot.tps ?? []) : [
+    { gainPct: 0.5, closePct: 30 }, { gainPct: 2, closePct: 50 }, { gainPct: 5, closePct: 20 },
+  ]);
+  const [autoRearm, setAutoRearm] = React.useState(bot?.autoRearm ?? true);
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState('');
+
+  const selected = accounts.find((a) => a.id === hlAccountId) ?? null;
+  const poolCapital = pool.liquidity > 0 ? pool.liquidity : 0;
+  const capitalIsReal = !!pool.liquidityReal;       // false = estimado (mock)
+  const opCapital = poolCapital * (capitalPct / 100);
+
+  async function handleSave() {
+    setError(''); setSaving(true);
+    try {
+      await save(pruneUndefined({
+        poolId: pool.id, kind: 'trading', direction,
+        hlAccountId: hlAccountId ?? undefined,
+        capitalPct, preTriggerPct, leverage, autoLeverage, stopLossPct, breakevenPct,
+        trailingStop, trailingPct,   // estado completo: se persiste siempre (latente si trailing off)
+        tps: tps.filter((t) => t.gainPct > 0 && t.closePct > 0),
+        autoRearm, active: bot ? bot.active : true,   // editar conserva el estado; crear activa
+        simulationMode: !(realMode && canTradeLive),   // real solo con permiso
+      }));
+      onSaved?.(); onClose();
+    } catch (e) {
+      setError(e?.message ?? 'No se pudo activar el trading.');
+    } finally { setSaving(false); }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="section-head">
+          <h2>Configurar Trading</h2>
+          <button className="ghost-btn" style={{ padding: '3px 10px', fontSize: 12 }} onClick={onClose}>✕</button>
+        </div>
+        <p className="network" style={{ fontSize: 12, marginBottom: 10 }}>
+          {pool.pair} · Rango {formatPrice(pool.pair, pool.min)} – {formatPrice(pool.pair, pool.max)}
+        </p>
+
+        <HLAccountSelect accounts={accounts} value={hlAccountId} onChange={setHlAccountId} />
+
+        <div className="config-field" style={{ padding: '8px 0' }}>
+          <span>Dirección del Breakout</span>
+          <div className="segmented" style={{ flexWrap: 'wrap' }}>
+            {BREAKOUT_DIRS.map((d) => (
+              <button key={d.v} aria-pressed={direction === d.v} onClick={() => setDirection(d.v)}>{d.l}</button>
+            ))}
+          </div>
+          <span style={{ fontSize: 12 }} className="network">Abre LONG arriba y SHORT abajo del rango</span>
+        </div>
+
+        <div className="config-field" style={{ padding: '4px 0' }}>
+          <span>Capital relativo al pool</span>
+          <div className="segmented" style={{ flexWrap: 'wrap' }}>
+            {CAPITAL_OPTIONS.map((c) => (
+              <button key={c} aria-pressed={capitalPct === c} onClick={() => setCapitalPct(c)}>{c}%</button>
+            ))}
+          </div>
+          {poolCapital > 0 && (
+            <span style={{ fontSize: 12, color: 'var(--amber)' }}>
+              Capital: {formatUsd(opCapital)} (de pool {formatUsd(poolCapital)}{capitalIsReal ? '' : ' estimado'})
+            </span>
+          )}
+        </div>
+
+        <div className="config-field" style={{ padding: '4px 0' }}>
+          <span>Pre-trigger</span>
+          <div className="range-control">
+            <input type="range" min="0" max="5" step="0.1" value={preTriggerPct}
+              onChange={(e) => setPreTriggerPct(Number(e.target.value))} />
+            <strong>{preTriggerPct}%</strong>
+          </div>
+        </div>
+
+        <div className="config-field" style={{ padding: '4px 0' }}>
+          <span>Leverage (Isolated)</span>
+          <div className="range-control">
+            <input type="range" min="1" max="20" step="1" value={leverage}
+              onChange={(e) => setLeverage(Number(e.target.value))} />
+            <strong>{leverage}x</strong>
+          </div>
+          <label style={{ fontSize: 12, display: 'flex', gap: 6, alignItems: 'center', marginTop: 4 }}>
+            <input type="checkbox" checked={autoLeverage} onChange={(e) => setAutoLeverage(e.target.checked)} />
+            Permitir auto-ajuste de leverage si el balance es insuficiente
+          </label>
+        </div>
+
+        <label className="config-field" style={{ padding: '4px 0' }}>
+          <span>Stop Loss Fijo (%)</span>
+          <input type="number" step="0.1" min="0" value={stopLossPct}
+            onChange={(e) => setStopLossPct(Number(e.target.value))} />
+        </label>
+
+        <div className="config-field" style={{ padding: '4px 0' }}>
+          <span>Breakeven (% ganancia para mover SL a entrada)</span>
+          <div className="range-control">
+            <input type="range" min="0.5" max="3" step="0.1" value={breakevenPct}
+              onChange={(e) => setBreakevenPct(Number(e.target.value))} />
+            <strong>{breakevenPct}%</strong>
+          </div>
+        </div>
+
+        <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center', margin: '8px 0 4px' }}>
+          <input type="checkbox" checked={trailingStop} onChange={(e) => setTrailingStop(e.target.checked)} />
+          Trailing Stop
+        </label>
+        {trailingStop && (
+          <input type="number" step="0.1" min="0" value={trailingPct}
+            onChange={(e) => setTrailingPct(Number(e.target.value))}
+            style={{ width: '100%' }} />
+        )}
+
+        <div className="config-field" style={{ padding: '8px 0 4px' }}>
+          <span>Take Profits (3 niveles)</span>
+          <TakeProfitRows tps={tps} setTps={setTps} />
+        </div>
+
+        <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center', margin: '10px 0' }}>
+          <input type="checkbox" checked={autoRearm} onChange={(e) => setAutoRearm(e.target.checked)} />
+          Auto-rearm — tras SL, el bot vuelve a buscar breakouts automáticamente
+        </label>
+
+        <RealModeToggle realMode={realMode} setRealMode={setRealMode} canTradeLive={canTradeLive} />
+
+        {error && <p style={{ color: 'var(--red)', fontSize: 12 }}>{error}</p>}
+
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <button className="ghost-btn" onClick={onClose} disabled={saving} style={{ flex: 1 }}>Cancelar</button>
+          <button className="primary-btn" onClick={handleSave} disabled={saving || !hlAccountId} style={{ flex: 1 }}>
+            {saving ? 'Guardando…' : (bot ? 'Guardar cambios' : 'Activar Trading')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Disparador de prueba (admin) de ejecución real — JAV-37. Nocional pequeño, idempotency key.
+function TestExecModal({ bot, onClose }) {
+  const exec = useAction(api.hyperliquid.executePerpMarketOrder);
+  const network = import.meta.env.VITE_HL_NETWORK;   // obligatoria: sin fallback a mainnet
+  const fixedSide = bot.direction === 'short' ? 'Short' : bot.direction === 'long' ? 'Long' : null;
+  const [side, setSide] = React.useState(fixedSide ?? 'Long');
+  const [amount, setAmount] = React.useState(10);
+  const [busy, setBusy] = React.useState(false);
+  const [result, setResult] = React.useState(null);
+  const [error, setError] = React.useState('');
+
+  async function run() {
+    if (!network) { setError('VITE_HL_NETWORK no configurada — ejecución deshabilitada.'); return; }
+    setError(''); setResult(null); setBusy(true);
+    try {
+      const r = await exec({
+        botId: bot._id, side, tradeAmount: Number(amount),
+        idempotencyKey: crypto.randomUUID(),
+        expectedNetwork: network,
+        confirmLive: true,
+      });
+      setResult(r);
+    } catch (e) {
+      setError(e?.message ?? 'Error ejecutando la orden.');
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={busy ? undefined : onClose}>
+      <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="section-head">
+          <h2>Probar ejecución</h2>
+          <span className={`pill ${network ? 'red' : 'amber'}`}>{network ?? 'sin red'}</span>
+        </div>
+        {!network && <p style={{ color: 'var(--red)', fontSize: 12 }}>VITE_HL_NETWORK no configurada — ejecución deshabilitada.</p>}
+        <p className="network" style={{ fontSize: 12 }}>
+          {bot.baseAsset} · {bot.name}. Orden real con precio del servidor y SL automático. Usa nocional pequeño.
+        </p>
+        {!fixedSide && (
+          <label className="config-field" style={{ marginTop: 8 }}>
+            <span>Lado</span>
+            <select value={side} onChange={(e) => setSide(e.target.value)}>
+              <option>Long</option><option>Short</option>
+            </select>
+          </label>
+        )}
+        <label className="config-field" style={{ marginTop: 8 }}>
+          <span>Nocional (USDC)</span>
+          <input type="number" min="1" step="1" value={amount} onChange={(e) => setAmount(e.target.value)} />
+        </label>
+        {error && <p style={{ color: 'var(--red)', fontSize: 12 }}>{error}</p>}
+        {result && <p style={{ color: 'var(--green)', fontSize: 12 }}>Estado: {result.status ?? (result.deduped ? 'deduped' : 'ok')}</p>}
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <button className="ghost-btn" onClick={onClose} disabled={busy} style={{ flex: 1 }}>Cerrar</button>
+          <button className="primary-btn" onClick={run} disabled={busy || !network || !(Number(amount) > 0)} style={{ flex: 1 }}>
+            {busy ? 'Ejecutando…' : 'Ejecutar orden real'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Fila de una cuenta HL conectada (balance + revocar).
+function HLAccountRow({ account, onRevoke }) {
+  const { account: bal } = useHLAccountBalance(account.tradingAccountAddress);
+  return (
+    <div className="wallet-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '6px 0' }}>
+      <div>
+        <strong style={{ fontSize: 13 }}>{account.label ?? 'Cuenta'}</strong>
+        <div className="network" style={{ fontSize: 11 }}>
+          {account.tradingAccountAddress.slice(0, 8)}…{account.tradingAccountAddress.slice(-6)}
+        </div>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontSize: 12 }}>{bal ? formatUsd(bal.accountValue) : '…'}</span>
+        <button className="mini-btn" onClick={onRevoke}>Revocar</button>
+      </div>
+    </div>
+  );
+}
+
+// Panel dedicado de gestión de cuentas Hyperliquid (multi-cuenta). Reemplaza la UI legacy.
+function HLAccountsPanel() {
+  const accounts = useQuery(api.hlCredentials.list);
+  const connect = useAction(api.hlCredentialActions.connectAccount);
+  const revoke = useMutation(api.hlCredentials.revokeById);
+  const [label, setLabel] = React.useState('');
+  const [privateKey, setPrivateKey] = React.useState('');
+  const [tradingAccountAddress, setTradingAccountAddress] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState('');
+
+  async function handleConnect() {
+    setError(''); setBusy(true);
+    try {
+      await connect(pruneUndefined({
+        privateKey: privateKey.trim(),
+        tradingAccountAddress: tradingAccountAddress.trim(),
+        label: label.trim() || undefined,
+      }));
+      setLabel(''); setPrivateKey(''); setTradingAccountAddress('');
+    } catch (e) {
+      setError(e?.message ?? 'No se pudo conectar la cuenta.');
+    } finally { setBusy(false); }
+  }
+
+  async function handleRevoke(id) {
+    if (!window.confirm('¿Revocar esta cuenta? Se pausarán y desvincularán sus bots.')) return;
+    setError('');
+    try { await revoke({ id }); } catch (e) { setError(e?.message ?? 'No se pudo revocar.'); }
+  }
+
+  return (
+    <section className="panel">
+      <div className="section-head">
+        <h2>Cuentas Hyperliquid</h2>
+        <span className="pill">{accounts?.length ?? 0}</span>
+      </div>
+      {(accounts ?? []).map((a) => (
+        <HLAccountRow key={a.id} account={a} onRevoke={() => handleRevoke(a.id)} />
+      ))}
+      <div className="be-block" style={{ marginTop: 10 }}>
+        <div className="be-head"><span>Conectar nueva cuenta</span></div>
+        <label className="config-field"><span>Etiqueta (opcional)</span>
+          <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Ej: Avaro" /></label>
+        <label className="config-field" style={{ marginTop: 6 }}><span>Cuenta principal HL (0x...)</span>
+          <input value={tradingAccountAddress} onChange={(e) => setTradingAccountAddress(e.target.value)}
+            placeholder="0x... wallet MetaMask/Rabby" /></label>
+        <label className="config-field" style={{ marginTop: 6 }}><span>Private key API wallet</span>
+          <input type="password" autoComplete="off" value={privateKey}
+            onChange={(e) => setPrivateKey(e.target.value)} placeholder="0x... solo se cifra en backend" /></label>
+        {error && <span style={{ fontSize: 11, color: 'var(--red)' }}>{error}</span>}
+        <button className="primary-btn" style={{ marginTop: 8, width: '100%' }} onClick={handleConnect}
+          disabled={busy || !privateKey.trim() || !tradingAccountAddress.trim()}>
+          {busy ? 'Conectando…' : 'Conectar cuenta'}
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function HLAccountPanel({ walletAddress, userLoaded, prices, isAdmin }) {
   const setWalletAddressMutation = useMutation(api.users.setWalletAddress);
   const clearWalletAddressMutation = useMutation(api.users.clearWalletAddress);
@@ -2169,35 +2777,7 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulation
   const hlWallet = protector.hlWallet ?? '';
   const validWallet = EVM_RE_PROTECTOR.test(hlWallet);
   const { account: hlAccount, loading: hlBalLoading, error: hlBalError } = useHLAccountBalance(validWallet ? hlWallet : null);
-  const credentialStatus = useQuery(api.hlCredentials.status);
-  const saveHlCredential = useAction(api.hlCredentialActions.save);
-  const revokeHlCredential = useMutation(api.hlCredentials.revoke);
-  const [apiKeyInput, setApiKeyInput] = React.useState('');
-  const [apiKeyError, setApiKeyError] = React.useState('');
-  const [apiKeySaving, setApiKeySaving] = React.useState(false);
-
-  async function saveApiKey() {
-    setApiKeyError('');
-    if (!apiKeyInput.trim()) return;
-    setApiKeySaving(true);
-    try {
-      await saveHlCredential({ privateKey: apiKeyInput.trim() });
-      setApiKeyInput('');
-    } catch (error) {
-      setApiKeyError(error?.message ?? 'No se pudo guardar la API wallet');
-    } finally {
-      setApiKeySaving(false);
-    }
-  }
-
-  async function revokeApiKey() {
-    setApiKeyError('');
-    try {
-      await revokeHlCredential({});
-    } catch (error) {
-      setApiKeyError(error?.message ?? 'No se pudo revocar la API wallet');
-    }
-  }
+  // La gestión de API wallets HL vive ahora en HLAccountsPanel (multi-cuenta, connectAccount).
 
   function handleManual() {
     if (!protector.active) return;
@@ -2260,41 +2840,6 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulation
           )}
         </div>
       )}
-
-      <div className="be-block">
-        <div className="be-head">
-          <span>API wallet HL</span>
-          <span className={`pill${credentialStatus?.connected ? ' green' : ' amber'}`}>
-            {credentialStatus?.connected ? 'Conectada' : 'Sin API'}
-          </span>
-        </div>
-        {credentialStatus?.connected && (
-          <div className="network" style={{ fontSize: 12, marginTop: 6 }}>
-            Agent: {credentialStatus.agentAddress?.slice(0, 8)}...{credentialStatus.agentAddress?.slice(-6)}
-          </div>
-        )}
-        <div className="config-field" style={{ marginTop: 6 }}>
-          <span>Private key API wallet</span>
-          <input
-            type="password"
-            className="hl-search"
-            style={{ margin: 0 }}
-            placeholder="0x... solo se cifra en backend"
-            value={apiKeyInput}
-            onChange={(event) => setApiKeyInput(event.target.value)}
-            autoComplete="off"
-          />
-        </div>
-        {apiKeyError && <span style={{ fontSize: 11, color: 'var(--red,#f44)' }}>{apiKeyError}</span>}
-        <div className="wallet-actions" style={{ marginTop: 8 }}>
-          <button className="mini-btn" onClick={saveApiKey} disabled={apiKeySaving || !apiKeyInput.trim()}>
-            {apiKeySaving ? 'Guardando...' : 'Guardar API'}
-          </button>
-          {credentialStatus?.connected && (
-            <button className="mini-btn" onClick={revokeApiKey}>Revocar API</button>
-          )}
-        </div>
-      </div>
 
       {/* Leverage */}
       <label className="config-field" style={{ padding: '4px 0' }}>
@@ -2382,6 +2927,106 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulation
           <button className="mini-btn amber" onClick={handleManual}>Disparar manual</button>
         )}
       </div>
+    </div>
+  );
+}
+
+// Límites de ejecución (valores efectivos) — admin.
+function ExecutionLimitsPanel() {
+  const limits = useQuery(api.systemConfig.getExecutionLimits, {});
+  const setPerOrder = useMutation(api.systemConfig.setMaxNotionalPerOrder);
+  const setDaily = useMutation(api.systemConfig.setMaxNotionalPerUserDaily);
+  const setBuffer = useMutation(api.systemConfig.setSlBufferPct);
+  const [perOrder, setPerOrderV] = React.useState('');
+  const [daily, setDailyV] = React.useState('');
+  const [buffer, setBufferV] = React.useState('');
+  const [msg, setMsg] = React.useState('');
+  React.useEffect(() => {
+    if (limits) {
+      setPerOrderV(String(limits.maxNotionalPerOrder));
+      setDailyV(String(limits.maxNotionalPerUserDaily));
+      setBufferV(String(limits.slBufferPct));
+    }
+  }, [limits]);
+  async function apply(fn, val) {
+    setMsg('');
+    try { await fn({ value: Number(val) }); setMsg('Guardado.'); }
+    catch (e) { setMsg(e?.message ?? 'Error'); }
+  }
+  const Row = ({ label, val, set, fn, step, allowZero }) => {
+    const n = Number(val);
+    const valid = Number.isFinite(n) && (allowZero ? n >= 0 : n > 0);
+    return (
+      <label className="config-field" style={{ marginTop: 6 }}><span>{label}</span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <input type="number" step={step ?? '1'} value={val} onChange={(e) => set(e.target.value)} />
+          <button className="mini-btn" onClick={() => apply(fn, val)} disabled={!valid}>Set</button>
+        </div></label>
+    );
+  };
+  return (
+    <div className="be-block" style={{ marginTop: 12 }}>
+      <div className="be-head"><span>Límites de ejecución (efectivos)</span></div>
+      <Row label="Máx nocional por orden (USDC)" val={perOrder} set={setPerOrderV} fn={setPerOrder} />
+      <Row label="Máx nocional diario / usuario (USDC)" val={daily} set={setDailyV} fn={setDaily} />
+      <Row label="Buffer SL (%)" val={buffer} set={setBufferV} fn={setBuffer} step="0.1" allowZero />
+
+      {msg && <span style={{ fontSize: 11 }}>{msg}</span>}
+    </div>
+  );
+}
+
+// Concesión/revocación de canTradeLive — admin (paginado).
+function BetaPermissionsPanel() {
+  const { results, status, loadMore } = usePaginatedQuery(
+    api.users.listUsersWithTradeLive, {}, { initialNumItems: 50 });
+  const grant = useMutation(api.users.grantTradeLive);
+  const revoke = useMutation(api.users.revokeTradeLive);
+  const [msg, setMsg] = React.useState('');
+  async function toggle(u) {
+    setMsg('');
+    try { u.canTradeLive ? await revoke({ userId: u.userId }) : await grant({ userId: u.userId }); }
+    catch (e) { setMsg(e?.message ?? 'Error'); }
+  }
+  return (
+    <div className="be-block" style={{ marginTop: 12 }}>
+      <div className="be-head"><span>Trading real (canTradeLive)</span></div>
+      {results.map((u) => (
+        <div key={u.userId} className="wallet-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '4px 0' }}>
+          <span style={{ fontSize: 12 }}>{u.email ?? u.name ?? u.userId.slice(0, 8)}{u.role === 'admin' ? ' (admin)' : ''}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className={`pill ${u.canTradeLive ? 'green' : 'faint'}`} style={{ fontSize: 10 }}>{u.canTradeLive ? 'SÍ' : 'NO'}</span>
+            {u.role !== 'admin' && <button className="mini-btn" onClick={() => toggle(u)}>{u.canTradeLive ? 'Revocar' : 'Conceder'}</button>}
+          </div>
+        </div>
+      ))}
+      {status === 'CanLoadMore' && <button className="mini-btn" style={{ marginTop: 6 }} onClick={() => loadMore(50)}>Cargar más</button>}
+      {msg && <span style={{ fontSize: 11, color: 'var(--red)' }}>{msg}</span>}
+    </div>
+  );
+}
+
+// Observabilidad de ejecuciones reales (status/error en vivo) — admin. El "dónde falla".
+function ExecutionsObservabilityPanel() {
+  const rows = useQuery(api.executions.listRecentExecutions, { limit: 50 });
+  const color = (s) => (s === 'protected' || s === 'closed') ? 'green'
+    : s === 'failed' ? 'faint' : (s === 'sl_failed' || s === 'unknown') ? 'red' : 'amber';
+  return (
+    <div className="be-block" style={{ marginTop: 12 }}>
+      <div className="be-head"><span>Ejecuciones recientes (diagnóstico)</span></div>
+      {(rows ?? []).length === 0 && <span className="network" style={{ fontSize: 11 }}>Sin ejecuciones.</span>}
+      {(rows ?? []).map((r) => (
+        <div key={r.requestId} style={{ fontSize: 11, padding: '4px 0', borderBottom: '1px solid var(--border,#222)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+            <span><span className={`pill ${color(r.status)}`} style={{ fontSize: 10 }}>{r.status}</span> {r.asset} {r.side} ${typeof r.notional === 'number' ? r.notional.toFixed(2) : r.notional}</span>
+            <span className="network">{r.email ?? String(r.userId).slice(0, 8)} · {r.network}</span>
+          </div>
+          {r.error && <div style={{ color: 'var(--red)' }}>{r.error}</div>}
+          <div className="network">
+            {r.botName ?? ''} · {r.account ?? (r.accountAddress ? `${r.accountAddress.slice(0, 6)}…${r.accountAddress.slice(-4)}` : String(r.hlAccountId).slice(0, 8))} · {new Date(r.updatedAt).toLocaleTimeString('es')}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -2506,6 +3151,10 @@ function AdminPanel({ simulationMode, tradingEnabled, onSetSimulation, onSetTrad
           )}
         </div>
       </div>
+
+      <BetaPermissionsPanel />
+      <ExecutionLimitsPanel />
+      <ExecutionsObservabilityPanel />
     </section>
   );
 }
@@ -2533,6 +3182,8 @@ function Dashboard({ user, onLogout, userId }) {
   const userPermissions = useQuery(api.users.getUserPermissions, {});
   // Gestionar bots: admins o usuarios con el permiso canManageBots vigente.
   const canManageBots = isAdmin || (userPermissions ?? []).some((p) => p.permission === 'canManageBots');
+  // Trading real (separado): admins o usuarios con canTradeLive vigente.
+  const canTradeLive = isAdmin || (userPermissions ?? []).some((p) => p.permission === 'canTradeLive');
   const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
   const signals = useQuery(api.tradesHistory.listSignals, {});
   const signalCooldownRef = React.useRef({});
@@ -2635,6 +3286,7 @@ function Dashboard({ user, onLogout, userId }) {
         // Posición LP real del usuario sobreescribe mock cuando está disponible
         ...(pd != null ? {
           liquidity: pd.liquidityUsd,
+          liquidityReal: true,          // lectura on-chain real (vs mock estimado)
           exposure: pd.exposure,
           ...(pd.borrowHealth > 0 ? {
             borrowHealth: pd.borrowHealth,
@@ -2907,9 +3559,10 @@ function Dashboard({ user, onLogout, userId }) {
                 </button>
               </div>
               <div className="pool-grid">
-                {filteredPools.map((pool) => <PoolCard key={pool.id} pool={pool} isAdmin={isAdmin} />)}
+                {filteredPools.map((pool) => <PoolCard key={pool.id} pool={pool} canManage={canManageBots} canTradeLive={canTradeLive} />)}
               </div>
             </section>
+            {canTradeLive && <HLAccountsPanel />}
             <SpotPositions
               prices={prices}
               connected={connected}

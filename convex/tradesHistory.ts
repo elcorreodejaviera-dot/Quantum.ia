@@ -15,17 +15,30 @@ export const recordSignal = mutation({
   },
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
+    // Si la señal proviene de un bot, asset/botName se DERIVAN del bot (no del cliente):
+    // evita atribuir una señal a un bot ajeno o falsear el asset/nombre.
+    let asset = args.asset;
+    let botName = args.botName;
+    if (args.botId) {
+      const bot = await ctx.db.get(args.botId);
+      if (!bot) throw new Error("Bot not found");
+      if (bot.userId !== user._id) throw new Error("Bot does not belong to this user");
+      // Derivación estricta: no caer al asset del cliente.
+      if (!bot.baseAsset) throw new Error("Bot has no base asset");
+      asset = bot.baseAsset;
+      botName = bot.name;
+    }
     return await ctx.db.insert("trades_history", {
       userId: user._id,
       action: args.action,
-      asset: args.asset,
+      asset,
       amount: args.amount,
       price: args.price,
       simulated: true,
       network: args.network,
       timestamp: Date.now(),
       botId: args.botId,
-      botName: args.botName,
+      botName,
       triggerType: args.triggerType ?? "auto",
     });
   },

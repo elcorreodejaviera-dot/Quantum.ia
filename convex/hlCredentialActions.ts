@@ -5,6 +5,7 @@ import { internal } from "./_generated/api";
 import { v } from "convex/values";
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "crypto";
 import { privateKeyToAccount } from "viem/accounts";
+import { hlInfoUrl } from "./hlNetwork";
 
 function encryptionKey(): Buffer {
   const secret = process.env.HL_CREDENTIALS_ENCRYPTION_KEY;
@@ -46,18 +47,70 @@ export function decryptPrivateKey(record: {
   return normalizePrivateKey(decrypted);
 }
 
-export const save = action({
-  args: { privateKey: v.string() },
-  handler: async (ctx, { privateKey }) => {
+// `save` (cuenta única legacy) eliminado: reemplazado por connectAccount (multi-cuenta, con
+// verificación userRole + unicidad global + tradingAccountAddress obligatorio).
+
+// --- Multi-cuenta (Fase 1) ---
+
+const EVM_RE = /^0x[a-fA-F0-9]{40}$/;
+
+// Consulta el rol de una dirección en Hyperliquid (Info endpoint, red según HL_NETWORK).
+async function fetchUserRole(address: string): Promise<{ role: string; data?: { user?: string } }> {
+  // Timeout: sin él, una HL lenta/no disponible colgaría la action indefinidamente (CodeRabbit).
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const res = await fetch(hlInfoUrl(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "userRole", user: address }),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`Hyperliquid info respondió ${res.status}`);
+    return await res.json() as { role: string; data?: { user?: string } };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// Conecta una cuenta HL (wallet EVM principal + su API wallet firmante).
+// Verifica en Hyperliquid que el agente está autorizado para esa cuenta principal.
+export const connectAccount = action({
+  args: {
+    privateKey: v.string(),              // clave privada de la API wallet (NO la de MetaMask/Rabby)
+    tradingAccountAddress: v.string(),   // dirección de la cuenta principal (MetaMask/Rabby) en HL
+    label: v.optional(v.string()),
+  },
+  handler: async (ctx, { privateKey, tradingAccountAddress, label }) => {
     const user = await ctx.runQuery(internal.users.getCurrentUserInternal, {});
     const normalized = normalizePrivateKey(privateKey);
-    const account = privateKeyToAccount(normalized);
+    const agentAddress = privateKeyToAccount(normalized).address.toLowerCase();
+    const tradingAddr = tradingAccountAddress.trim().toLowerCase();
+
+    if (!EVM_RE.test(tradingAddr)) throw new Error("La dirección de la cuenta principal no es válida.");
+    if (agentAddress === tradingAddr) {
+      throw new Error("La API wallet no puede ser igual a la cuenta principal.");
+    }
+
+    // El agente debe estar autorizado por esa cuenta principal en Hyperliquid.
+    const agentRole = await fetchUserRole(agentAddress);
+    if (agentRole.role !== "agent" || (agentRole.data?.user ?? "").toLowerCase() !== tradingAddr) {
+      throw new Error("La API wallet no está autorizada para esa cuenta en Hyperliquid.");
+    }
+    // La cuenta principal debe ser una cuenta de usuario real en Hyperliquid.
+    const acctRole = await fetchUserRole(tradingAddr);
+    if (acctRole.role !== "user") {
+      throw new Error("La dirección indicada no es una cuenta principal de Hyperliquid.");
+    }
+
     const encrypted = encryptPrivateKey(normalized);
-    await ctx.runMutation(internal.hlCredentials.upsertInternal, {
+    const id = await ctx.runMutation(internal.hlCredentials.insertAccountInternal, {
       userId: user._id,
-      agentAddress: account.address.toLowerCase(),
+      label,
+      agentAddress,
+      tradingAccountAddress: tradingAddr,
       ...encrypted,
     });
-    return { connected: true, agentAddress: account.address.toLowerCase() };
+    return { id, agentAddress, tradingAccountAddress: tradingAddr };
   },
 });

@@ -23,6 +23,11 @@ export const listPoolsInternal = internalQuery({
   },
 });
 
+export const getPoolByIdInternal = internalQuery({
+  args: { id: v.id("pools") },
+  handler: async (ctx, { id }) => await ctx.db.get(id),
+});
+
 export const patchPoolApy = internalMutation({
   args: {
     id: v.id("pools"),

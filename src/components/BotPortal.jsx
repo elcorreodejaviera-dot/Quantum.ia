@@ -3284,7 +3284,6 @@ function Dashboard({ user, onLogout, userId }) {
         amountToRepay: 0,
         liquidationThreshold: 0,
         availableToBorrow: 0,
-        status: 'Sin datos',
         ...mock,
         ...p,
         id: p._id,

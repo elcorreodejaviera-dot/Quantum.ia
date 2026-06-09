@@ -372,7 +372,7 @@ function PoolCard({ pool, canManage, canTradeLive }) {
         )}
       </div>
 
-      <details className="pool-pnl">
+      <details className="pool-pnl" open>
         <summary className="pool-pnl-toggle">Proyección fees</summary>
         <div className="pool-pnl-body">
 

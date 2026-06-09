@@ -198,6 +198,9 @@ export const executePerpMarketOrder = action({
     if (!Number.isFinite(effectiveLeverage) || effectiveLeverage < 1 || effectiveLeverage > 25) {
       throw new Error("leverage must be a finite number between 1 and 25");
     }
+    // HL solo acepta leverage ENTERO. El margen debe calcularse con el MISMO valor aplicado,
+    // si no la reserva quedaría por debajo de lo real (Codex: leverage 1.4 → HL 1x, margen /1.4).
+    const appliedLeverage = Math.round(effectiveLeverage);
 
     const credential = await ctx.runQuery(internal.hlCredentials.getAccountByIdInternal, { id: bot.hlAccountId });
     if (!credential) throw new Error("Hyperliquid account not found");
@@ -222,6 +225,11 @@ export const executePerpMarketOrder = action({
       userId: user._id, idempotencyKey: args.idempotencyKey,
     });
     if (existing) {
+      // Misma validación que reserveExecution: una clave reutilizada con otros parámetros es
+      // un conflicto, no un éxito (Codex). Solo se reconcilia si los parámetros coinciden.
+      const same = existing.botId === bot._id && existing.side === args.side
+        && existing.network === hlNetwork() && existing.requestedAmount === args.tradeAmount;
+      if (!same) throw new Error("Conflicto de idempotencia: la clave ya existe con otros parámetros.");
       if (!["closed", "failed"].includes(existing.status)) {
         await ctx.runAction(internal.hyperliquid.reconcileExecution, { requestId: existing._id });
       }
@@ -240,7 +248,7 @@ export const executePerpMarketOrder = action({
     const availableCollateral = (spotState.balances ?? [])
       .filter((b) => b.coin === "USDC")
       .reduce((s, b) => s + Math.max(0, parseFloat(b.total ?? "0") - parseFloat(b.hold ?? "0")), 0);
-    const marginRequired = actualNotional / effectiveLeverage;
+    const marginRequired = actualNotional / appliedLeverage;
     if (!Number.isFinite(marginRequired) || marginRequired <= 0) {
       throw new Error("marginRequired inválido");
     }
@@ -278,7 +286,7 @@ export const executePerpMarketOrder = action({
       return { ok: false, status: "aborted", requestId, reason: sub.reason };
     }
 
-    await exchange.updateLeverage({ asset: assetId, isCross: false, leverage: Math.round(effectiveLeverage) });
+    await exchange.updateLeverage({ asset: assetId, isCross: false, leverage: appliedLeverage });
 
     // Gate ATÓMICO justo antes del envío (updateLeverage pudo tardar >LEASE_MS y el cron tomar el
     // control). blocked → ya cerrado failed por CAS; state/expired/claimed → no tocar (otro lo maneja).

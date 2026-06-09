@@ -185,6 +185,7 @@ function PoolCard({ pool, isAdmin }) {
   const ilBot = (allBots ?? []).find((b) => b.poolId === pool.id && b.kind === 'il') ?? null;
   const tradingBot = (allBots ?? []).find((b) => b.poolId === pool.id && b.kind === 'trading') ?? null;
   const [botModal, setBotModal] = React.useState(null);   // 'il' | 'trading' | null
+  const [testBot, setTestBot] = React.useState(null);     // bot a probar (ejecución real)
   const [botBusy, setBotBusy] = React.useState(false);
 
   async function togglePoolBot(bot) {
@@ -408,15 +409,16 @@ function PoolCard({ pool, isAdmin }) {
       {isAdmin && (
         <div className="pool-bot-actions" style={{ display: 'flex', gap: 8, marginTop: 10 }}>
           <BotActionButton label="Proteger" bot={ilBot} busy={botBusy}
-            onConfig={() => setBotModal('il')} onToggle={() => togglePoolBot(ilBot)} />
+            onConfig={() => setBotModal('il')} onToggle={() => togglePoolBot(ilBot)} onTest={() => setTestBot(ilBot)} />
           <BotActionButton label="Trading" bot={tradingBot} busy={botBusy}
-            onConfig={() => setBotModal('trading')} onToggle={() => togglePoolBot(tradingBot)} />
+            onConfig={() => setBotModal('trading')} onToggle={() => togglePoolBot(tradingBot)} onTest={() => setTestBot(tradingBot)} />
         </div>
       )}
 
     </article>
     {botModal === 'il' && <ProtectionBotModal pool={pool} bot={ilBot} onClose={() => setBotModal(null)} />}
     {botModal === 'trading' && <TradingBotModal pool={pool} bot={tradingBot} onClose={() => setBotModal(null)} />}
+    {testBot && <TestExecModal bot={testBot} onClose={() => setTestBot(null)} />}
     </>
   );
 }
@@ -1917,7 +1919,7 @@ function serializePoolBotConfig(bot, overrides = {}) {
 }
 
 // Botón de acción de un pool-bot en la PoolCard: estado + configurar/reconfigurar + pausar/activar.
-function BotActionButton({ label, bot, busy, onConfig, onToggle }) {
+function BotActionButton({ label, bot, busy, onConfig, onToggle, onTest }) {
   return (
     <div className="pool-bot-action" style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -1928,13 +1930,18 @@ function BotActionButton({ label, bot, busy, onConfig, onToggle }) {
           </span>
         )}
       </div>
-      <div style={{ display: 'flex', gap: 6 }}>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         <button className="mini-btn" onClick={onConfig} style={{ flex: 1 }}>
           {bot ? 'Reconfigurar' : 'Configurar'}
         </button>
         {bot && (
           <button className="mini-btn" onClick={onToggle} disabled={busy}>
             {bot.active ? 'Pausar' : 'Activar'}
+          </button>
+        )}
+        {bot && bot.active && !bot.simulationMode && (
+          <button className="mini-btn" onClick={onTest} style={{ color: 'var(--red)', borderColor: 'var(--red)' }}>
+            Probar
           </button>
         )}
       </div>
@@ -2275,6 +2282,69 @@ function TradingBotModal({ pool, bot, onClose, onSaved }) {
           <button className="ghost-btn" onClick={onClose} disabled={saving} style={{ flex: 1 }}>Cancelar</button>
           <button className="primary-btn" onClick={handleSave} disabled={saving || !hlAccountId} style={{ flex: 1 }}>
             {saving ? 'Guardando…' : (bot ? 'Guardar cambios' : 'Activar Trading')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Disparador de prueba (admin) de ejecución real — JAV-37. Nocional pequeño, idempotency key.
+function TestExecModal({ bot, onClose }) {
+  const exec = useAction(api.hyperliquid.executePerpMarketOrder);
+  const network = import.meta.env.VITE_HL_NETWORK;   // obligatoria: sin fallback a mainnet
+  const fixedSide = bot.direction === 'short' ? 'Short' : bot.direction === 'long' ? 'Long' : null;
+  const [side, setSide] = React.useState(fixedSide ?? 'Long');
+  const [amount, setAmount] = React.useState(10);
+  const [busy, setBusy] = React.useState(false);
+  const [result, setResult] = React.useState(null);
+  const [error, setError] = React.useState('');
+
+  async function run() {
+    if (!network) { setError('VITE_HL_NETWORK no configurada — ejecución deshabilitada.'); return; }
+    setError(''); setResult(null); setBusy(true);
+    try {
+      const r = await exec({
+        botId: bot._id, side, tradeAmount: Number(amount),
+        idempotencyKey: crypto.randomUUID(),
+        expectedNetwork: network,
+        confirmLive: true,
+      });
+      setResult(r);
+    } catch (e) {
+      setError(e?.message ?? 'Error ejecutando la orden.');
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={busy ? undefined : onClose}>
+      <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="section-head">
+          <h2>Probar ejecución</h2>
+          <span className={`pill ${network ? 'red' : 'amber'}`}>{network ?? 'sin red'}</span>
+        </div>
+        {!network && <p style={{ color: 'var(--red)', fontSize: 12 }}>VITE_HL_NETWORK no configurada — ejecución deshabilitada.</p>}
+        <p className="network" style={{ fontSize: 12 }}>
+          {bot.baseAsset} · {bot.name}. Orden real con precio del servidor y SL automático. Usa nocional pequeño.
+        </p>
+        {!fixedSide && (
+          <label className="config-field" style={{ marginTop: 8 }}>
+            <span>Lado</span>
+            <select value={side} onChange={(e) => setSide(e.target.value)}>
+              <option>Long</option><option>Short</option>
+            </select>
+          </label>
+        )}
+        <label className="config-field" style={{ marginTop: 8 }}>
+          <span>Nocional (USDC)</span>
+          <input type="number" min="1" step="1" value={amount} onChange={(e) => setAmount(e.target.value)} />
+        </label>
+        {error && <p style={{ color: 'var(--red)', fontSize: 12 }}>{error}</p>}
+        {result && <p style={{ color: 'var(--green)', fontSize: 12 }}>Estado: {result.status ?? (result.deduped ? 'deduped' : 'ok')}</p>}
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <button className="ghost-btn" onClick={onClose} disabled={busy} style={{ flex: 1 }}>Cerrar</button>
+          <button className="primary-btn" onClick={run} disabled={busy || !network || !(Number(amount) > 0)} style={{ flex: 1 }}>
+            {busy ? 'Ejecutando…' : 'Ejecutar orden real'}
           </button>
         </div>
       </div>

@@ -5,6 +5,7 @@ import { internal } from "./_generated/api";
 import { v } from "convex/values";
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "crypto";
 import { privateKeyToAccount } from "viem/accounts";
+import { hlInfoUrl } from "./hlNetwork";
 
 function encryptionKey(): Buffer {
   const secret = process.env.HL_CREDENTIALS_ENCRYPTION_KEY;
@@ -51,12 +52,11 @@ export function decryptPrivateKey(record: {
 
 // --- Multi-cuenta (Fase 1) ---
 
-const HL_INFO_URL = "https://api.hyperliquid.xyz/info";
 const EVM_RE = /^0x[a-fA-F0-9]{40}$/;
 
-// Consulta el rol de una dirección en Hyperliquid (Info endpoint).
+// Consulta el rol de una dirección en Hyperliquid (Info endpoint, red según HL_NETWORK).
 async function fetchUserRole(address: string): Promise<{ role: string; data?: { user?: string } }> {
-  const res = await fetch(HL_INFO_URL, {
+  const res = await fetch(hlInfoUrl(), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ type: "userRole", user: address }),

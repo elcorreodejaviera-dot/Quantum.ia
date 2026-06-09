@@ -218,4 +218,43 @@ export default defineSchema({
     key: v.string(),
     value: v.any(),
   }).index("by_key", ["key"]),
+
+  // Ciclo de vida de una ejecución real en HL (JAV-37). Modela idempotency, reserva de
+  // nocional y recuperación por cloid. trades_history queda como log final.
+  execution_requests: defineTable({
+    userId: v.id("users"),
+    botId: v.id("bots"),
+    idempotencyKey: v.string(),
+    // Snapshot inmutable de los parámetros efectivos: la reconciliación NO relee el bot
+    // (que puede reconfigurarse). Protege la posición original aunque el bot/cuenta cambien.
+    hlAccountId: v.id("hl_api_credentials"),
+    asset: v.string(),
+    stopLossPct: v.number(),
+    requestedAmount: v.number(),          // tradeAmount solicitado (base del dedupe)
+    notional: v.number(),                 // nocional efectivo (size × markPx) de la 1ª ejecución
+    side: v.union(v.literal("Long"), v.literal("Short")),
+    status: v.union(
+      v.literal("pending"), v.literal("submitting"), v.literal("entry_filled"),
+      v.literal("protected"), v.literal("sl_failed"), v.literal("closed"),
+      v.literal("unknown"), v.literal("failed")),
+    network: v.string(),                  // "mainnet" | "testnet" capturada al reservar
+    entryCloid: v.string(),
+    slCloid: v.string(),                   // cloid del SL del intento actual
+    slAttempt: v.optional(v.number()),     // nº de recolocación → nuevo cloid determinista
+    submittedAt: v.optional(v.number()),           // cuándo se envió la entrada (grace de unknownOid)
+    reconcileLeaseUntil: v.optional(v.number()),   // claim exclusivo de reconciliación (anti-carrera)
+    reconcileLeaseToken: v.optional(v.string()),   // fencing token: propietario del claim actual
+    entryOrderId: v.optional(v.string()),
+    slOrderId: v.optional(v.string()),
+    filledSize: v.optional(v.number()),
+    entryPrice: v.optional(v.number()),
+    error: v.optional(v.string()),
+    historyRecorded: v.optional(v.boolean()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_user_idempotency", ["userId", "idempotencyKey"])
+    .index("by_user_created", ["userId", "createdAt"])
+    .index("by_status_created", ["status", "createdAt"])
+    .index("by_account", ["hlAccountId"]),   // bloquear revocación con ejecuciones abiertas
 });

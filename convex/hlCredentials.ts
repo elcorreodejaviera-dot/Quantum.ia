@@ -34,6 +34,18 @@ export const revokeById = mutation({
     const cred = await ctx.db.get(id);
     if (!cred) return;
     if (cred.userId !== user._id) throw new Error("Sin permiso para revocar esta cuenta.");
+    // No revocar mientras existan ejecuciones abiertas (snapshot de la cuenta): dejaría una
+    // posición sin posibilidad de colocar/reconciliar su SL (perderíamos la clave privada).
+    const open = await ctx.db
+      .query("execution_requests")
+      .withIndex("by_account", (q) => q.eq("hlAccountId", id))
+      .collect();
+    // Solo closed (SL ejecutado) y failed (sin entrada) son seguros: el resto puede tener
+    // posición abierta — incluido `protected` (SL resting, la posición sigue viva).
+    const hasOpen = open.some((r) => !["closed", "failed"].includes(r.status));
+    if (hasOpen) {
+      throw new Error("La cuenta tiene ejecuciones abiertas; espera a que se cierren antes de revocar.");
+    }
     const linked = await ctx.db
       .query("bots")
       .withIndex("by_user_account", (q) => q.eq("userId", user._id).eq("hlAccountId", id))

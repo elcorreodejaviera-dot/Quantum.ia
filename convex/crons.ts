@@ -21,4 +21,10 @@ crons.interval(
   internal.actions.poolScanner.checkAllPoolClosures,
 );
 
+crons.interval(
+  "reconcile HL executions",
+  { minutes: 1 },
+  internal.executionsCron.reconcileStaleExecutions,
+);
+
 export default crons;

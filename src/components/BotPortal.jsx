@@ -89,24 +89,30 @@ function aprParts(annual) {
 
 
 function Summary({ pools, bots }) {
+  const accounts = useQuery(api.hlCredentials.list) ?? [];
   const totalLiquidity = pools.reduce((sum, pool) => sum + pool.liquidity, 0);
-  const fees = pools.reduce((sum, pool) => sum + pool.fees24h, 0);
+  // Fees del USUARIO: su parte proporcional en cada pool (misma fórmula que el PoolCard),
+  // no el fee total del pool de DeFiLlama — así coincide con lo que se ve en cada tarjeta.
+  const fees = pools.reduce((sum, pool) => {
+    const fee1d = pool.fees1d ?? pool.fees24h ?? 0;
+    const tvl = pool.tvl ?? 0;
+    const share = tvl > 0 && pool.liquidity > 0 ? pool.liquidity / tvl : 0;
+    return sum + fee1d * share;
+  }, 0);
   const avgApy = pools.length > 0
     ? pools.reduce((sum, pool) => sum + (pool.apy ?? 0), 0) / pools.length
     : 0;
-  const activeBots = bots.filter((bot) => bot.active).length;
-  const walletBalance = WALLETS.reduce((sum, wallet) => sum + wallet.balance, 0);
 
   return (
     <div className="summary-grid">
       <SummaryItem label="Liquidez monitoreada" value={formatUsd(totalLiquidity)} sub={`${pools.length} pools activos`} />
-      <SummaryItem label="Fees 24h" value={formatUsd(fees)} sub="Estimado por rango" />
+      <SummaryItem label="Fees 24h (tu parte)" value={formatUsd(fees)} sub="Estimado por posición" />
       <SummaryItem
         label="APY promedio"
         value={pools.length > 0 ? `${avgApy.toFixed(1)}%` : '—'}
         sub={pools.length > 0 ? `${(avgApy / 52).toFixed(2)}% semanal` : 'Sin datos'}
       />
-      <SummaryItem label="Wallets monitoreadas" value={`${WALLETS.length}`} sub={`${formatUsd(walletBalance)} total`} />
+      <SummaryItem label="Cuentas Hyperliquid" value={`${accounts.length}`} sub={accounts.length === 1 ? '1 conectada' : `${accounts.length} conectadas`} />
     </div>
   );
 }
@@ -432,9 +438,13 @@ function Metric({ label, value }) {
   );
 }
 
-function SubscriptionBar() {
+function SubscriptionBar({ pools = [] }) {
   const current = SUBSCRIPTIONS[2]; // Pro $50,000
   const [mobileOpen, setMobileOpen] = React.useState(false);
+  // Cobertura usada = liquidez real monitoreada en los pools del usuario.
+  const used = pools.reduce((sum, p) => sum + (p.liquidity ?? 0), 0);
+  const pct = current.coverage > 0 ? Math.min(100, (used / current.coverage) * 100) : 0;
+  const pctStr = `${pct.toFixed(pct < 10 ? 1 : 0)}%`;
 
   return (
     <div className={`sub-bar-inline${mobileOpen ? ' sub-mobile-open' : ''}`}>
@@ -442,15 +452,15 @@ function SubscriptionBar() {
         {current.type} Online <span className="sub-badge-chevron">{mobileOpen ? '▲' : '▼'}</span>
       </button>
       <div className="sub-stat">
-        <span className="sub-stat-label">Cobertura: $0 / {formatUsdCompact(current.coverage)}</span>
+        <span className="sub-stat-label">Cobertura: {formatUsdCompact(used)} / {formatUsdCompact(current.coverage)}</span>
         <div className="sub-progress-track">
-          <div className="sub-progress-fill active" style={{ width: '0%' }} />
+          <div className="sub-progress-fill active" style={{ width: pctStr }} />
         </div>
       </div>
       <div className="sub-stat">
-        <span className="sub-stat-label">Cobertura de pools: $0 / {formatUsdCompact(current.coverage)}</span>
+        <span className="sub-stat-label">Cobertura de pools: {formatUsdCompact(used)} / {formatUsdCompact(current.coverage)}</span>
         <div className="sub-progress-track">
-          <div className="sub-progress-fill" style={{ width: '0%' }} />
+          <div className="sub-progress-fill" style={{ width: pctStr }} />
         </div>
       </div>
       <button className="sub-upgrade-btn">Upgrade</button>
@@ -3495,7 +3505,7 @@ function Dashboard({ user, onLogout, userId }) {
           <span className="status-dot"></span>
           <div className="brand">Quantum<em>.ia</em></div>
           <span className="pill">Liquidity Hedge</span>
-          <SubscriptionBar />
+          <SubscriptionBar pools={pools} />
         </div>
         <div className="top-actions">
           <button className="ghost-btn" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>

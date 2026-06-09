@@ -53,6 +53,25 @@ const ALLOWED: Record<string, Set<string>> = {
 };
 
 // Reserva atómica (OCC) de idempotency + nocional, ANTES de tocar HL.
+// Margen de seguridad sobre el colateral disponible (cota conservadora; HL es autoridad final).
+const MARGIN_SAFETY_BUFFER = 0.10;
+// Estados que mantienen margen comprometido en la cuenta (todos menos los finales).
+const OPEN_MARGIN_STATES = new Set([
+  "pending", "submitting", "entry_filled", "protected", "sl_failed", "unknown",
+]);
+
+// Dedupe-check ligero ANTES de los gates de modo/margen (evita que un reintento de una
+// solicitud existente falle por saldo/modo actuales antes de poder reconciliarse).
+export const findByIdempotency = internalQuery({
+  args: { userId: v.id("users"), idempotencyKey: v.string() },
+  handler: async (ctx, { userId, idempotencyKey }) => {
+    return await ctx.db
+      .query("execution_requests")
+      .withIndex("by_user_idempotency", (q) => q.eq("userId", userId).eq("idempotencyKey", idempotencyKey))
+      .first();
+  },
+});
+
 export const reserveExecution = internalMutation({
   args: {
     userId: v.id("users"),
@@ -63,6 +82,8 @@ export const reserveExecution = internalMutation({
     stopLossPct: v.number(),
     requestedAmount: v.number(),
     notional: v.number(),
+    marginRequired: v.number(),       // notional/leverage de ESTA ejecución
+    availableCollateral: v.number(),  // colateral snapshot (USDC spot libre) — sin doble conteo
     side: v.union(v.literal("Long"), v.literal("Short")),
     network: v.string(),
     entryCloid: v.string(),
@@ -71,6 +92,12 @@ export const reserveExecution = internalMutation({
   handler: async (ctx, args) => {
     if (!Number.isFinite(args.notional) || args.notional <= 0) {
       throw new Error("notional debe ser un número finito > 0");
+    }
+    if (!Number.isFinite(args.marginRequired) || args.marginRequired <= 0) {
+      throw new Error("marginRequired debe ser un número finito > 0");
+    }
+    if (!Number.isFinite(args.availableCollateral) || args.availableCollateral < 0) {
+      throw new Error("availableCollateral debe ser un número finito >= 0");
     }
     // (0) Admisión autoritativa: revalida switches + canTradeLive + estado del bot en la misma
     // mutation que reserva, cerrando la ventana entre la validación de la action y la reserva.
@@ -107,6 +134,23 @@ export const reserveExecution = internalMutation({
     if (dailyUsed + args.notional > maxDaily) {
       throw new Error(`Volumen diario excedido: ${dailyUsed} + ${args.notional} > ${maxDaily}.`);
     }
+    // (2b) Reserva de margen ATÓMICA por cuenta (anti-carrera). Esta mutation serializa, así que
+    // dos ejecuciones concurrentes de la misma cuenta se contabilizan una tras otra. Se suma el
+    // margen ya comprometido por ejecuciones abiertas de la cuenta + el de esta; debe caber en el
+    // colateral disponible (snapshot) con un buffer de seguridad.
+    const openOnAccount = await ctx.db
+      .query("execution_requests")
+      .withIndex("by_account", (q) => q.eq("hlAccountId", args.hlAccountId))
+      .collect();
+    const marginCommitted = openOnAccount
+      .filter((r) => OPEN_MARGIN_STATES.has(r.status))
+      // fallback conservador: si una fila no tiene marginReserved, cuenta su notional completo.
+      .reduce((sum, r) => sum + (r.marginReserved ?? r.notional), 0);
+    if ((marginCommitted + args.marginRequired) > args.availableCollateral * (1 - MARGIN_SAFETY_BUFFER)) {
+      throw new Error(
+        `Margen insuficiente en la cuenta: comprometido ${marginCommitted.toFixed(2)} + requerido ` +
+        `${args.marginRequired.toFixed(2)} > colateral ${args.availableCollateral.toFixed(2)} (buffer ${MARGIN_SAFETY_BUFFER * 100}%).`);
+    }
     // (3) Reservar en estado pending.
     const now = Date.now();
     const requestId = await ctx.db.insert("execution_requests", {
@@ -118,6 +162,7 @@ export const reserveExecution = internalMutation({
       stopLossPct: args.stopLossPct,
       requestedAmount: args.requestedAmount,
       notional: args.notional,
+      marginReserved: args.marginRequired,
       side: args.side,
       status: "pending",
       network: args.network,

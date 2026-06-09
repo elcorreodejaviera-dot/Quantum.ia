@@ -2,45 +2,8 @@ import { internalMutation, internalQuery, mutation, query } from "./_generated/s
 import { v } from "convex/values";
 import { requireUser } from "./helpers";
 
-export const status = query({
-  args: {},
-  handler: async (ctx) => {
-    const user = await requireUser(ctx);
-    const credential = await ctx.db
-      .query("hl_api_credentials")
-      .withIndex("by_user", (q) => q.eq("userId", user._id))
-      .first();
-    if (!credential) return { connected: false };
-    return {
-      connected: true,
-      id: credential._id,                 // la UI lo usa para vincular bots a la cuenta
-      agentAddress: credential.agentAddress,
-      updatedAt: credential.updatedAt,
-    };
-  },
-});
-
-export const revoke = mutation({
-  args: {},
-  handler: async (ctx) => {
-    const user = await requireUser(ctx);
-    const existing = await ctx.db
-      .query("hl_api_credentials")
-      .withIndex("by_user", (q) => q.eq("userId", user._id))
-      .first();
-    if (!existing) return;
-    // Evitar hlAccountId colgante: pausar y desvincular los bots que usaban esta cuenta.
-    const linked = await ctx.db
-      .query("bots")
-      .withIndex("by_user", (q) => q.eq("userId", user._id))
-      .filter((q) => q.eq(q.field("hlAccountId"), existing._id))
-      .collect();
-    for (const bot of linked) {
-      await ctx.db.patch(bot._id, { active: false, hlAccountId: undefined });
-    }
-    await ctx.db.delete(existing._id);
-  },
-});
+// Legacy de cuenta única eliminado (status/revoke/getForUserInternal/save): usaban `.first()`
+// ambiguo en un modelo multi-cuenta. Reemplazado por list/revokeById/connectAccount.
 
 // --- Multi-cuenta (Fase 1) ---
 
@@ -111,16 +74,6 @@ export const insertAccountInternal = internalMutation({
     if (dupAcct) throw new Error("Esta cuenta de Hyperliquid ya está registrada en el portal.");
     const now = Date.now();
     return await ctx.db.insert("hl_api_credentials", { ...args, createdAt: now, updatedAt: now });
-  },
-});
-
-export const getForUserInternal = internalQuery({
-  args: { userId: v.id("users") },
-  handler: async (ctx, { userId }) => {
-    return await ctx.db
-      .query("hl_api_credentials")
-      .withIndex("by_user", (q) => q.eq("userId", userId))
-      .first();
   },
 });
 

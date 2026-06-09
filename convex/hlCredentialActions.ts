@@ -46,17 +46,8 @@ export function decryptPrivateKey(record: {
   return normalizePrivateKey(decrypted);
 }
 
-// DEPRECADO (Fase 1, multi-cuenta). No registra `tradingAccountAddress` (ahora obligatorio en
-// el schema) ni verifica `userRole` ni la unicidad global → incompatible con el contrato nuevo.
-// Bloqueado hasta que la UI migre a `connectAccount` (Parte C). NO reactivar el insert legacy.
-export const save = action({
-  args: { privateKey: v.string() },
-  handler: async () => {
-    throw new Error(
-      "Conexión de API wallet actualizada: usa connectAccount (requiere la cuenta principal de Hyperliquid).",
-    );
-  },
-});
+// `save` (cuenta única legacy) eliminado: reemplazado por connectAccount (multi-cuenta, con
+// verificación userRole + unicidad global + tradingAccountAddress obligatorio).
 
 // --- Multi-cuenta (Fase 1) ---
 

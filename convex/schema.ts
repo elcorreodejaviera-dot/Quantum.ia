@@ -59,27 +59,51 @@ export default defineSchema({
 
   bots: defineTable({
     name: v.string(),
-    action: v.string(),
+    // --- Campos legacy (bots demo). Opcionales: los bots por pool usan los canónicos de abajo. ---
+    action: v.optional(v.string()),
     active: v.boolean(),
-    mode: v.string(),
-    trigger: v.string(),
+    mode: v.optional(v.string()),
+    trigger: v.optional(v.string()),
     walletId: v.optional(v.string()),
-    capitalPerTrade: v.number(),
-    leverage: v.number(),
-    stop: v.number(),
+    capitalPerTrade: v.optional(v.number()),
+    stop: v.optional(v.number()),
     simulationMode: v.boolean(),
     orderType: v.optional(v.string()),
     entryTrigger: v.optional(v.string()),
     triggerPrice: v.optional(v.number()),
-    autoLeverage: v.optional(v.boolean()),
     collateral: v.optional(v.string()),
     // Multi-tenancy + vínculo explícito al pool protegido.
-    // Opcionales para no romper bots/seeds existentes (backfill vía migración).
     userId: v.optional(v.id("users")),
     poolId: v.optional(v.id("pools")),
+    // --- Bots por pool (Fase 1): dos tipos con config canónica ---
+    // kind: "il" = cobertura de impermanent loss (solo short); "trading" = breakout long/short.
+    kind: v.optional(v.union(v.literal("il"), v.literal("trading"))),
+    // Cuenta HL vinculada por ID real (ownership verificado en backend).
+    hlAccountId: v.optional(v.id("hl_api_credentials")),
+    // Asset base normalizado en backend (WETH→ETH, WBTC→BTC) — clave de colisión.
+    baseAsset: v.optional(v.string()),
+    // Dirección canónica (sustituye a `mode` para estos bots). IL siempre "short".
+    direction: v.optional(v.union(
+      v.literal("long_short"), v.literal("long"), v.literal("short"))),
+    leverage: v.optional(v.number()),              // multiplicador (1–20), fuente única
+    autoLeverage: v.optional(v.boolean()),         // único campo de auto-ajuste de leverage
+    capitalPct: v.optional(v.number()),            // capital relativo al pool (50–200), fuente única
+    bufferPct: v.optional(v.number()),             // buffer de capital extra (0–100)
+    stopLossPct: v.optional(v.number()),           // SL canónico (no reutiliza `stop`)
+    breakevenPct: v.optional(v.number()),          // % ganancia para mover SL a entrada
+    trailingStop: v.optional(v.boolean()),         // trailing (bot de trading)
+    trailingPct: v.optional(v.number()),
+    preTriggerPct: v.optional(v.number()),         // pre-trigger (bot de trading)
+    allowReentryFromAbove: v.optional(v.boolean()),// IL: proteger también al reentrar por arriba
+    autoRearm: v.optional(v.boolean()),            // reabrir tras SL automáticamente
+    tps: v.optional(v.array(v.object({ gainPct: v.number(), closePct: v.number() }))),
   })
     .index("by_user", ["userId"])
-    .index("by_pool", ["poolId"]),
+    .index("by_pool", ["poolId"])
+    // Unicidad/atomicidad: máx 1 bot por (usuario, pool, tipo) — getOrCreatePoolBot.
+    .index("by_user_pool_kind", ["userId", "poolId", "kind"])
+    // Exclusividad: una cuenta HL solo puede estar asignada a un bot (1 cuenta = 1 bot).
+    .index("by_user_account", ["userId", "hlAccountId"]),
 
   wallets: defineTable({
     label: v.string(),
@@ -91,15 +115,27 @@ export default defineSchema({
     .index("by_type", ["type"])
     .index("by_owner", ["ownerId"]),
 
+  // Varias cuentas HL por usuario (una por bot — "cada bot su cuenta").
+  // Modelo: cada cuenta es una wallet EVM independiente (MetaMask/Rabby) vinculada a HL
+  // como cuenta principal → posiciones aisladas entre cuentas. La API wallet (agentAddress)
+  // solo FIRMA; el aislamiento lo da la cuenta principal (tradingAccountAddress).
+  // Exclusividad "1 cuenta = 1 bot" sobre tradingAccountAddress.
   hl_api_credentials: defineTable({
     userId: v.id("users"),
-    agentAddress: v.string(),
+    label: v.optional(v.string()),               // nombre legible (ej. "Avaro")
+    agentAddress: v.string(),                    // API wallet que firma, lowercase
+    tradingAccountAddress: v.string(),           // cuenta principal EVM (MetaMask/Rabby) en HL, lowercase — clave de aislamiento
     encryptedPrivateKey: v.string(),
     iv: v.string(),
     authTag: v.string(),
     createdAt: v.number(),
     updatedAt: v.number(),
-  }).index("by_user", ["userId"]),
+  })
+    .index("by_user", ["userId"])
+    // Unicidad GLOBAL (no solo por usuario): ninguna cuenta/agente puede registrarse dos veces
+    // en el portal, ni siquiera entre usuarios distintos. Validado en save.
+    .index("by_agent", ["agentAddress"])
+    .index("by_trading_account", ["tradingAccountAddress"]),
 
   spot_positions: defineTable({
     asset: v.string(),

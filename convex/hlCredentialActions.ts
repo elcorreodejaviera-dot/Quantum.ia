@@ -56,13 +56,21 @@ const EVM_RE = /^0x[a-fA-F0-9]{40}$/;
 
 // Consulta el rol de una dirección en Hyperliquid (Info endpoint, red según HL_NETWORK).
 async function fetchUserRole(address: string): Promise<{ role: string; data?: { user?: string } }> {
-  const res = await fetch(hlInfoUrl(), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ type: "userRole", user: address }),
-  });
-  if (!res.ok) throw new Error(`Hyperliquid info respondió ${res.status}`);
-  return await res.json() as { role: string; data?: { user?: string } };
+  // Timeout: sin él, una HL lenta/no disponible colgaría la action indefinidamente (CodeRabbit).
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const res = await fetch(hlInfoUrl(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "userRole", user: address }),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`Hyperliquid info respondió ${res.status}`);
+    return await res.json() as { role: string; data?: { user?: string } };
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // Conecta una cuenta HL (wallet EVM principal + su API wallet firmante).

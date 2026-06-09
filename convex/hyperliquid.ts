@@ -11,6 +11,12 @@ import { hlNetwork, hlIsTestnet, assertExpectedNetwork } from "./hlNetwork";
 import { LIMIT_DEFAULTS } from "./executionLimits";
 // Timeout del envío de órdenes a HL (entrada y SL). Menor que RECONCILE_LEASE_MS (60s) para el SL.
 const HL_ORDER_TIMEOUT_MS = 30_000;
+// Entrada "market": IOC con precio agresivo para cruzar el book (la IOC se llena al MEJOR precio
+// disponible, no al límite — el slippage solo amplía el rango aceptable, no empeora el fill).
+const ENTRY_IOC_SLIPPAGE = 0.02;
+// SL stop-MARKET: tope de slippage del precio límite para que se llene al activarse, incluso en
+// una caída/subida brusca (evita el stop-limit colgado sin llenar).
+const SL_MARKET_SLIPPAGE = 0.03;
 // Tras enviar (submittedAt), margen amplio antes de cerrar un unknownOid como failed: garantiza
 // que la action (abortada a HL_ORDER_TIMEOUT_MS, con expiresAfter) ya no puede llenar la IOC.
 const ENTRY_GRACE_MS = 5 * 60_000;
@@ -103,7 +109,14 @@ async function placeStopLoss(
   side: "Long" | "Short", filledSize: number, entryPx: number,
   stopLossPct: number, bufferPct: number, slCloidVal: `0x${string}`,
 ): Promise<{ oid: string; state: "resting" | "filled" }> {
-  const { triggerPx, limitPx } = slPrices(side, entryPx, stopLossPct, bufferPct);
+  // triggerPx (cuándo se activa) según stopLossPct. bufferPct ya no fija el límite: el stop-MARKET
+  // usa un tope de slippage agresivo para garantizar el llenado al activarse.
+  const { triggerPx } = slPrices(side, entryPx, stopLossPct, bufferPct);
+  // Precio límite muy agresivo (peor precio aceptable) para que el stop-market se llene:
+  // al cerrar un Short se compra hasta +SLIPPAGE; al cerrar un Long se vende hasta −SLIPPAGE.
+  const marketLimitPx = side === "Short"
+    ? triggerPx * (1 + SL_MARKET_SLIPPAGE)
+    : triggerPx * (1 - SL_MARKET_SLIPPAGE);
   const ac = abortAfter(HL_ORDER_TIMEOUT_MS);
   let resp: unknown;
   try {
@@ -111,10 +124,10 @@ async function placeStopLoss(
       orders: [{
         a: assetId,
         b: side === "Short",                         // cerrar un Short = Buy; cerrar un Long = Sell
-        p: formatHlPrice(limitPx, szDecimals),
+        p: formatHlPrice(marketLimitPx, szDecimals),
         s: String(floorToDecimals(filledSize, szDecimals)),
         r: true,                                      // reduceOnly
-        t: { trigger: { isMarket: false, triggerPx: formatHlPrice(triggerPx, szDecimals), tpsl: "sl" } },
+        t: { trigger: { isMarket: true, triggerPx: formatHlPrice(triggerPx, szDecimals), tpsl: "sl" } },
         c: slCloidVal,
       }],
       grouping: "na",
@@ -297,11 +310,16 @@ export const executePerpMarketOrder = action({
 
     let entryResp: unknown;
     const ac = abortAfter(HL_ORDER_TIMEOUT_MS);
+    // Precio agresivo (market-like) para que la IOC cruce el book: comprar un poco por encima /
+    // vender un poco por debajo del mark. Sin esto, una IOC al mark exacto no cruza y se cancela.
+    const entryLimitPx = args.side === "Long"
+      ? markPx * (1 + ENTRY_IOC_SLIPPAGE)
+      : markPx * (1 - ENTRY_IOC_SLIPPAGE);
     try {
       entryResp = await exchange.order({
         orders: [{
           a: assetId, b: args.side === "Long",
-          p: formatHlPrice(markPx, szDecimals), s: String(size),
+          p: formatHlPrice(entryLimitPx, szDecimals), s: String(size),
           r: false, t: { limit: { tif: "Ioc" } }, c: entryCloid,
         }],
         grouping: "na",

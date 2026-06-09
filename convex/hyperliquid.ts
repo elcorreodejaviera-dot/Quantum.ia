@@ -212,6 +212,31 @@ export const executePerpMarketOrder = action({
     if (size <= 0) throw new Error("Order size rounds to zero at current price");
     const actualNotional = size * markPx;
 
+    // --- Gates de seguridad server-side (Codex), inmediatamente antes de reservar/enviar ---
+    const tradingAccount = credential.tradingAccountAddress as `0x${string}`;
+    // Gate 1: la cuenta DEBE estar en modo unified. En otros modos, el colateral spot no respalda
+    // la posición perp y la orden podría fallar/comportarse distinto.
+    const abstraction = await info.userAbstraction({ user: tradingAccount });
+    if (abstraction !== "unifiedAccount") {
+      throw new Error("La cuenta HL no está en modo unified; operación bloqueada por seguridad.");
+    }
+    // Gate 2: margen conservador. Colateral = withdrawable perp + USDC spot LIBRE (total − hold).
+    // HL es la autoridad final (aplica haircuts), pero rechazamos aquí los casos claros de fondos
+    // insuficientes antes de tocar la cadena.
+    const [chState, spotState] = await Promise.all([
+      info.clearinghouseState({ user: tradingAccount }),
+      info.spotClearinghouseState({ user: tradingAccount }),
+    ]);
+    const perpWithdrawable = parseFloat((chState as any).withdrawable ?? "0");
+    const spotUsdcFree = ((spotState as any).balances ?? [])
+      .filter((b: any) => b.coin === "USDC")
+      .reduce((s: number, b: any) => s + (parseFloat(b.total ?? "0") - parseFloat(b.hold ?? "0")), 0);
+    const collateral = perpWithdrawable + spotUsdcFree;
+    const requiredMargin = actualNotional / effectiveLeverage;
+    if (!Number.isFinite(collateral) || collateral < requiredMargin) {
+      throw new Error(`Margen insuficiente: colateral ~$${collateral.toFixed(2)} < requerido $${requiredMargin.toFixed(2)}`);
+    }
+
     const entryCloid = cloid(args.idempotencyKey);
     const slCloid = cloid(args.idempotencyKey, ":sl:0");
 

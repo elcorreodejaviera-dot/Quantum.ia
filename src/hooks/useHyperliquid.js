@@ -364,19 +364,17 @@ export function useHLAccountBalance(address, { includeOrders = false } = {}) {
         ]);
         if (cancelled) return;
         // Modo unified: el USDC en spot PUEDE contar como colateral, pero HL aplica reglas de
-        // margen (haircuts/portfolio margin) que no se pueden calcular fiablemente en cliente.
-        // Por eso NO se suma como "disponible garantizado": withdrawable (perp) es el dato firme,
-        // spotUsdc es informativo, y estimatedTotal es solo una ESTIMACIÓN visual (no para cálculos).
-        // La disponibilidad real se valida server-side antes de cualquier operación (Codex).
-        const spotUsdc = (spotData.balances ?? [])
+        // margen (haircuts) no calculables en cliente. NO se suman (Codex): se muestran por
+        // separado — withdrawable (perp, dato firme de la API) y USDC spot LIBRE (total − hold).
+        // La disponibilidad real la valida el backend antes de operar.
+        const spotUsdcFree = (spotData.balances ?? [])
           .filter((b) => b.coin === 'USDC')
-          .reduce((s, b) => s + parseFloat(b.total ?? 0), 0);
+          .reduce((s, b) => s + (parseFloat(b.total ?? 0) - parseFloat(b.hold ?? 0)), 0);
         const perpWithdrawable = parseFloat(data.withdrawable ?? 0);
         setAccount({
           accountValue: parseFloat(data.marginSummary?.accountValue ?? 0),
           withdrawable: perpWithdrawable,
-          spotUsdc,
-          estimatedTotal: perpWithdrawable + spotUsdc,   // solo display, etiquetado "est."
+          spotUsdcFree,
           totalNtlPos: parseFloat(data.marginSummary?.totalNtlPos ?? 0),
           totalMarginUsed: parseFloat(data.marginSummary?.totalMarginUsed ?? 0),
           openPositions: (data.assetPositions ?? [])

@@ -22,13 +22,19 @@ export const backfillBotsUserId = internalMutation({
 
     const bots = await ctx.db.query("bots").collect();
     let patched = 0;
+    let paused = 0;
     for (const bot of bots) {
-      if (bot.userId === undefined) {
-        await ctx.db.patch(bot._id, { userId: admin._id });
-        patched++;
+      const patch: { userId?: typeof admin._id; active?: boolean } = {};
+      if (bot.userId === undefined) patch.userId = admin._id;
+      // Con el filtrado estricto por poolId, un bot activo sin pool quedaría inerte.
+      // Pausarlo evita el estado engañoso "activo pero no protege nada" tras el deploy.
+      if (bot.active && !bot.poolId) { patch.active = false; paused++; }
+      if (Object.keys(patch).length > 0) {
+        await ctx.db.patch(bot._id, patch);
+        if (patch.userId !== undefined) patched++;
       }
     }
 
-    return { patched, total: bots.length, adminId: admin._id };
+    return { patched, paused, total: bots.length, adminId: admin._id };
   },
 });

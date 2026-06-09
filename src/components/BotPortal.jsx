@@ -540,7 +540,7 @@ function getSignalMeta(bot, pools, prices) {
   return { asset, price: prices[asset] ?? 0, network: pool?.network ?? 'Arbitrum' };
 }
 
-function BotCard({ bot, poolClosed, onSetActive, onMode, onConfig, onManualTrigger, isAdmin, userLoaded }) {
+function BotCard({ bot, pools = [], poolClosed, canManage, onSetActive, onMode, onConfig, onManualTrigger, userLoaded }) {
   const tone = bot.active ? 'green' : 'faint';
   const [configOpen, setConfigOpen] = React.useState(false);
   const wallet = WALLETS.find((item) => item.id === bot.walletId);
@@ -560,7 +560,7 @@ function BotCard({ bot, poolClosed, onSetActive, onMode, onConfig, onManualTrigg
           <div className="network">{bot.action}</div>
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          {userLoaded && !isAdmin && <span className="pill faint" title="Solo lectura">Lectura</span>}
+          {userLoaded && !canManage && <span className="pill faint" title="Solo lectura">Lectura</span>}
           {poolClosed && <span className="pill red" title="El pool protegido se cerró on-chain">Pool cerrado</span>}
           <span className={`pill ${tone}`}>{bot.active ? 'Activo' : 'Pausado'}</span>
         </div>
@@ -582,9 +582,9 @@ function BotCard({ bot, poolClosed, onSetActive, onMode, onConfig, onManualTrigg
       <div className="bot-row">
         <span>Modo: <strong className={bot.mode === 'Long' ? 'blue' : 'cyan'}>{bot.mode}</strong></span>
         <div className="bot-actions">
-          <button className={`mini-btn ${bot.mode === 'Long' ? 'active' : ''}`} onClick={() => onMode(bot.id, 'Long')} disabled={!isAdmin}>Long</button>
-          <button className={`mini-btn ${bot.mode === 'Short' ? 'active' : ''}`} onClick={() => onMode(bot.id, 'Short')} disabled={!isAdmin}>Short</button>
-          <button className={`mini-btn ${bot.mode === 'Long + Short' ? 'active' : ''}`} onClick={() => onMode(bot.id, 'Long + Short')} disabled={!isAdmin}>Long + Short</button>
+          <button className={`mini-btn ${bot.mode === 'Long' ? 'active' : ''}`} onClick={() => onMode(bot.id, 'Long')} disabled={!canManage}>Long</button>
+          <button className={`mini-btn ${bot.mode === 'Short' ? 'active' : ''}`} onClick={() => onMode(bot.id, 'Short')} disabled={!canManage}>Short</button>
+          <button className={`mini-btn ${bot.mode === 'Long + Short' ? 'active' : ''}`} onClick={() => onMode(bot.id, 'Long + Short')} disabled={!canManage}>Long + Short</button>
         </div>
       </div>
       <div className="futures-summary">
@@ -601,15 +601,15 @@ function BotCard({ bot, poolClosed, onSetActive, onMode, onConfig, onManualTrigg
         </div>
       </div>
       <div className="bot-state-actions">
-        <button className={`mini-btn ${!bot.active ? 'active' : ''}`} onClick={() => onSetActive(bot.id, false)} disabled={!isAdmin}>Pausar</button>
-        <button className={`mini-btn ${bot.active ? 'active' : ''}`} onClick={() => onSetActive(bot.id, true)} disabled={!isAdmin}>Activar</button>
+        <button className={`mini-btn ${!bot.active ? 'active' : ''}`} onClick={() => onSetActive(bot.id, false)} disabled={!canManage}>Pausar</button>
+        <button className={`mini-btn ${bot.active ? 'active' : ''}`} onClick={() => onSetActive(bot.id, true)} disabled={!canManage || !bot.poolId || poolClosed} title={!bot.poolId ? 'Vincula un pool primero' : poolClosed ? 'El pool protegido está cerrado' : ''}>Activar</button>
       </div>
       <div className="wallet-actions">
-        <button className="mini-btn" onClick={() => setConfigOpen((value) => !value)} disabled={!isAdmin}>Configurar</button>
+        <button className="mini-btn" onClick={() => setConfigOpen((value) => !value)} disabled={!canManage}>Configurar</button>
         <button className="mini-btn">Escanear wallet</button>
         <button className="mini-btn">Token ID de pool {bot.poolTokenId}</button>
-        {bot.simulationMode && isAdmin && (
-          <button className="mini-btn amber" onClick={() => onManualTrigger?.(bot)}>
+        {bot.simulationMode && canManage && (
+          <button className="mini-btn amber" onClick={() => onManualTrigger?.(bot)} disabled={!bot.poolId || poolClosed}>
             Disparar señal
           </button>
         )}
@@ -623,6 +623,32 @@ function BotCard({ bot, poolClosed, onSetActive, onMode, onConfig, onManualTrigg
             </div>
             <span className="pill">{bot.poolTokenId}</span>
           </div>
+
+          <ConfigAction
+            title="Pool protegido"
+            value={(() => {
+              const lp = pools.find((p) => p.id === bot.poolId);
+              return lp ? `${lp.pair} · ${lp.network}` : 'Sin vincular';
+            })()}
+          >
+            <label className="config-field">
+              <span>Pool que protege este bot</span>
+              <select
+                value={bot.poolId ?? ''}
+                onChange={(event) => onConfig(bot.id, { poolId: event.target.value || null })}
+              >
+                <option value="">Sin vincular</option>
+                {pools.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.pair} · {p.network}{p.closed ? ' (cerrado)' : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="network" style={{ marginTop: 6 }}>
+              El bot solo actúa sobre su pool vinculado. Sin pool (o con el pool cerrado) no dispara.
+            </p>
+          </ConfigAction>
 
           <ConfigAction title="Dirección" value={bot.mode}>
             <label className="config-field">
@@ -2504,6 +2530,9 @@ function Dashboard({ user, onLogout, userId }) {
   const currentUser = useQuery(api.users.getUser, {});
   const userLoaded = currentUser !== undefined;
   const isAdmin = currentUser?.role === 'admin';
+  const userPermissions = useQuery(api.users.getUserPermissions, {});
+  // Gestionar bots: admins o usuarios con el permiso canManageBots vigente.
+  const canManageBots = isAdmin || (userPermissions ?? []).some((p) => p.permission === 'canManageBots');
   const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
   const signals = useQuery(api.tradesHistory.listSignals, {});
   const signalCooldownRef = React.useRef({});
@@ -2666,6 +2695,7 @@ function Dashboard({ user, onLogout, userId }) {
       setLocalBotState((prev) => ({ ...prev, [id]: { ...prev[id], active } }));
     } catch (error) {
       console.error('Failed to update bot active state', error);
+      addToast(error?.message ?? 'No se pudo cambiar el estado del bot.');
     }
   }
 
@@ -2681,7 +2711,7 @@ function Dashboard({ user, onLogout, userId }) {
 
   async function updateBotConfig(id, patch) {
     if (!botsFromDb?.find((b) => b._id === id)) return;
-    const schemaFields = ['capitalPerTrade', 'leverage', 'stop', 'simulationMode', 'walletId', 'orderType', 'entryTrigger', 'triggerPrice', 'autoLeverage', 'collateral'];
+    const schemaFields = ['capitalPerTrade', 'leverage', 'stop', 'simulationMode', 'walletId', 'orderType', 'entryTrigger', 'triggerPrice', 'autoLeverage', 'collateral', 'poolId'];
     const persistable = Object.fromEntries(
       Object.entries(patch).filter(([k]) => schemaFields.includes(k))
     );
@@ -2788,6 +2818,11 @@ function Dashboard({ user, onLogout, userId }) {
   }, [prices, pools, userAlerts]);
 
   async function handleManualTrigger(bot) {
+    // Mismo guard que el disparo automático: sin pool vinculado y abierto, no se dispara.
+    if (!linkedPool(bot, pools)) {
+      addToast('Este bot no tiene un pool vinculado activo: no se puede disparar.');
+      return;
+    }
     await fireSignal(bot, 'manual', pools, prices);
   }
 
@@ -2903,7 +2938,7 @@ function Dashboard({ user, onLogout, userId }) {
                 {bots.map((bot) => {
                   const linked = bot.poolId ? pools.find((p) => p.id === bot.poolId) : null;
                   return (
-                    <BotCard key={bot.id} bot={bot} poolClosed={!!linked?.closed} onSetActive={setBotActive} onMode={setBotMode} onConfig={updateBotConfig} onManualTrigger={handleManualTrigger} isAdmin={isAdmin} userLoaded={userLoaded} />
+                    <BotCard key={bot.id} bot={bot} pools={pools} poolClosed={!!linked?.closed} canManage={canManageBots} onSetActive={setBotActive} onMode={setBotMode} onConfig={updateBotConfig} onManualTrigger={handleManualTrigger} userLoaded={userLoaded} />
                   );
                 })}
               </div>

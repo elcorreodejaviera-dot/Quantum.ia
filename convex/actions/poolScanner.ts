@@ -53,8 +53,16 @@ async function rpcCall(url: string, to: string, data: string): Promise<string> {
       signal: controller.signal,
     });
     if (!res.ok) throw new Error(`RPC ${url} respondió ${res.status} ${res.statusText}`);
-    const json = await res.json() as { result?: string; error?: { message: string } };
-    if (json.error) throw new RpcRevertError(`eth_call error: ${json.error.message}`);
+    const json = await res.json() as { result?: string; error?: { message?: string; code?: number } };
+    if (json.error) {
+      const msg = json.error.message ?? "";
+      // Solo un revert de ejecución (code 3 / "execution reverted") es determinista.
+      // Rate-limits (-32005/-32016/429), errores internos (-32603), etc. son
+      // indisponibilidad transitoria del RPC: NO deben concluir que el token no existe.
+      const isRevert = json.error.code === 3 || /execution reverted/i.test(msg);
+      if (isRevert) throw new RpcRevertError(`eth_call error: ${msg}`);
+      throw new Error(`eth_call error (${json.error.code ?? "?"}): ${msg}`);
+    }
     return json.result ?? "0x";
   } catch (e: unknown) {
     if (e instanceof Error && e.name === "AbortError") throw new Error(`RPC timeout (${RPC_TIMEOUT_MS}ms): ${url}`);
@@ -84,7 +92,7 @@ async function rpcCallWithFallback(urls: string[], to: string, data: string): Pr
 // not_found: el NFT no existe / fue quemado · unavailable: todos los RPC fallaron
 type PositionStatus = "active" | "empty" | "not_found" | "unavailable";
 
-async function readPositionStatus(rpcs: string[], nft: string, tokenId: number): Promise<PositionStatus> {
+async function readPositionStatusOnce(rpcs: string[], nft: string, tokenId: number): Promise<PositionStatus> {
   let posRaw: string;
   try {
     // positions(uint256) = 0x99fbab88
@@ -95,8 +103,29 @@ async function readPositionStatus(rpcs: string[], nft: string, tokenId: number):
     if (e instanceof RpcRevertError) return "not_found";
     return "unavailable";
   }
-  if (posRaw.length < 64 * 12) return "not_found";
-  return uintAt(posRaw, 7) === 0n ? "empty" : "active";
+  // Respuesta anómala (corta/malformada) → no concluir cierre; tratar como indisponible.
+  if (posRaw.length < 64 * 12) return "unavailable";
+  try {
+    return uintAt(posRaw, 7) === 0n ? "empty" : "active";
+  } catch {
+    // Hex inválido / decodificación fallida → no concluir cierre.
+    return "unavailable";
+  }
+}
+
+// Lectura con confirmación: un estado destructivo (empty/not_found pausa bots y
+// marca cierre) se confirma con una segunda lectura independiente. Si difieren,
+// se trata como indisponible para no pausar bots por un fallo intermitente de RPC.
+async function readPositionStatus(rpcs: string[], nft: string, tokenId: number): Promise<PositionStatus> {
+  const first = await readPositionStatusOnce(rpcs, nft, tokenId);
+  if (first === "empty" || first === "not_found") {
+    // Confirmación INDEPENDIENTE: consultar únicamente el segundo proveedor (rpcs[1]),
+    // sin fallback al primero. Si solo hay 1 RPC o rpcs[1] falla → no concluir cierre.
+    if (rpcs.length < 2) return "unavailable";
+    const second = await readPositionStatusOnce([rpcs[1]], nft, tokenId);
+    if (second !== first) return "unavailable";
+  }
+  return first;
 }
 
 function pad(n: bigint): string { return n.toString(16).padStart(64, "0"); }
@@ -361,7 +390,7 @@ export const checkAllPoolClosures = internalAction({
   args: {},
   handler: async (ctx) => {
     const pools = await ctx.runQuery(internal.pools.listPoolsInternal);
-    let closed = 0, reopened = 0, unavailable = 0, skipped = 0;
+    let closed = 0, reopened = 0, unavailable = 0, skipped = 0, errored = 0;
 
     for (const pool of pools) {
       if (!pool.tokenId) { skipped++; continue; }
@@ -369,22 +398,28 @@ export const checkAllPoolClosures = internalAction({
       const nft = NFT_MANAGER[pool.network];
       if (!rpcs || !nft) { skipped++; continue; }
 
-      const status = await readPositionStatus(rpcs, nft, pool.tokenId);
+      // Aislar cada pool: un fallo no debe abortar el chequeo del resto.
+      try {
+        const status = await readPositionStatus(rpcs, nft, pool.tokenId);
 
-      if (status === "unavailable") {
-        // RPC caído: no concluir nada, solo registrar que se intentó.
-        await ctx.runMutation(internal.pools.touchPoolChecked, { id: pool._id });
-        unavailable++;
-      } else if (status === "empty" || status === "not_found") {
-        await ctx.runMutation(internal.pools.markPoolClosedAndPauseBots, { id: pool._id, reason: status });
-        closed++;
-      } else {
-        // active: si estaba marcado como cerrado, reabrir (posición re-fondeada).
-        await ctx.runMutation(internal.pools.reopenPoolIfClosed, { id: pool._id });
-        reopened++;
+        if (status === "unavailable") {
+          // RPC caído: no concluir nada, solo registrar que se intentó.
+          await ctx.runMutation(internal.pools.touchPoolChecked, { id: pool._id });
+          unavailable++;
+        } else if (status === "empty" || status === "not_found") {
+          await ctx.runMutation(internal.pools.markPoolClosedAndPauseBots, { id: pool._id, reason: status });
+          closed++;
+        } else {
+          // active: si estaba marcado como cerrado, reabrir (posición re-fondeada).
+          await ctx.runMutation(internal.pools.reopenPoolIfClosed, { id: pool._id });
+          reopened++;
+        }
+      } catch (e) {
+        errored++;
+        console.error(`checkAllPoolClosures: fallo en pool ${pool._id}`, e);
       }
     }
 
-    return { total: pools.length, closed, reopened, unavailable, skipped };
+    return { total: pools.length, closed, reopened, unavailable, skipped, errored };
   },
 });

@@ -1965,8 +1965,8 @@ function HLAccountSelect({ accounts, value, onChange }) {
         ))}
       </select>
       {selected && (
-        <span style={{ fontSize: 12, color: (bal?.accountValue ?? 0) > 0 ? 'var(--green)' : 'var(--red)' }}>
-          Balance: {bal ? formatUsd(bal.accountValue) : '…'}
+        <span style={{ fontSize: 12, color: (bal?.availableToTrade ?? 0) > 0 ? 'var(--green)' : 'var(--red)' }}>
+          Disponible: {bal ? formatUsd(bal.availableToTrade) : '…'}
         </span>
       )}
     </div>
@@ -2043,7 +2043,8 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
   const effectiveCapital = poolCapital * (1 + bufferPct / 100);
   const thisBotMargin = leverage > 0 ? effectiveCapital / leverage : 0;
   const marginUsed = bal?.totalMarginUsed ?? 0;     // margen usado en la cuenta (no "otros bots")
-  const withdrawable = bal?.withdrawable ?? 0;
+  // Modo unified: disponible para operar = withdrawable perp + USDC spot (colateral).
+  const withdrawable = bal?.availableToTrade ?? 0;
   const availableAfter = withdrawable - thisBotMargin;
 
   async function handleSave() {
@@ -2391,7 +2392,7 @@ function HLAccountRow({ account, onRevoke }) {
         </div>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span style={{ fontSize: 12 }}>{bal ? formatUsd(bal.accountValue) : '…'}</span>
+        <span style={{ fontSize: 12 }}>{bal ? formatUsd(bal.availableToTrade) : '…'}</span>
         <button className="mini-btn" onClick={onRevoke}>Revocar</button>
       </div>
     </div>

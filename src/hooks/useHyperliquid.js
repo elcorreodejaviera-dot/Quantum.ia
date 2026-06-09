@@ -345,31 +345,35 @@ export function useHLAccountBalance(address, { includeOrders = false } = {}) {
     async function fetchAccount() {
       setLoading(true);
       try {
-        const requests = [
-          fetch(HL_REST, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type: 'clearinghouseState', user: address }),
-          }),
-        ];
-        if (includeOrders) {
-          requests.push(fetch(HL_REST, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type: 'openOrders', user: address }),
-          }));
-        }
-        const [stateRes, ordersRes] = await Promise.all(requests);
+        const hlReq = (type) => fetch(HL_REST, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type, user: address }),
+        });
+        const [stateRes, spotRes, ordersRes] = await Promise.all([
+          hlReq('clearinghouseState'),
+          hlReq('spotClearinghouseState'),   // colateral spot (modo unified)
+          includeOrders ? hlReq('openOrders') : Promise.resolve(null),
+        ]);
         if (!stateRes.ok) { if (!cancelled) setError('Error al consultar HL'); return; }
         if (cancelled) return;
-        const [data, orders] = await Promise.all([
+        const [data, spotData, orders] = await Promise.all([
           stateRes.json(),
+          spotRes?.ok ? spotRes.json() : Promise.resolve({}),
           ordersRes?.ok ? ordersRes.json() : Promise.resolve([]),
         ]);
         if (cancelled) return;
+        // Modo unified de HL: el USDC en spot cuenta como colateral para perps. El saldo
+        // "disponible para operar" = withdrawable del perp + USDC spot (lo que muestra la UI de HL).
+        const spotUsdc = (spotData.balances ?? [])
+          .filter((b) => b.coin === 'USDC')
+          .reduce((s, b) => s + parseFloat(b.total ?? 0), 0);
+        const perpWithdrawable = parseFloat(data.withdrawable ?? 0);
         setAccount({
           accountValue: parseFloat(data.marginSummary?.accountValue ?? 0),
-          withdrawable: parseFloat(data.withdrawable ?? 0),
+          withdrawable: perpWithdrawable,
+          spotUsdc,
+          availableToTrade: perpWithdrawable + spotUsdc,
           totalNtlPos: parseFloat(data.marginSummary?.totalNtlPos ?? 0),
           totalMarginUsed: parseFloat(data.marginSummary?.totalMarginUsed ?? 0),
           openPositions: (data.assetPositions ?? [])

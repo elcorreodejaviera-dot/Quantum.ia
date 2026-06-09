@@ -93,7 +93,7 @@ export const createPool = mutation({
         .withIndex("by_user", q => q.eq("userId", user._id))
         .filter(q => q.eq(q.field("tokenId"), args.tokenId))
         .first();
-      if (existing) throw new Error("Este Token ID ya está siendo monitoreado.");
+      if (existing) throw new Error("Este Token ID ya está siendo monitoreado. Si cerraste la posición, elimina primero el pool anterior para volver a registrarlo.");
     }
     return await ctx.db.insert("pools", {
       userId: user._id as any,

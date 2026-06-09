@@ -12,8 +12,9 @@ export const reconcileStaleExecutions = internalAction({
       try {
         await ctx.runAction(internal.hyperliquid.reconcileExecution, { requestId: it.requestId });
         ok++;
-      } catch {
-        // continuar con las demás solicitudes
+      } catch (e) {
+        // Loguear para observabilidad; continuar con las demás solicitudes (CodeRabbit).
+        console.error(`reconcileExecution falló para ${it.requestId}:`, e);
       }
     }
     return { scanned: items.length, reconciled: ok };

@@ -17,6 +17,10 @@ export async function getLimit(ctx: QueryCtx | MutationCtx, key: LimitKey): Prom
     .query("system_config")
     .withIndex("by_key", (q) => q.eq("key", key))
     .first();
+  // Si la clave existe pero tiene un tipo erróneo, fallar en vez de enmascarar la misconfig (CodeRabbit).
+  if (row?.value !== undefined && typeof row.value !== "number") {
+    throw new Error(`${key} en system_config tiene tipo inválido (${typeof row.value})`);
+  }
   const val = typeof row?.value === "number" ? row.value : LIMIT_DEFAULTS[key];
   const valid = Number.isFinite(val) && (key === "slBufferPct" ? val >= 0 : val > 0);
   if (!valid) throw new Error(`${key} inválido`);

@@ -52,10 +52,15 @@ function formatHlPrice(price: number, szDecimals: number): string {
   return String(Number(sig.toFixed(maxDecimals)));
 }
 
-// Nº de decimales del tick HL para un precio: el MÁS RESTRICTIVO entre el tope por szDecimals
-// (6 − szDecimals) y el tope por 5 cifras significativas (5 − díg. enteros). PUEDE SER NEGATIVO:
-// con ≥6 dígitos enteros (p.ej. BTC 123456) el tick es 10/100 (−1/−2), no 1. Para price < 1,
-// intDigits es negativo y cuenta los ceros a la izquierda (5 sig. de 0.0123 abarcan 6 decimales).
+/**
+ * Nº de decimales del tick HL para un precio: el MÁS RESTRICTIVO entre el tope por szDecimals
+ * (6 − szDecimals) y el de 5 cifras significativas (5 − dígitos enteros). PUEDE SER NEGATIVO: con
+ * ≥6 dígitos enteros (p.ej. BTC 123456) el tick es 10/100 (−1/−2), no 1. Para price < 1, intDigits
+ * es negativo y cuenta los ceros a la izquierda (5 sig. de 0.0123 abarcan 6 decimales).
+ * @param price Precio positivo.
+ * @param szDecimals Decimales de tamaño del activo en HL.
+ * @returns Decimales válidos del tick (puede ser negativo).
+ */
 function hlAllowedDecimals(price: number, szDecimals: number): number {
   const maxDecimals = Math.max(0, 6 - szDecimals);
   const intDigits = Math.floor(Math.log10(price)) + 1;
@@ -63,9 +68,15 @@ function hlAllowedDecimals(price: number, szDecimals: number): number {
   return Math.min(maxDecimals, sigDecimals);
 }
 
-// Redondeo DIRECCIONAL a un precio HL-válido (respeta 5 cifras significativas y (6−szDecimals)
-// decimales, con tick ≥ 1 para enteros grandes). dir="ceil" → menor válido ≥ price; "floor" →
-// mayor válido ≤ price. Corrige ruido flotante en la dirección correspondiente.
+/**
+ * Redondeo DIRECCIONAL a un precio HL-válido (respeta 5 cifras significativas y (6−szDecimals)
+ * decimales, con tick ≥ 1 para enteros grandes). Corrige el ruido flotante de `toFixed` después de
+ * normalizar para que el invariante se cumpla exactamente.
+ * @param price Precio positivo.
+ * @param szDecimals Decimales de tamaño del activo en HL.
+ * @param dir "ceil" → menor precio válido ≥ price; "floor" → mayor precio válido ≤ price.
+ * @returns Precio HL-válido redondeado en la dirección pedida.
+ */
 function roundHlPrice(price: number, szDecimals: number, dir: "ceil" | "floor"): number {
   const decimals = hlAllowedDecimals(price, szDecimals);   // puede ser negativo
   const tick = 10 ** -decimals;                            // negativo → 10, 100, …
@@ -80,15 +91,26 @@ function roundHlPrice(price: number, szDecimals: number, dir: "ceil" | "floor"):
   return r;
 }
 
-// Cota SUPERIOR conservadora (sizing/reserva del nocional): menor precio HL-válido ≥ price.
+/**
+ * Cota SUPERIOR conservadora para dimensionar/reservar el nocional: menor precio HL-válido ≥ price.
+ * @param price Precio positivo.
+ * @param szDecimals Decimales de tamaño del activo en HL.
+ * @returns Precio HL-válido ≥ price.
+ */
 function ceilHlPrice(price: number, szDecimals: number): number {
   return roundHlPrice(price, szDecimals, "ceil");
 }
 
-// Precio HL-válido AGRESIVO (que cruza el book / mantiene la banda): una COMPRA redondea hacia
-// ARRIBA (ceil) y una VENTA hacia ABAJO (floor), siempre alejándose del book. NUNCA usar el
-// redondeo al más cercano (formatHlPrice) en límites sensibles a la ejecución: podría acercar el
-// precio al book (Long con límite más bajo / Short más alto) o estrechar la banda del SL < 1%.
+/**
+ * Precio HL-válido AGRESIVO (que cruza el book / mantiene la banda): una COMPRA redondea hacia
+ * ARRIBA (ceil) y una VENTA hacia ABAJO (floor), siempre alejándose del book. NUNCA usar el
+ * redondeo al más cercano (formatHlPrice) en límites sensibles a la ejecución: podría acercar el
+ * precio al book (Long con límite más bajo / Short más alto) o estrechar la banda del SL < 1%.
+ * @param price Precio objetivo.
+ * @param szDecimals Decimales de tamaño del activo en HL.
+ * @param isBuy true = compra (ceil); false = venta (floor).
+ * @returns Precio HL-válido como string, listo para el campo `p` de la orden.
+ */
 function aggressiveHlPriceStr(price: number, szDecimals: number, isBuy: boolean): string {
   return String(roundHlPrice(price, szDecimals, isBuy ? "ceil" : "floor"));
 }

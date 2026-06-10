@@ -322,9 +322,13 @@ export const settleExecution = internalMutation({
   handler: async (ctx, args) => { await applyTransition(ctx, args); },
 });
 
-// Marca slSubmittedAt SIN cambiar de estado (caso waitingForTrigger: SL aceptado pero aún sin
-// oid/resting). Deja el estado en entry_filled para que el cron lo confirme por CLOID; el
-// marcador evita recolocar un 2º SL durante el lag de unknownOid. Requiere ser dueño del claim.
+/**
+ * Marca `slSubmittedAt` SIN cambiar de estado (caso waitingForTrigger/waitingForFill/timeout: SL
+ * aceptado o incierto pero aún sin oid). Deja el estado en `entry_filled` para que el cron lo
+ * confirme por CLOID; el marcador evita recolocar un 2º SL durante el lag de `unknownOid`. Requiere
+ * ser dueño del claim (fencing por token + lease vigente) y que el estado no sea final.
+ * @returns `{ ok: true }` si se persistió; `{ ok: false }` si se perdió el claim o el estado es final.
+ */
 export const markSlSubmitted = internalMutation({
   args: { requestId: v.id("execution_requests"), token: v.string() },
   handler: async (ctx, { requestId, token }) => {

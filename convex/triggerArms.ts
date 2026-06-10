@@ -194,6 +194,17 @@ export const gateArmBeforeOrder = internalMutation({
   },
 });
 
+// Marca/limpia closeConfirmSince (doble lectura szi==0) bajo el claim. value=null limpia.
+export const setArmCloseConfirm = internalMutation({
+  args: { armId: v.id("trigger_arms"), token: v.string(), value: v.union(v.number(), v.null()) },
+  handler: async (ctx, { armId, token, value }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    await ctx.db.patch(armId, { closeConfirmSince: value ?? undefined, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
 // --- Transición genérica con fencing + cuarentena N6 + finalización de pausa N2 ---
 export const settleArm = internalMutation({
   args: {

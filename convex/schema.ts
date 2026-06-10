@@ -294,6 +294,7 @@ export default defineSchema({
     filledSize: v.optional(v.number()),
     entryPrice: v.optional(v.number()),
     filledAt: v.optional(v.number()),    // cuándo se confirmó el fill (grace anti-closed-prematuro por lag)
+    closeConfirmSince: v.optional(v.number()),  // 1ª lectura szi==0 (doble lectura anti single transient read)
     // ciclo de vida / fencing
     submittedAt: v.optional(v.number()), // se fija SOLO en el CAS markArmSubmitting (cuarentena N5/N6)
     error: v.optional(v.string()),

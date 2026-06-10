@@ -176,8 +176,15 @@ export const armPoolBotEntry = action({
       await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, observedStatus: "open", oid: String(st.resting.oid) });
       await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "armed" });
     } else if (st?.filled?.oid != null) {
+      // (Fix #2) Fill inmediato: extraer tamaño/precio reales. Si vienen → filled CON datos; si no,
+      // → unknown (reconcile confirma por fills): nunca un filled sin filledSize que permita closed.
       await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, observedStatus: "filled", oid: String(st.filled.oid) });
-      await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "filled" });
+      const fSize = Number(st.filled.totalSz), fPx = Number(st.filled.avgPx);
+      if (fSize > 0 && fPx > 0) {
+        await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "filled", filledSize: fSize, entryPrice: fPx });
+      } else {
+        await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "unknown", error: "fill inmediato sin datos" });
+      }
     } else if (st === "waitingForTrigger") {
       // Trigger aceptado a la espera del cruce → armed; se confirma por CLOID en la reconciliación.
       await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "armed" });
@@ -245,19 +252,36 @@ export const reconcileArm = internalAction({
       // (R2) filled → closed solo tras confirmar szi==0 (cierre manual en Etapa 1). Libera margen/
       // generación/credencial. Mientras la posición siga abierta, queda en filled (alerta operativa).
       if (arm.status === "filled") {
-        // (Fix #2) No cerrar dentro del grace desde el fill: un szi==0 transitorio por lag declararía
-        // closed con la posición aún abierta. Solo cerrar pasado el grace Y con szi==0.
-        if (Date.now() - (arm.filledAt ?? arm.updatedAt) <= CLOSE_CONFIRM_GRACE_MS) {
+        // (Fix #2a) Exigir filledSize POSITIVO confirmado antes de poder cerrar. Si no lo tenemos
+        // (p.ej. fill inmediato sin datos), reconciliar la entrada por fills primero; nunca cerrar
+        // sin saber que la posición se abrió.
+        if (!(arm.filledSize && arm.filledSize > 0)) {
+          const f = await fillsByCloid(info, user, order.cloid);
+          if (f.size > 0 && f.avgPx > 0) {
+            await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "filled", filledSize: f.size, entryPrice: f.avgPx });
+          }
+          return { skipped: "filled_awaiting_fill_data" };
+        }
+        // (Fix #2b) Grace desde filledAt — fallback a createdAt, NO updatedAt (el claim lo bumpea cada
+        // ciclo y reiniciaría el grace para siempre).
+        if (Date.now() - (arm.filledAt ?? arm.createdAt) <= CLOSE_CONFIRM_GRACE_MS) {
           return { skipped: "close_confirm_grace" };
         }
         const ch: any = await info.clearinghouseState({ user });
         const p = (ch.assetPositions ?? []).find((x: any) => x.position?.coin === arm.asset.toUpperCase());
         const flat = !p || Math.abs(Number(p.position?.szi ?? 0)) === 0;
-        if (flat) {
-          await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "closed" });
-          return { result: "closed" };
+        if (!flat) {
+          if (arm.closeConfirmSince != null) await ctx.runMutation(internal.triggerArms.setArmCloseConfirm, { armId, token, value: null });
+          return { skipped: "filled_position_open" };
         }
-        return { skipped: "filled_position_open" };
+        // (Fix #2c) Doble lectura anti single-transient: exigir DOS lecturas szi==0 en ciclos
+        // distintos antes de declarar closed (una lectura transitoria por lag no basta).
+        if (arm.closeConfirmSince == null) {
+          await ctx.runMutation(internal.triggerArms.setArmCloseConfirm, { armId, token, value: Date.now() });
+          return { skipped: "close_first_flat" };
+        }
+        await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "closed" });
+        return { result: "closed" };
       }
 
       // Kill switch / pausa (Fix #4): cualquier condición de apagado convierte el arm a desarmado y

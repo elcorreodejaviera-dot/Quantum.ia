@@ -230,6 +230,8 @@ export const settleArm = internalMutation({
     for (const k of ["filledSize", "entryPrice", "error"] as const) {
       if (args[k] !== undefined) patch[k] = args[k];
     }
+    // filledAt: marca la PRIMERA confirmación de fill (grace anti-closed-prematuro por lag de APIs).
+    if (args.status === "filled" && arm.filledAt == null) patch.filledAt = now;
     await ctx.db.patch(args.armId, patch);
 
     // (N2) Finalización de la pausa: al alcanzar terminal con disarmPending, completar active=false.

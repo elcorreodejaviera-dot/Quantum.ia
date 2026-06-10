@@ -16,6 +16,10 @@ import { TransportError } from "@nktkas/hyperliquid";
 const HL_ORDER_TIMEOUT_MS = 30_000;
 // Banda agresiva del market al dispararse el trigger de entrada (venta). Gap > banda → puede no llenar.
 const ENTRY_TRIGGER_SLIPPAGE = 0.02;
+// Grace antes de declarar filled→closed (Fix #2): tras el fill, clearinghouseState puede dar szi==0
+// transitoriamente por lag aunque la posición exista. Esperar este margen desde filledAt evita un
+// closed prematuro que liberaría margen/credencial con la posición aún abierta.
+const CLOSE_CONFIRM_GRACE_MS = 2 * 60_000;
 
 // ¿Hay una orden VIVA con este cloid en el book? (parte de la prueba negativa R3 — no liberar a ciegas).
 async function openByCloid(info: any, user: `0x${string}`, cloid: string): Promise<boolean> {
@@ -93,10 +97,13 @@ export const armPoolBotEntry = action({
       throw new Error(`mark (${markPx}) ≤ triggerPx normalizado (${triggerPxNorm}): no se arma (precio ya en/bajo el rango).`);
     }
 
-    // (H12 + Fix #4) Sizing desde hedgeNotionalUsd. El límite SELL es un SUELO (triggerPx*(1−slip));
-    // tras dispararse, un rebote puede llenar POR ENCIMA del trigger. Para que el nocional reservado
-    // sea cota conservadora (no garantía dura, igual que Short en JAV-43), dimensionar con el techo
-    // triggerPx*(1+slip) redondeado ARRIBA. Reduce el size → el fill rara vez supera lo reservado.
+    // (H12 + Fix #4) Sizing desde hedgeNotionalUsd. AVISO: para una VENTA NO existe cota dura del
+    // nocional — el límite SELL es un SUELO (triggerPx*(1−slip)), no un techo, así que un fill por
+    // encima del trigger PUEDE superar el nocional/margen/diario reservados (mismo caso que el Short
+    // de JAV-43, aceptado conscientemente). `triggerPx*(1+slip)` es solo una ESTIMACIÓN conservadora
+    // que reduce el tamaño; el residuo de sobre-ejecución queda acotado por: aislamiento TESTNET,
+    // el MARGIN_SAFETY_BUFFER (10%) del colateral, y que el trigger dispara en CAÍDA (fill ≈ triggerPx,
+    // no por encima salvo rebote sub-segundo). NO es una garantía.
     const notionalCapPx = ceilHlPrice(triggerPxNorm * (1 + ENTRY_TRIGGER_SLIPPAGE), szDecimals);
     const size = floorToDecimals(bot.hedgeNotionalUsd / notionalCapPx, szDecimals);
     if (size <= 0) throw new Error("Size redondea a cero");
@@ -238,6 +245,11 @@ export const reconcileArm = internalAction({
       // (R2) filled → closed solo tras confirmar szi==0 (cierre manual en Etapa 1). Libera margen/
       // generación/credencial. Mientras la posición siga abierta, queda en filled (alerta operativa).
       if (arm.status === "filled") {
+        // (Fix #2) No cerrar dentro del grace desde el fill: un szi==0 transitorio por lag declararía
+        // closed con la posición aún abierta. Solo cerrar pasado el grace Y con szi==0.
+        if (Date.now() - (arm.filledAt ?? arm.updatedAt) <= CLOSE_CONFIRM_GRACE_MS) {
+          return { skipped: "close_confirm_grace" };
+        }
         const ch: any = await info.clearinghouseState({ user });
         const p = (ch.assetPositions ?? []).find((x: any) => x.position?.coin === arm.asset.toUpperCase());
         const flat = !p || Math.abs(Number(p.position?.szi ?? 0)) === 0;
@@ -278,6 +290,8 @@ export const reconcileArm = internalAction({
       if (wantDisarm) {
         // Si ya se llenó → posición abierta, NO declarar disarmed (alerta; pasa a filled/closed).
         if (orderState === "filled" || fill.size > 0) {
+          // (Fix #2) orderStatus filled pero userFills vacío (lag) → NO persistir filledSize=0; reintentar.
+          if (!(fill.size > 0 && fill.avgPx > 0)) return { skipped: "fill_data_pending" };
           await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, observedStatus: "filled", oid: order.oid });
           await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "filled", filledSize: fill.size, entryPrice: fill.avgPx });
           return { result: "disarm_but_filled" };
@@ -291,6 +305,7 @@ export const reconcileArm = internalAction({
         const afterState = after?.status === "order" ? after.order?.status : undefined;
         const afterFill = await fillsByCloid(info, user, order.cloid);
         if (afterState === "filled" || afterFill.size > 0) {
+          if (!(afterFill.size > 0 && afterFill.avgPx > 0)) return { skipped: "fill_data_pending" };
           await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "filled", filledSize: afterFill.size, entryPrice: afterFill.avgPx });
           return { result: "disarm_but_filled" };
         }
@@ -310,9 +325,11 @@ export const reconcileArm = internalAction({
 
       // ---- Camino ARMADO (converger a armed) ----
       if (orderState === "filled" || fill.size > 0) {
+        // (Fix #2) orderStatus filled pero userFills vacío (lag) → NO persistir filledSize=0; reintentar.
+        if (!(fill.size > 0 && fill.avgPx > 0)) return { skipped: "fill_data_pending" };
         await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, observedStatus: "filled", oid: order.oid });
         await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "filled", filledSize: fill.size, entryPrice: fill.avgPx });
-        // filled→closed solo tras szi==0 (cierre manual en Etapa 1) — lo evalúa el siguiente ciclo.
+        // filled→closed solo tras szi==0 + grace (cierre manual en Etapa 1) — lo evalúa el siguiente ciclo.
         return { result: "filled" };
       }
       if (orderState === "open") {

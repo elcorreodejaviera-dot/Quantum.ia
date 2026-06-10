@@ -140,8 +140,20 @@ export const armPoolBotEntry = action({
     // que reduce el tamaño; el residuo de sobre-ejecución queda acotado por: aislamiento TESTNET,
     // el MARGIN_SAFETY_BUFFER (10%) del colateral, y que el trigger dispara en CAÍDA (fill ≈ triggerPx,
     // no por encima salvo rebote sub-segundo). NO es una garantía.
+    // TPs sobre el búfer: la posición se abre con pool + búfer. Total = hedge*(1+bufferPct/100).
+    // El SL es full-size (protege todo); los TPs cierran SOLO la fracción del búfer (validado abajo).
+    const bufferPct = (bot.bufferPct !== undefined && Number.isFinite(bot.bufferPct) && bot.bufferPct > 0) ? bot.bufferPct : 0;
+    const tps = bufferPct > 0 ? (bot.tps ?? []) : [];
+    if (tps.length > 0) {
+      for (const t of tps) {
+        if (!(t.gainPct > 0) || !(t.closePct > 0)) throw new Error("TP inválido (gainPct/closePct > 0)");
+      }
+      const sumClose = tps.reduce((s, t) => s + t.closePct, 0);
+      if (sumClose > 100) throw new Error("Σ closePct de los TPs no puede superar 100 (% del búfer).");
+    }
+    const totalNotional = bot.hedgeNotionalUsd * (1 + bufferPct / 100);
     const notionalCapPx = ceilHlPrice(triggerPxNorm * (1 + ENTRY_TRIGGER_SLIPPAGE), szDecimals);
-    const size = floorToDecimals(bot.hedgeNotionalUsd / notionalCapPx, szDecimals);
+    const size = floorToDecimals(totalNotional / notionalCapPx, szDecimals);
     if (size <= 0) throw new Error("Size redondea a cero");
     const reservedNotional = size * notionalCapPx;
     const marginRequired = reservedNotional / appliedLeverage;
@@ -157,7 +169,7 @@ export const armPoolBotEntry = action({
       botId: bot._id, userId: user._id, hlAccountId: bot.hlAccountId, poolId: bot.poolId,
       asset, network: hlNetwork(), triggerPx: triggerPxNorm, size, appliedLeverage,
       reservedNotional, marginReserved: marginRequired, lowerEdge: pool.minRange,
-      stopLossPct: bot.stopLossPct, availableCollateral,
+      stopLossPct: bot.stopLossPct, bufferPct, tps, availableCollateral,
     });
     const { armId, cloid } = reservation;
 
@@ -367,6 +379,60 @@ export const reconcileArm = internalAction({
             }, { signal: ac2.signal, expiresAfter: Date.now() + HL_ORDER_TIMEOUT_MS });
           } catch { /* el siguiente ciclo reintenta; szi==0 + órdenes muertas → closed */ } finally { ac2.clear(); }
           return { result: "emergency_close_sent" };
+        }
+
+        // (2.5) TPs sobre el BÚFER (solo cuando ya hay SL → status protected). Cada TP es Take Profit
+        // Market reduceOnly (BUY, tpsl:"tp", trigger ABAJO del entry = el short gana al caer). Σ tamaños
+        // ≤ búfer → el pool nunca lo cierran los TPs (sigue bajo el SL full-size). Coloca/confirma con
+        // el patrón del SL (confirmar-antes-de-rotar por TP). Una colocación por ciclo (acota el lease).
+        if (arm.status === "protected") {
+          const tps = arm.tps ?? [];
+          const bufferPct = arm.bufferPct ?? 0;
+          if (tps.length === 0 || bufferPct <= 0) return { skipped: "no_tps" };
+          const bufferSize = floorToDecimals((filledSize * bufferPct) / (100 + bufferPct), szDecimals);
+          for (let i = 0; i < tps.length; i++) {
+            const tpSize = floorToDecimals((bufferSize * tps[i].closePct) / 100, szDecimals);
+            if (tpSize <= 0) continue;   // (Codex #2) redondea a 0 → omitir (queda como pool bajo el SL)
+            const tpOrder = await ctx.runQuery(internal.triggerArms.getArmTpOrder, { armId, tpIndex: i });
+            if (tpOrder && (tpOrder.observedStatus !== "pending" || tpOrder.submittedAt != null)) {
+              const ts: any = await info.orderStatus({ user, oid: tpOrder.cloid as `0x${string}` });
+              const tState = ts?.status === "order" ? ts.order?.status : undefined;
+              const tOpen = await openByCloid(info, user, tpOrder.cloid);
+              const tFill = await fillsByCloid(info, user, tpOrder.cloid);
+              if (tState === "filled" || tFill.size > 0) { await ctx.runMutation(internal.triggerArms.setTpObserved, { armId, token, tpIndex: i, observedStatus: "filled" }); continue; }
+              if (tState === "open" || tOpen) { await ctx.runMutation(internal.triggerArms.setTpObserved, { armId, token, tpIndex: i, observedStatus: "open", oid: tpOrder.oid }); continue; }
+              if (tState === "triggered") { await ctx.runMutation(internal.triggerArms.setTpObserved, { armId, token, tpIndex: i, observedStatus: "triggered" }); continue; }
+              if (tpOrder.submittedAt && Date.now() - tpOrder.submittedAt < SL_SUBMIT_GRACE_MS) continue;  // grace (lag)
+              await ctx.runMutation(internal.triggerArms.setTpObserved, { armId, token, tpIndex: i, observedStatus: "canceled" });  // muerto → recolocar
+            }
+            // Colocar este TP (uno por ciclo).
+            const tpTrigger = roundHlPrice(entryPrice * (1 - tps[i].gainPct / 100), szDecimals, "floor");
+            if (!(tpTrigger > 0)) continue;
+            const renewT = await ctx.runMutation(internal.triggerArms.renewArmReconcile, { armId, token });
+            if (!renewT.ok) return { skipped: "lease_lost" };
+            const prepT = await ctx.runMutation(internal.triggerArms.prepareTpAttempt, { armId, token, tpIndex: i, triggerPx: tpTrigger, size: tpSize });
+            if (!prepT.ok) return { skipped: "tp_prep_race" };
+            const tpLimitPx = aggressiveHlPriceStr(tpTrigger * (1 + ENTRY_TRIGGER_SLIPPAGE), szDecimals, true);  // BUY ceil
+            const acT = abortAfter(HL_ORDER_TIMEOUT_MS);
+            try {
+              const respT: any = await exchange.order({
+                orders: [{ a: assetId, b: true, p: tpLimitPx, s: String(tpSize), r: true, t: { trigger: { isMarket: true, triggerPx: formatHlPrice(tpTrigger, szDecimals), tpsl: "tp" } }, c: prepT.cloid as `0x${string}` }],
+                grouping: "na",
+              }, { signal: acT.signal, expiresAfter: Date.now() + HL_ORDER_TIMEOUT_MS });
+              const stT = respT?.response?.data?.statuses?.[0];
+              if (stT?.resting?.oid != null) await ctx.runMutation(internal.triggerArms.setTpObserved, { armId, token, tpIndex: i, observedStatus: "open", oid: String(stT.resting.oid), markSubmitted: true });
+              else if (stT?.filled?.oid != null) await ctx.runMutation(internal.triggerArms.setTpObserved, { armId, token, tpIndex: i, observedStatus: "filled", oid: String(stT.filled.oid), markSubmitted: true });
+              else if (stT === "waitingForTrigger" || stT === "waitingForFill") await ctx.runMutation(internal.triggerArms.setTpObserved, { armId, token, tpIndex: i, observedStatus: "pending", markSubmitted: true });
+              else if (stT?.error) await ctx.runMutation(internal.triggerArms.setTpObserved, { armId, token, tpIndex: i, observedStatus: "rejected" });
+              else await ctx.runMutation(internal.triggerArms.setTpObserved, { armId, token, tpIndex: i, observedStatus: "pending", markSubmitted: true });
+            } catch (e) {
+              // TransportError (incierto, pudo enviarse) → marcar submitted (confirma por CLOID luego).
+              // Rechazo definitivo → dejar pending sin submitted; reintenta. El SL cubre la posición igual.
+              if (e instanceof TransportError) await ctx.runMutation(internal.triggerArms.setTpObserved, { armId, token, tpIndex: i, observedStatus: "pending", markSubmitted: true });
+            } finally { acT.clear(); }
+            return { result: `tp_${i}_handled` };   // una colocación por ciclo
+          }
+          return { result: "protected_tps_ok" };
         }
 
         // (3) ARMADO dentro del deadline: CONFIRMAR el SL existente (sin rotar) o colocar uno nuevo.

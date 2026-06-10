@@ -89,7 +89,10 @@ export const reserveArm = internalMutation({
     poolId: v.id("pools"), asset: v.string(), network: v.string(),
     triggerPx: v.number(), size: v.number(), appliedLeverage: v.number(),
     reservedNotional: v.number(), marginReserved: v.number(), lowerEdge: v.number(),
-    stopLossPct: v.number(), availableCollateral: v.number(),
+    stopLossPct: v.number(),
+    bufferPct: v.optional(v.number()),
+    tps: v.optional(v.array(v.object({ gainPct: v.number(), closePct: v.number() }))),
+    availableCollateral: v.number(),
   },
   handler: async (ctx, args) => {
     if (args.network !== "testnet" && args.network !== "mainnet") throw new Error("network inválida.");
@@ -141,7 +144,8 @@ export const reserveArm = internalMutation({
       asset: args.asset, network: args.network, generation, status: "arming", desiredState: "armed",
       side: "Short", triggerPx: args.triggerPx, size: args.size, appliedLeverage: args.appliedLeverage,
       reservedNotional: args.reservedNotional, marginReserved: args.marginReserved, lowerEdge: args.lowerEdge,
-      stopLossPct: args.stopLossPct, createdAt: now, updatedAt: now,
+      stopLossPct: args.stopLossPct, bufferPct: args.bufferPct, tps: args.tps,
+      createdAt: now, updatedAt: now,
     });
     await ctx.db.insert("trigger_orders", {
       armId, role: "entry_lower", cloid, oid: undefined, triggerPx: args.triggerPx, size: args.size,
@@ -202,6 +206,60 @@ export const gateArmBeforeOrder = internalMutation({
     const pool = await ctx.db.get(arm.poolId);
     if (!pool || pool.closed) return { ok: false as const };
     await ctx.db.patch(armId, { reconcileLeaseUntil: Date.now() + ARM_RECONCILE_LEASE_MS, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
+// --- TPs (role:"tp"): un trigger_order por tpIndex. Idempotencia por cloid …|tp:i:attempt. ---
+
+export const getArmTpOrder = internalQuery({
+  args: { armId: v.id("trigger_arms"), tpIndex: v.number() },
+  handler: async (ctx, { armId, tpIndex }) =>
+    ctx.db.query("trigger_orders").withIndex("by_arm_role_index", (q) => q.eq("armId", armId).eq("role", "tp").eq("tpIndex", tpIndex)).first(),
+});
+
+// Crea/rota el trigger_order de un TP concreto (bump attempt, cloid nuevo, observedStatus pending,
+// submittedAt limpio). Devuelve el cloid. Bajo claim. Persiste triggerPx/size del intento.
+export const prepareTpAttempt = internalMutation({
+  args: { armId: v.id("trigger_arms"), token: v.string(), tpIndex: v.number(), triggerPx: v.number(), size: v.number() },
+  handler: async (ctx, { armId, token, tpIndex, triggerPx, size }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (isArmTerminal(arm.status)) return { ok: false as const };
+    const existing = await ctx.db.query("trigger_orders").withIndex("by_arm_role_index", (q) => q.eq("armId", armId).eq("role", "tp").eq("tpIndex", tpIndex)).first();
+    const attempt = (existing?.attempt ?? 0) + 1;
+    const cloid = await armCloid(arm.botId, arm.generation, `tp:${tpIndex}:${attempt}`);
+    const now = Date.now();
+    if (existing) {
+      await ctx.db.patch(existing._id, { cloid, oid: undefined, observedStatus: "pending", attempt, submittedAt: undefined, triggerPx, size, updatedAt: now });
+    } else {
+      await ctx.db.insert("trigger_orders", {
+        armId, role: "tp", tpIndex, cloid, oid: undefined, triggerPx, size, reduceOnly: true,
+        attempt, observedStatus: "pending", createdAt: now, updatedAt: now,
+      });
+    }
+    return { ok: true as const, cloid };
+  },
+});
+
+// Marca/limpia campos observados de un TP (observedStatus/oid/submittedAt) bajo claim.
+export const setTpObserved = internalMutation({
+  args: {
+    armId: v.id("trigger_arms"), token: v.string(), tpIndex: v.number(),
+    observedStatus: v.union(
+      v.literal("pending"), v.literal("open"), v.literal("triggered"), v.literal("filled"),
+      v.literal("canceled"), v.literal("rejected"), v.literal("unknown")),
+    oid: v.optional(v.string()), markSubmitted: v.optional(v.boolean()),
+  },
+  handler: async (ctx, { armId, token, tpIndex, observedStatus, oid, markSubmitted }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    const order = await ctx.db.query("trigger_orders").withIndex("by_arm_role_index", (q) => q.eq("armId", armId).eq("role", "tp").eq("tpIndex", tpIndex)).first();
+    if (!order) return { ok: false as const };
+    const patch: Record<string, unknown> = { observedStatus, updatedAt: Date.now() };
+    if (oid !== undefined) patch.oid = oid;
+    if (markSubmitted) patch.submittedAt = Date.now();
+    await ctx.db.patch(order._id, patch);
     return { ok: true as const };
   },
 });

@@ -62,7 +62,7 @@ const OPEN_MARGIN_STATES = new Set([
 // JAV-44: estados de un trigger_arm que mantienen margen comprometido (todos menos ARM_TERMINAL).
 // ARM_TERMINAL = { disarmed, closed, failed }.
 const ARM_OPEN_MARGIN_STATES = new Set([
-  "arming", "submitting", "armed", "disarming", "filled", "unknown",
+  "arming", "submitting", "armed", "disarming", "filled", "protecting", "protected", "unknown",
 ]);
 
 // Margen comprometido en una cuenta HL sumando AMBOS motores (IOC manual + triggers automáticos),

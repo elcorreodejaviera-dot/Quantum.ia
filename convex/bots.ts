@@ -317,9 +317,11 @@ export const getOrCreatePoolBot = mutation({
       }
     }
 
-    // Estado resultante (upsert de estado completo): la cuenta resultante es la del arg.
+    // Estado resultante (upsert de estado completo): la cuenta resultante conserva la existente si
+    // el arg viene vacío (CodeRabbit: un update parcial no debe borrar/invalidar la cuenta activa).
+    const resultingHlAccountId = hlAccountId ?? existingBot?.hlAccountId;
     const willBeActive = active ?? existingBot?.active ?? false;
-    if (willBeActive) await assertActivatablePoolBot(ctx, poolId, hlAccountId, user._id);
+    if (willBeActive) await assertActivatablePoolBot(ctx, poolId, resultingHlAccountId, user._id);
     // JAV-44: no reactivar mientras se está cancelando un trigger (pausa en curso).
     if (willBeActive && existingBot?.disarmPending) {
       throw new Error("El bot se está pausando (cancelando su trigger); espera a que termine.");
@@ -335,7 +337,7 @@ export const getOrCreatePoolBot = mutation({
       // desarmado confirmado (disarmPending + cron) para no dejar un trigger huérfano en HL.
       const pausingActive = existingBot.active && !willBeActive;
       await ctx.db.patch(existingBot._id, {
-        ...config, hlAccountId, baseAsset, simulationMode: resultMode,
+        ...config, hlAccountId: resultingHlAccountId, baseAsset, simulationMode: resultMode,
         ...(pausingActive ? {} : { active: willBeActive }),
       });
       if (pausingActive) {

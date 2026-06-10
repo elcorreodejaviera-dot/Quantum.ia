@@ -78,6 +78,13 @@ export const armPoolBotEntry = action({
     const { assetId, szDecimals, markPx } = await getAssetMeta(info, asset);
     const tradingAccount = credential.tradingAccountAddress as `0x${string}`;
 
+    // (CodeRabbit) Paridad con executePerpMarketOrder: exigir cuenta en modo unified ANTES de
+    // reservar margen (el snapshot de colateral spot solo es válido en unified).
+    const abstraction = await info.userAbstraction({ user: tradingAccount });
+    if (abstraction !== "unifiedAccount") {
+      throw new Error("La cuenta HL no está en modo unified; armado bloqueado por seguridad.");
+    }
+
     // (H4) Precondición flat: posición neta cero del activo.
     const chState = await info.clearinghouseState({ user: tradingAccount });
     const pos = (chState.assetPositions ?? []).find((p: any) => p.position?.coin === asset);
@@ -383,6 +390,9 @@ export const reconcileArm = internalAction({
         }
         const reFill = await fillsByCloid(info, user, order.cloid);
         if (reFill.size > 0) {
+          // (CodeRabbit) Igual que los otros caminos de fill: exigir avgPx>0 para no persistir un
+          // entryPrice inválido si userFills da el tamaño antes que el precio.
+          if (!(reFill.avgPx > 0)) return { skipped: "fill_data_pending" };
           await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "filled", filledSize: reFill.size, entryPrice: reFill.avgPx });
           return { result: "filled_late" };
         }

@@ -23,7 +23,8 @@ const ARM_TERMINAL = new Set(["disarmed", "closed", "failed"]);
 // Transiciones permitidas (no degradar; no resucitar un terminal). Un `triggered` observado NO es
 // un status persistido (se maneja sin transición en reconcileArm), por eso no aparece aquí.
 const ALLOWED_ARM: Record<string, Set<string>> = {
-  arming: new Set(["submitting", "failed", "disarmed"]),
+  // arming→submitting NO va por settleArm (necesita submittedAt+lease que pone markArmSubmitting).
+  arming: new Set(["failed", "disarmed"]),
   submitting: new Set(["armed", "filled", "unknown", "failed", "disarmed"]),
   armed: new Set(["filled", "disarming", "unknown", "disarmed", "failed"]),
   disarming: new Set(["disarmed", "filled", "unknown", "failed"]),
@@ -91,6 +92,11 @@ export const reserveArm = internalMutation({
       throw new Error("reservedNotional/marginReserved/size deben ser > 0");
     }
     if (!(args.availableCollateral >= 0)) throw new Error("availableCollateral inválido");
+    // (CodeRabbit) Validar el snapshot inmutable en la frontera de persistencia: un triggerPx/
+    // leverage/lowerEdge inválido dejaría un arm corrupto consumiendo margen hasta fallar más tarde.
+    if (!(args.triggerPx > 0) || !(args.appliedLeverage > 0) || !(args.lowerEdge > 0)) {
+      throw new Error("triggerPx/appliedLeverage/lowerEdge deben ser > 0");
+    }
 
     // (1) Unicidad: una sola generación NO terminal por bot.
     const arms = await ctx.db
@@ -210,7 +216,7 @@ export const settleArm = internalMutation({
   args: {
     armId: v.id("trigger_arms"),
     status: v.union(
-      v.literal("submitting"), v.literal("armed"), v.literal("disarming"), v.literal("disarmed"),
+      v.literal("armed"), v.literal("disarming"), v.literal("disarmed"),
       v.literal("filled"), v.literal("closed"), v.literal("unknown"), v.literal("failed")),
     token: v.optional(v.string()),
     filledSize: v.optional(v.number()),

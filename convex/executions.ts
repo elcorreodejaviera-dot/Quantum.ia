@@ -230,7 +230,10 @@ export const prepareSlRetry = internalMutation({
     if (!req || FINAL_STATES.has(req.status)) return { ok: false };
     if (req.reconcileLeaseToken !== token || (req.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false };
     if (attempt !== (req.slAttempt ?? 0) + 1) return { ok: false };
-    await ctx.db.patch(requestId, { slCloid: newSlCloid, slAttempt: attempt, updatedAt: Date.now() });
+    // Limpiar slSubmittedAt al rotar el CLOID: el marcador pertenecía al cloid anterior; si no se
+    // borra, el grace anti-doble-SL se aplicaría a un cloid NUEVO aún no enviado, retrasando la
+    // protección. Se vuelve a fijar solo cuando el nuevo intento se acepte (resting/pending).
+    await ctx.db.patch(requestId, { slCloid: newSlCloid, slAttempt: attempt, slSubmittedAt: undefined, updatedAt: Date.now() });
     return { ok: true };
   },
 });
@@ -259,7 +262,7 @@ type TransitionArgs = {
   requestId: Id<"execution_requests">;
   status: "entry_filled" | "protected" | "sl_failed" | "closed" | "unknown" | "failed";
   entryOrderId?: string; slOrderId?: string; filledSize?: number; entryPrice?: number;
-  error?: string; token?: string;
+  slSubmittedAt?: number; error?: string; token?: string;
 };
 
 // Lógica de transición compartida (fencing + ALLOWED + log final único). Reutilizada por
@@ -275,7 +278,7 @@ async function applyTransition(ctx: MutationCtx, args: TransitionArgs): Promise<
   const allowed = ALLOWED[req.status];
   if (!allowed || !allowed.has(args.status)) return;
   const patch: Record<string, unknown> = { status: args.status, updatedAt: Date.now() };
-  for (const k of ["entryOrderId", "slOrderId", "filledSize", "entryPrice", "error"] as const) {
+  for (const k of ["entryOrderId", "slOrderId", "filledSize", "entryPrice", "slSubmittedAt", "error"] as const) {
     if (args[k] !== undefined) patch[k] = args[k];
   }
   if (TERMINAL_HISTORY.has(args.status) && !req.historyRecorded) {
@@ -312,10 +315,30 @@ export const settleExecution = internalMutation({
     slOrderId: v.optional(v.string()),
     filledSize: v.optional(v.number()),
     entryPrice: v.optional(v.number()),
+    slSubmittedAt: v.optional(v.number()),
     error: v.optional(v.string()),
     token: v.optional(v.string()),   // si se provee (transiciones bajo claim), debe ser el dueño
   },
   handler: async (ctx, args) => { await applyTransition(ctx, args); },
+});
+
+/**
+ * Marca `slSubmittedAt` SIN cambiar de estado (caso waitingForTrigger/waitingForFill/timeout: SL
+ * aceptado o incierto pero aún sin oid). Deja el estado en `entry_filled` para que el cron lo
+ * confirme por CLOID; el marcador evita recolocar un 2º SL durante el lag de `unknownOid`. Requiere
+ * ser dueño del claim (fencing por token + lease vigente) y que el estado no sea final.
+ * @returns `{ ok: true }` si se persistió; `{ ok: false }` si se perdió el claim o el estado es final.
+ */
+export const markSlSubmitted = internalMutation({
+  args: { requestId: v.id("execution_requests"), token: v.string() },
+  handler: async (ctx, { requestId, token }) => {
+    const req = await ctx.db.get(requestId);
+    if (!req) return { ok: false as const };
+    if (req.reconcileLeaseToken !== token || (req.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (FINAL_STATES.has(req.status)) return { ok: false as const };
+    await ctx.db.patch(requestId, { slSubmittedAt: Date.now(), updatedAt: Date.now() });
+    return { ok: true as const };
+  },
 });
 
 // Decisión ATÓMICA del último gate antes de exchange.order. Distingue:

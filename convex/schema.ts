@@ -243,6 +243,7 @@ export default defineSchema({
     slCloid: v.string(),                   // cloid del SL del intento actual
     slAttempt: v.optional(v.number()),     // nº de recolocación → nuevo cloid determinista
     submittedAt: v.optional(v.number()),           // cuándo se envió la entrada (grace de unknownOid)
+    slSubmittedAt: v.optional(v.number()),         // cuándo se aceptó el SL (resting/waitingForTrigger): grace anti-doble-SL en lag de unknownOid
     reconcileLeaseUntil: v.optional(v.number()),   // claim exclusivo de reconciliación (anti-carrera)
     reconcileLeaseToken: v.optional(v.string()),   // fencing token: propietario del claim actual
     entryOrderId: v.optional(v.string()),

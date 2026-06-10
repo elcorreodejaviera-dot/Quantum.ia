@@ -1999,7 +1999,7 @@ function RealModeToggle({ realMode, setRealMode, canTradeLive }) {
       </label>
       {realMode && (
         <p style={{ fontSize: 11, color: 'var(--red)', margin: '4px 0 0' }}>
-          BETA — órdenes reales con tu capital. El stop-loss (stop-limit) puede no llenarse en una caída brusca.
+          BETA — órdenes reales con tu capital. El stop-loss es un stop-market (banda 1%): puede no llenarse si el mercado atraviesa la banda en un gap brusco.
         </p>
       )}
     </div>
@@ -2961,16 +2961,13 @@ function ExecutionLimitsPanel() {
   const limits = useQuery(api.systemConfig.getExecutionLimits, {});
   const setPerOrder = useMutation(api.systemConfig.setMaxNotionalPerOrder);
   const setDaily = useMutation(api.systemConfig.setMaxNotionalPerUserDaily);
-  const setBuffer = useMutation(api.systemConfig.setSlBufferPct);
   const [perOrder, setPerOrderV] = React.useState('');
   const [daily, setDailyV] = React.useState('');
-  const [buffer, setBufferV] = React.useState('');
   const [msg, setMsg] = React.useState('');
   React.useEffect(() => {
     if (limits) {
       setPerOrderV(String(limits.maxNotionalPerOrder));
       setDailyV(String(limits.maxNotionalPerUserDaily));
-      setBufferV(String(limits.slBufferPct));
     }
   }, [limits]);
   async function apply(fn, val) {
@@ -2994,8 +2991,10 @@ function ExecutionLimitsPanel() {
       <div className="be-head"><span>Límites de ejecución (efectivos)</span></div>
       <Row label="Máx nocional por orden (USDC)" val={perOrder} set={setPerOrderV} fn={setPerOrder} />
       <Row label="Máx nocional diario / usuario (USDC)" val={daily} set={setDailyV} fn={setDaily} />
-      <Row label="Buffer SL (%)" val={buffer} set={setBufferV} fn={setBuffer} step="0.1" allowZero />
-
+      <p style={{ fontSize: 11, opacity: 0.7, marginTop: 6 }}>
+        El SL es una orden trigger <b>stop-market</b> con banda de slippage fija (1%); puede no
+        ejecutarse si el mercado atraviesa la banda en un gap. No es configurable.
+      </p>
       {msg && <span style={{ fontSize: 11 }}>{msg}</span>}
     </div>
   );

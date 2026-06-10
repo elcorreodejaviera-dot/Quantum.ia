@@ -59,6 +59,56 @@ const MARGIN_SAFETY_BUFFER = 0.10;
 const OPEN_MARGIN_STATES = new Set([
   "pending", "submitting", "entry_filled", "protected", "sl_failed", "unknown",
 ]);
+// JAV-44: estados de un trigger_arm que mantienen margen comprometido (todos menos ARM_TERMINAL).
+// ARM_TERMINAL = { disarmed, closed, failed }.
+const ARM_OPEN_MARGIN_STATES = new Set([
+  "arming", "submitting", "armed", "disarming", "filled", "unknown",
+]);
+
+// Margen comprometido en una cuenta HL sumando AMBOS motores (IOC manual + triggers automáticos),
+// para que ninguna reserva pueda gastar dos veces el mismo colateral. Helper plano reutilizado por
+// `reserveExecution` (JAV-43) y por la reserva del arm (JAV-44) dentro de su misma mutation OCC.
+export async function committedMarginForAccount(
+  ctx: MutationCtx, hlAccountId: Id<"hl_api_credentials">,
+): Promise<number> {
+  const exec = await ctx.db
+    .query("execution_requests")
+    .withIndex("by_account", (q) => q.eq("hlAccountId", hlAccountId))
+    .collect();
+  const execMargin = exec
+    .filter((r) => OPEN_MARGIN_STATES.has(r.status))
+    .reduce((sum, r) => sum + (r.marginReserved ?? r.notional), 0);
+  const arms = await ctx.db
+    .query("trigger_arms")
+    .withIndex("by_account", (q) => q.eq("hlAccountId", hlAccountId))
+    .collect();
+  const armMargin = arms
+    .filter((a) => ARM_OPEN_MARGIN_STATES.has(a.status))
+    .reduce((sum, a) => sum + (a.marginReserved ?? a.reservedNotional), 0);
+  return execMargin + armMargin;
+}
+
+// Nocional usado en las últimas 24h por un usuario sumando AMBOS motores (límite diario compartido).
+export async function dailyNotionalUsed(
+  ctx: MutationCtx, userId: Id<"users">, since: number,
+): Promise<number> {
+  const recent = await ctx.db
+    .query("execution_requests")
+    .withIndex("by_user_created", (q) => q.eq("userId", userId).gte("createdAt", since))
+    .collect();
+  const execUsed = recent
+    .filter((r) => VOLUME_STATES.has(r.status))
+    .reduce((sum, r) => sum + r.notional, 0);
+  const recentArms = await ctx.db
+    .query("trigger_arms")
+    .withIndex("by_user_created", (q) => q.eq("userId", userId).gte("createdAt", since))
+    // cuenta el nocional de arms vivos o llenos (no los liberados sin efecto: disarmed/failed)
+    .collect();
+  const armUsed = recentArms
+    .filter((a) => a.status !== "disarmed" && a.status !== "failed")
+    .reduce((sum, a) => sum + a.reservedNotional, 0);
+  return execUsed + armUsed;
+}
 
 // Dedupe-check ligero ANTES de los gates de modo/margen (evita que un reintento de una
 // solicitud existente falle por saldo/modo actuales antes de poder reconciliarse).
@@ -124,28 +174,16 @@ export const reserveExecution = internalMutation({
       throw new Error(`Nocional ${args.notional} supera el máximo por orden (${maxPerOrder}).`);
     }
     const since = Date.now() - DAY_MS;
-    const recent = await ctx.db
-      .query("execution_requests")
-      .withIndex("by_user_created", (q) => q.eq("userId", args.userId).gte("createdAt", since))
-      .collect();
-    const dailyUsed = recent
-      .filter((r) => VOLUME_STATES.has(r.status))
-      .reduce((sum, r) => sum + r.notional, 0);
+    // Límite diario COMPARTIDO entre ambos motores (IOC manual + triggers automáticos JAV-44).
+    const dailyUsed = await dailyNotionalUsed(ctx, args.userId, since);
     if (dailyUsed + args.notional > maxDaily) {
       throw new Error(`Volumen diario excedido: ${dailyUsed} + ${args.notional} > ${maxDaily}.`);
     }
     // (2b) Reserva de margen ATÓMICA por cuenta (anti-carrera). Esta mutation serializa, así que
     // dos ejecuciones concurrentes de la misma cuenta se contabilizan una tras otra. Se suma el
-    // margen ya comprometido por ejecuciones abiertas de la cuenta + el de esta; debe caber en el
+    // margen ya comprometido por AMBOS motores en la cuenta + el de esta; debe caber en el
     // colateral disponible (snapshot) con un buffer de seguridad.
-    const openOnAccount = await ctx.db
-      .query("execution_requests")
-      .withIndex("by_account", (q) => q.eq("hlAccountId", args.hlAccountId))
-      .collect();
-    const marginCommitted = openOnAccount
-      .filter((r) => OPEN_MARGIN_STATES.has(r.status))
-      // fallback conservador: si una fila no tiene marginReserved, cuenta su notional completo.
-      .reduce((sum, r) => sum + (r.marginReserved ?? r.notional), 0);
+    const marginCommitted = await committedMarginForAccount(ctx, args.hlAccountId);
     if ((marginCommitted + args.marginRequired) > args.availableCollateral * (1 - MARGIN_SAFETY_BUFFER)) {
       throw new Error(
         `Margen insuficiente en la cuenta: comprometido ${marginCommitted.toFixed(2)} + requerido ` +

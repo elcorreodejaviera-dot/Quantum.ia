@@ -93,8 +93,11 @@ export const armPoolBotEntry = action({
       throw new Error(`mark (${markPx}) ≤ triggerPx normalizado (${triggerPxNorm}): no se arma (precio ya en/bajo el rango).`);
     }
 
-    // (H12) Sizing desde hedgeNotionalUsd (backend), cota superior conservadora del precio de fill.
-    const notionalCapPx = ceilHlPrice(triggerPxNorm, szDecimals);
+    // (H12 + Fix #4) Sizing desde hedgeNotionalUsd. El límite SELL es un SUELO (triggerPx*(1−slip));
+    // tras dispararse, un rebote puede llenar POR ENCIMA del trigger. Para que el nocional reservado
+    // sea cota conservadora (no garantía dura, igual que Short en JAV-43), dimensionar con el techo
+    // triggerPx*(1+slip) redondeado ARRIBA. Reduce el size → el fill rara vez supera lo reservado.
+    const notionalCapPx = ceilHlPrice(triggerPxNorm * (1 + ENTRY_TRIGGER_SLIPPAGE), szDecimals);
     const size = floorToDecimals(bot.hedgeNotionalUsd / notionalCapPx, szDecimals);
     if (size <= 0) throw new Error("Size redondea a cero");
     const reservedNotional = size * notionalCapPx;
@@ -121,6 +124,16 @@ export const armPoolBotEntry = action({
 
     // Apalancamiento entero en HL (isolated).
     await exchange.updateLeverage({ asset: assetId, isCross: false, leverage: appliedLeverage });
+
+    // (Fix #1) Gate ATÓMICO justo antes del envío: updateLeverage pudo tardar y un kill switch/pausa/
+    // revocación ocurrir en esa ventana (desiredState no lo refleja). Revalidar TODO bajo el lease.
+    const gate = await ctx.runMutation(internal.triggerArms.gateArmBeforeOrder, { armId, token });
+    if (!gate.ok) {
+      // No se envió. Dejar el arm reconciliable: el cron verá unknownOid → prueba negativa → failed
+      // (tras cuarentena) o, si hay kill switch, el camino defensivo. Liberar el lease.
+      await ctx.runMutation(internal.triggerArms.releaseArmReconcile, { armId, token });
+      return { ok: false, status: "gated", armId };
+    }
 
     // Colocar el trigger nativo de ENTRADA: SELL (abre short), reduceOnly:false, stop-market que
     // dispara al CAER a triggerPx (tpsl:"sl"); banda agresiva floor para venta.
@@ -269,7 +282,9 @@ export const reconcileArm = internalAction({
           await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "filled", filledSize: fill.size, entryPrice: fill.avgPx });
           return { result: "disarm_but_filled" };
         }
-        if (orderState === "triggered") return { skipped: "disarm_triggered_pending" };
+        // (Fix #2) Un arm `triggered` también intenta cancelar (no retornar antes): aunque al
+        // dispararse puede que ya no se pueda cancelar, hay que intentarlo y reconfirmar — si quedó
+        // vivo/triggered seguirá en disarm_pending_confirmation, si llenó pasa a filled.
         // Intentar cancelar (idempotente).
         try { await exchange.cancelByCloid({ cancels: [{ asset: assetId, cloid: order.cloid as `0x${string}` }] }); } catch { /* reintentar siguiente ciclo */ }
         const after: any = await info.orderStatus({ user, oid: order.cloid as `0x${string}` });

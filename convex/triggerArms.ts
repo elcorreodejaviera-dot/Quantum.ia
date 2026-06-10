@@ -170,6 +170,30 @@ export const markArmSubmitting = internalMutation({
   },
 });
 
+// --- Gate ATÓMICO justo antes de exchange.order (Fix #1) — como gateBeforeOrder de JAV-43 ---
+// Entre el CAS y el envío corre updateLeverage (espera): un kill switch/pausa/revocación puede
+// ocurrir ahí y desiredState no lo refleja. Este gate revalida TODO bajo el lease, inmediatamente
+// antes del envío, y renueva el lease para cubrir el RPC. Si falla → NO enviar.
+export const gateArmBeforeOrder = internalMutation({
+  args: { armId: v.id("trigger_arms"), token: v.string() },
+  handler: async (ctx, { armId, token }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm) return { ok: false as const };
+    if (arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (arm.status !== "submitting" || arm.desiredState !== "armed") return { ok: false as const };
+    if (arm.network !== "testnet") return { ok: false as const };
+    const bot = await ctx.db.get(arm.botId);
+    if (!bot || !bot.active || bot.disarmPending || bot.kind !== "il" || bot.direction !== "short" || bot.poolId !== arm.poolId) {
+      return { ok: false as const };
+    }
+    if (!(await assertLiveAdmissible(ctx, arm.userId, arm.botId, arm.hlAccountId))) return { ok: false as const };
+    const pool = await ctx.db.get(arm.poolId);
+    if (!pool || pool.closed) return { ok: false as const };
+    await ctx.db.patch(armId, { reconcileLeaseUntil: Date.now() + ARM_RECONCILE_LEASE_MS, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
 // --- Transición genérica con fencing + cuarentena N6 + finalización de pausa N2 ---
 export const settleArm = internalMutation({
   args: {
@@ -296,8 +320,14 @@ export const getArmOrderInternal = internalQuery({
 export const listReconcilableArmsInternal = internalQuery({
   args: { limit: v.optional(v.number()) },
   handler: async (ctx, { limit }) => {
-    const arms = await ctx.db.query("trigger_arms").withIndex("by_status_updated").collect();
-    return arms.filter((a) => !isArmTerminal(a.status)).slice(0, limit ?? 50).map((a) => a._id);
+    // (Fix #3) Ordenar por updatedAt ASC (más antiguo primero), NO por status: tras reconciliar un
+    // arm su updatedAt se refresca y pasa al final → rotación justa, sin starvation por estado.
+    const n = limit ?? 50;
+    const out: Id<"trigger_arms">[] = [];
+    for await (const a of ctx.db.query("trigger_arms").withIndex("by_updated").order("asc")) {
+      if (!isArmTerminal(a.status)) { out.push(a._id); if (out.length >= n) break; }
+    }
+    return out;
   },
 });
 

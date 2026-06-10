@@ -304,6 +304,7 @@ export default defineSchema({
     .index("by_bot_generation", ["botId", "generation"])  // unicidad + generation = max+1
     .index("by_bot_status", ["botId", "status"])
     .index("by_status_updated", ["status", "updatedAt"])  // cron reconcilePoolArms
+    .index("by_updated", ["updatedAt"])                   // cron sin starvation (más antiguo primero)
     .index("by_user_created", ["userId", "createdAt"])    // límite diario compartido con JAV-43
     .index("by_account", ["hlAccountId"]),                // bloquear revocación con arm no terminal
 

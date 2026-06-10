@@ -3,7 +3,7 @@ import { v } from "convex/values";
 import type { MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { getLimit } from "./executionLimits";
-import { committedMarginForAccount, dailyNotionalUsed } from "./executions";
+import { committedMarginForAccount, dailyNotionalUsed, assertLiveAdmissible } from "./executions";
 
 // --- JAV-44 Etapa 1: máquina de estados del trigger_arm (lease/fencing como reconcileExecution) ---
 
@@ -150,6 +150,16 @@ export const markArmSubmitting = internalMutation({
     if (arm.desiredState !== "armed") return { ok: false as const, reason: "disarmed" as const };
     const bot = await ctx.db.get(arm.botId);
     if (!bot || !bot.active || bot.disarmPending) return { ok: false as const, reason: "blocked" as const };
+    // (Fix #6) Revalidar TODOS los gates de admisión JUSTO antes del envío (revoca/switch/sim/
+    // ownership/cuenta cambió entre reserveArm y el CAS): reutiliza assertLiveAdmissible de JAV-43.
+    if (!(await assertLiveAdmissible(ctx, arm.userId, arm.botId, arm.hlAccountId))) {
+      return { ok: false as const, reason: "blocked" as const };
+    }
+    if (bot.kind !== "il" || bot.direction !== "short") return { ok: false as const, reason: "blocked" as const };
+    if (bot.poolId !== arm.poolId) return { ok: false as const, reason: "blocked" as const };
+    const pool = await ctx.db.get(arm.poolId);
+    if (!pool || pool.closed) return { ok: false as const, reason: "blocked" as const };
+    if (arm.network !== "testnet") return { ok: false as const, reason: "blocked" as const };
     const now = Date.now();
     const token = crypto.randomUUID();
     await ctx.db.patch(armId, {
@@ -168,7 +178,6 @@ export const settleArm = internalMutation({
       v.literal("submitting"), v.literal("armed"), v.literal("disarming"), v.literal("disarmed"),
       v.literal("filled"), v.literal("closed"), v.literal("unknown"), v.literal("failed")),
     token: v.optional(v.string()),
-    oid: v.optional(v.string()),
     filledSize: v.optional(v.number()),
     entryPrice: v.optional(v.number()),
     error: v.optional(v.string()),
@@ -194,7 +203,7 @@ export const settleArm = internalMutation({
 
     const now = Date.now();
     const patch: Record<string, unknown> = { status: args.status, updatedAt: now };
-    for (const k of ["oid", "filledSize", "entryPrice", "error"] as const) {
+    for (const k of ["filledSize", "entryPrice", "error"] as const) {
       if (args[k] !== undefined) patch[k] = args[k];
     }
     await ctx.db.patch(args.armId, patch);
@@ -257,12 +266,14 @@ export const requestDisarmAndDeactivate = internalMutation({
 
 // --- Recuperación de `arming` abandonado pre-CAS (N7): nunca envió → failed sin cuarentena ---
 export const recoverAbandonedArming = internalMutation({
-  args: { armId: v.id("trigger_arms") },
-  handler: async (ctx, { armId }) => {
+  args: { armId: v.id("trigger_arms"), token: v.string() },
+  handler: async (ctx, { armId, token }) => {
     const arm = await ctx.db.get(armId);
     if (!arm || arm.status !== "arming" || arm.submittedAt != null) return { ok: false as const };
-    if ((arm.reconcileLeaseUntil ?? 0) > Date.now()) return { ok: false as const };
-    if (Date.now() - arm.createdAt <= ARM_ARMING_RECOVERY_MS) return { ok: false as const };
+    // Se llama BAJO el claim de reconcileArm: verificar propiedad del lease (no rechazar por tenerlo).
+    if (arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    // Solo recuperar tras el plazo: un arming muy reciente puede ser una action aún viva pre-CAS.
+    if (Date.now() - arm.createdAt <= ARM_ARMING_RECOVERY_MS) return { ok: false as const, tooRecent: true as const };
     await ctx.db.patch(armId, { status: "failed", error: "arming abandonado pre-CAS (nunca envió)", updatedAt: Date.now() });
     const bot = await ctx.db.get(arm.botId);
     if (bot?.disarmPending) await ctx.db.patch(arm.botId, { active: false, disarmPending: false });

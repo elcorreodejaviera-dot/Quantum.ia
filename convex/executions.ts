@@ -12,7 +12,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // Revalidación autoritativa de la admisión: master switch global + permiso canTradeLive (bypass
 // admin) + estado del bot (ownership, activo, real, misma cuenta). Si algo cambió durante la
 // action (revocación, kill switch, pausa, vuelta a simulación, cambio de cuenta) → no admisible.
-async function assertLiveAdmissible(
+export async function assertLiveAdmissible(
   ctx: QueryCtx | MutationCtx, userId: Id<"users">, botId: Id<"bots">, hlAccountId: Id<"hl_api_credentials">,
 ): Promise<boolean> {
   const user = await ctx.db.get(userId);

@@ -1,7 +1,7 @@
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { requireAdmin, requireUser } from "./helpers";
-import { hasNonTerminalArmForBot } from "./triggerArms";
+import { hasNonTerminalArmForBot, requestDisarmAndDeactivateImpl } from "./triggerArms";
 
 export const listPools = query({
   args: {},
@@ -168,7 +168,10 @@ export const markPoolClosedAndPauseBots = internalMutation({
     });
     const linkedBots = await ctx.db.query("bots").withIndex("by_pool", q => q.eq("poolId", id)).collect();
     for (const bot of linkedBots) {
-      if (bot.active) await ctx.db.patch(bot._id, { active: false });
+      // (Fix #3) Pausa SEGURA (H1/N2): si el bot tiene un trigger vivo, no desactivar de golpe —
+      // disarmPending + el cron lo cancela en HL y luego completa active=false (la reconciliación
+      // ve pool.closed → killed → cancela). Nunca dejar un trigger huérfano por el cierre de pool.
+      if (bot.active) await requestDisarmAndDeactivateImpl(ctx, bot._id);
     }
   },
 });

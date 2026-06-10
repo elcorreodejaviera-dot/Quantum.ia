@@ -324,6 +324,11 @@ export const getOrCreatePoolBot = mutation({
     if (willBeActive && existingBot?.disarmPending) {
       throw new Error("El bot se está pausando (cancelando su trigger); espera a que termine.");
     }
+    // (Fix #5) Con un trigger_arm VIVO, la única operación segura es PAUSAR (active→false). Cualquier
+    // reconfiguración (cuenta, simulación, parámetros) dejaría el trigger antiguo huérfano/incoherente.
+    if (existingBot && willBeActive && await hasNonTerminalArmForBot(ctx, existingBot._id)) {
+      throw new Error("El bot tiene cobertura automática activa; pausa el trigger antes de reconfigurar.");
+    }
 
     if (existingBot) {
       // JAV-44 (H1/N2): pausar un bot con un trigger_arm vivo NO desactiva de golpe — pasa por

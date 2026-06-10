@@ -17,6 +17,12 @@ const HL_ORDER_TIMEOUT_MS = 30_000;
 // Banda agresiva del market al dispararse el trigger de entrada (venta). Gap > banda → puede no llenar.
 const ENTRY_TRIGGER_SLIPPAGE = 0.02;
 
+// ¿Hay una orden VIVA con este cloid en el book? (parte de la prueba negativa R3 — no liberar a ciegas).
+async function openByCloid(info: any, user: `0x${string}`, cloid: string): Promise<boolean> {
+  const oo: any[] = await info.frontendOpenOrders({ user });
+  return oo.some((o) => typeof o?.cloid === "string" && o.cloid.toLowerCase() === cloid.toLowerCase());
+}
+
 // Coloca/observa órdenes trigger por CLOID. Política de COLOCACIÓN: todos los gates + hard-gate testnet.
 export const armPoolBotEntry = action({
   args: { botId: v.id("bots"), expectedNetwork: v.string(), confirm: v.boolean() },
@@ -73,6 +79,12 @@ export const armPoolBotEntry = action({
     const pos = (chState.assetPositions ?? []).find((p: any) => p.position?.coin === asset);
     if (pos && Math.abs(Number(pos.position?.szi ?? 0)) > 0) {
       throw new Error("Ya existe posición abierta en el activo: armado bloqueado (precondición flat).");
+    }
+    // (Fix #7 / H4) Sin órdenes abiertas incompatibles en el activo (un trigger/orden previo dejaría
+    // la cobertura en un estado ambiguo). En Etapa 1, cualquier orden abierta del activo bloquea.
+    const openOrders: any[] = await info.frontendOpenOrders({ user: tradingAccount });
+    if (openOrders.some((o) => o?.coin === asset)) {
+      throw new Error("Hay órdenes abiertas en el activo: armado bloqueado (sin órdenes incompatibles).");
     }
 
     // (R6) Trigger normalizado al tick (floor) y gate mark > triggerPxNormalized SOBRE el valor enviado.
@@ -140,9 +152,12 @@ export const armPoolBotEntry = action({
 
     const st = (resp as any)?.response?.data?.statuses?.[0];
     if (st?.resting?.oid != null) {
-      await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "armed", oid: String(st.resting.oid) });
+      // El oid va en el trigger_order (el arm no tiene campo oid).
+      await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, observedStatus: "open", oid: String(st.resting.oid) });
+      await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "armed" });
     } else if (st?.filled?.oid != null) {
-      await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "filled", oid: String(st.filled.oid) });
+      await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, observedStatus: "filled", oid: String(st.filled.oid) });
+      await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "filled" });
     } else if (st === "waitingForTrigger") {
       // Trigger aceptado a la espera del cruce → armed; se confirma por CLOID en la reconciliación.
       await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "armed" });
@@ -195,8 +210,8 @@ export const reconcileArm = internalAction({
 
       // Recuperación N7: arming abandonado pre-CAS (jamás envió) → failed sin cuarentena.
       if (arm.status === "arming" && arm.submittedAt == null) {
-        await ctx.runMutation(internal.triggerArms.recoverAbandonedArming, { armId });
-        return { result: "arming_recovered" };
+        const r = await ctx.runMutation(internal.triggerArms.recoverAbandonedArming, { armId, token });
+        return { result: r.ok ? "arming_recovered" : "arming_too_recent" };
       }
 
       // Cliente SIEMPRE desde arm.network (testnet) — independiente del HL_NETWORK actual (N4).
@@ -220,13 +235,22 @@ export const reconcileArm = internalAction({
         return { skipped: "filled_position_open" };
       }
 
-      // Kill switch / pausa: si hay condición de apagado y aún no se está desarmando, convertir a disarm.
+      // Kill switch / pausa (Fix #4): cualquier condición de apagado convierte el arm a desarmado y
+      // fuerza la cancelación del trigger vivo. Incluye: switches globales, simulación, pool cerrado,
+      // HL_NETWORK ya NO testnet (N4: el global se movió a mainnet), bot desactivado/en simulación,
+      // cambio de cuenta o pool bajo el arm, y revocación de canTradeLive.
       const [tradingConfig, simConfig] = await Promise.all([
         ctx.runQuery(internal.systemConfig.getConfigInternal, { key: "tradingEnabled" }),
         ctx.runQuery(internal.systemConfig.getConfigInternal, { key: "simulationMode" }),
       ]);
       const pool = await ctx.runQuery(internal.pools.getPoolByIdInternal, { id: arm.poolId });
-      const killed = tradingConfig?.value !== true || simConfig?.value === true || pool?.closed === true || arm.network !== "testnet";
+      const bot = await ctx.runQuery(internal.bots.getBotByIdInternal, { id: arm.botId });
+      const canLive = await ctx.runQuery(internal.users.hasTradeLiveForUserInternal, { userId: arm.userId });
+      const killed =
+        tradingConfig?.value !== true || simConfig?.value === true ||
+        pool?.closed === true || hlNetwork() !== "testnet" ||
+        !bot || !bot.active || bot.simulationMode === true ||
+        bot.hlAccountId !== arm.hlAccountId || bot.poolId !== arm.poolId || !canLive;
       if (killed && arm.desiredState !== "disarmed") {
         await ctx.runMutation(internal.triggerArms.requestDisarmAndDeactivate, { botId: arm.botId });
       }
@@ -246,18 +270,21 @@ export const reconcileArm = internalAction({
           return { result: "disarm_but_filled" };
         }
         if (orderState === "triggered") return { skipped: "disarm_triggered_pending" };
-        // Intentar cancelar (idempotente). Luego confirmar por CLOID (prueba negativa R3).
+        // Intentar cancelar (idempotente).
         try { await exchange.cancelByCloid({ cancels: [{ asset: assetId, cloid: order.cloid as `0x${string}` }] }); } catch { /* reintentar siguiente ciclo */ }
         const after: any = await info.orderStatus({ user, oid: order.cloid as `0x${string}` });
         const afterState = after?.status === "order" ? after.order?.status : undefined;
-        const afterUnknown = after?.status === "unknownOid";
         const afterFill = await fillsByCloid(info, user, order.cloid);
         if (afterState === "filled" || afterFill.size > 0) {
           await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "filled", filledSize: afterFill.size, entryPrice: afterFill.avgPx });
           return { result: "disarm_but_filled" };
         }
-        const canceledConfirmed = afterState === "canceled" || (afterUnknown && afterFill.size === 0);
-        if (canceledConfirmed) {
+        // (Fix #1 / R3) Prueba negativa COMPLETA antes de declarar disarmed: (a) ausente del book,
+        // (b) sin fills, (c) orderStatus no la muestra viva (open/triggered). NO confiar en que el
+        // cancel "no lanzó" — eso no demuestra ausencia. Sin las tres → seguir disarming.
+        const stillOpen = await openByCloid(info, user, order.cloid);
+        const liveState = afterState === "open" || afterState === "triggered";
+        if (!stillOpen && afterFill.size === 0 && !liveState) {
           await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, observedStatus: "canceled" });
           // settleArm aplica la cuarentena N6: no terminaliza si aún está dentro del plazo.
           const r = await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "disarmed" });
@@ -275,7 +302,7 @@ export const reconcileArm = internalAction({
       }
       if (orderState === "open") {
         await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, observedStatus: "open", oid: order.oid });
-        await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "armed", oid: order.oid });
+        await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "armed" });
         return { result: "armed" };
       }
       if (orderState === "triggered") {
@@ -289,20 +316,23 @@ export const reconcileArm = internalAction({
         return { result: r.ok ? "failed_terminal" : "terminal_quarantined" };
       }
       if (isUnknownOid) {
-        // (R3) Prueba negativa por CLOID antes de fallar; la cuarentena N6 la refuerza en settleArm.
-        const cancelTried = await exchange.cancelByCloid({ cancels: [{ asset: assetId, cloid: order.cloid as `0x${string}` }] }).then(() => true).catch(() => true);
-        const recheck: any = await info.orderStatus({ user, oid: order.cloid as `0x${string}` });
-        const stillUnknown = recheck?.status === "unknownOid";
+        // (Fix #1 / R3) Prueba negativa COMPLETA por CLOID antes de fallar; la cuarentena N6 la
+        // refuerza en settleArm. unknownOid en orderStatus puede ser LAG: si la orden está en el
+        // book (frontendOpenOrders) está VIVA → tratarla como armed, no fallar.
+        const stillOpen = await openByCloid(info, user, order.cloid);
+        if (stillOpen) {
+          await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, observedStatus: "open" });
+          await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "armed" });
+          return { result: "armed_lagged" };
+        }
         const reFill = await fillsByCloid(info, user, order.cloid);
         if (reFill.size > 0) {
           await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "filled", filledSize: reFill.size, entryPrice: reFill.avgPx });
           return { result: "filled_late" };
         }
-        if (cancelTried && stillUnknown) {
-          const r = await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "failed", error: "unknownOid (prueba negativa)" });
-          return { result: r.ok ? "failed_negative_proof" : "unknown_quarantined" };
-        }
-        return { skipped: "unknown_pending" };
+        // Ausente del book + sin fills + orderStatus unknownOid → prueba negativa → failed (cuarentena).
+        const r = await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "failed", error: "unknownOid (prueba negativa)" });
+        return { result: r.ok ? "failed_negative_proof" : "unknown_quarantined" };
       }
       return { skipped: "no_change" };
     } finally {

@@ -1,15 +1,29 @@
-# Plan JAV-44 — Auto-rearm tras el SL (reabrir la cobertura automáticamente)
+# Plan JAV-44 — Auto-rearm tras el SL (reabrir la cobertura automáticamente) — rev.2
+
+## (Codex #1) Discriminar el MOTIVO del cierre — campo `closeReason`
+Hoy todo cierre converge a `closed` sin registrar por qué. El auto-rearm debe dispararse SOLO cuando
+el SL disparó (literal "reabrir tras SL"), NO tras cierre de emergencia / manual / disarm. Por tanto:
+- **Nuevo campo `trigger_arms.closeReason: v.optional(v.union("sl","manual","emergency","disarm"))`.**
+- **Marcador de emergencia:** cuando se decide el cierre de emergencia (`mustEmergencyClose`), fijar
+  un flag persistente en el arm (`emergencyClosing: v.optional(v.boolean())`) ANTES de mandar el
+  market close. Si era por kill/disarm, distinguir el origen para `closeReason`.
+- **Al alcanzar `closed`** (detección szi==0 + ensureOrdersDead): determinar `closeReason`:
+  - si el `sl_upper` está `observedStatus:"filled"` (el SL llenó) → `closeReason = "sl"`.
+  - si `emergencyClosing` estaba puesto → `"emergency"` (o `"disarm"` si vino de wantDisarm/kill).
+  - en otro caso (szi==0 sin SL llenado ni emergencia) → `"manual"` (cierre externo del usuario).
+  Persistir `closeReason` en el `settleArm(closed)`.
+- **Auto-rearm SOLO si `closeReason === "sl"`** Y `bot.autoRearm`. Nunca tras emergency/manual/disarm.
+
 
 Última pieza del motor. Sobre OCO+TPs+SL. Cuando la posición se cierra (SL disparado, o cierre
 de emergencia) y `bot.autoRearm === true`, **rearmar automáticamente una NUEVA generación** (volver a
 colocar las entradas) sin intervención del usuario, para que la cobertura siga activa.
 
 ## Disparo
-- En `reconcileArm`, justo después de `settleArm(closed)` (la única vía a terminal con posición que
-  existió), si `bot.autoRearm === true` Y no hay kill/disarm Y `bot.active` Y `!bot.disarmPending`:
-  encolar un rearmado.
-- Solo desde `closed` (SL/cierre real). NO desde `failed`/`disarmed` (esos NO rearman: failed = nunca
-  abrió/algo falló; disarmed = el usuario/kill lo paró).
+- En `reconcileArm`, justo después de `settleArm(closed)`, si **`closeReason === "sl"`** (el SL
+  disparó) Y `bot.autoRearm === true` Y no hay kill/disarm Y `bot.active` Y `!bot.disarmPending` Y
+  pasado el cooldown: encolar un rearmado.
+- Solo tras un cierre por SL. NO tras `failed`/`disarmed`/`emergency`/`manual`.
 
 ## Cómo rearmar (sin auth de usuario)
 `armPoolBotEntry` hoy es una ACTION pública (usa la identidad del usuario). El auto-rearm corre desde
@@ -59,8 +73,6 @@ falla, NO rearmar (queda sin cobertura hasta que el usuario reactive — seguro,
 2. Pausar/kill durante el ciclo → no rearma.
 3. SL en bucle rápido → el cooldown + límite diario lo frenan.
 
-## Decisiones para Codex/usuario
-- Valor de `AUTOREARM_COOLDOWN_MS` (propuesta: 60s).
-- ¿Rearmar también tras un `closed` por cierre de EMERGENCIA (SL falló)? (propuesta: NO rearmar tras
-  emergencia — algo fue mal; requiere intervención. Solo rearmar tras un SL/cierre normal. Marcar el
-  motivo del closed para distinguir.)
+## Decisiones (CERRADAS)
+- Rearmar SOLO si `closeReason === "sl"` (SL disparado). NO tras emergency/manual/disarm/failed. ✓ (Codex #1)
+- `AUTOREARM_COOLDOWN_MS` = 60s (propuesta; ajustable).

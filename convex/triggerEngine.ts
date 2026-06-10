@@ -296,7 +296,7 @@ export const reconcileArm = internalAction({
       const user = credential.tradingAccountAddress as `0x${string}`;
       const { info, exchange } = makeClients(decryptPrivateKey(credential), arm.network === "testnet");
       const assetMeta = await getAssetMeta(info, arm.asset.toUpperCase());
-      const assetId = assetMeta.assetId;
+      const { assetId, szDecimals } = assetMeta;   // (CodeRabbit) szDecimals se usa en SL/emergencia/TPs
 
       // Kill switch / pausa (Fix #4 + N4 mainnet): cualquier condición de apagado convierte el arm a
       // desarmado. La red AUTORITATIVA es la del arm (arm.network), no el HL_NETWORK actual: si el

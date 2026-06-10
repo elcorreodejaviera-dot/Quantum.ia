@@ -3,23 +3,26 @@
 import { action, internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { v } from "convex/values";
-import { ExchangeClient, InfoClient, HttpTransport } from "@nktkas/hyperliquid";
+import { ExchangeClient, InfoClient, HttpTransport, TransportError } from "@nktkas/hyperliquid";
 import { privateKeyToAccount } from "viem/accounts";
 import { createHash } from "crypto";
 import { decryptPrivateKey } from "./hlCredentialActions";
 import { hlNetwork, hlIsTestnet, assertExpectedNetwork } from "./hlNetwork";
-import { LIMIT_DEFAULTS } from "./executionLimits";
 // Timeout del envío de órdenes a HL (entrada y SL). Menor que RECONCILE_LEASE_MS (60s) para el SL.
 const HL_ORDER_TIMEOUT_MS = 30_000;
 // Entrada "market": IOC con precio agresivo para cruzar el book (la IOC se llena al MEJOR precio
 // disponible, no al límite — el slippage solo amplía el rango aceptable, no empeora el fill).
 const ENTRY_IOC_SLIPPAGE = 0.02;
-// SL stop-MARKET: tope de slippage del precio límite para que se llene al activarse, incluso en
-// una caída/subida brusca (evita el stop-limit colgado sin llenar).
-const SL_MARKET_SLIPPAGE = 0.03;
+// SL stop-MARKET: banda de slippage (FRACCIÓN, no %) del precio límite al activarse. Fija en 1%,
+// replicando la cuenta de referencia. NO garantiza el llenado: en un gap > 1% el SL puede no
+// ejecutarse (riesgo aceptado por decisión del usuario). NO confundir con MARGIN_SAFETY_BUFFER.
+const SL_MARKET_SLIPPAGE_FRACTION = 0.01;
 // Tras enviar (submittedAt), margen amplio antes de cerrar un unknownOid como failed: garantiza
 // que la action (abortada a HL_ORDER_TIMEOUT_MS, con expiresAfter) ya no puede llenar la IOC.
 const ENTRY_GRACE_MS = 5 * 60_000;
+// Grace del SL: tras aceptarse (slSubmittedAt, resting/waitingForTrigger), un unknownOid pasajero
+// (lag de orderStatus) NO debe disparar una 2ª colocación. Ventana de tolerancia antes de recolocar.
+const SL_SUBMIT_GRACE_MS = 60_000;
 
 // Aborta REALMENTE la request (AbortController + signal del SDK). clearTimeout evita el timer colgante.
 function abortAfter(ms: number): { signal: AbortSignal; clear: () => void } {
@@ -47,6 +50,30 @@ function formatHlPrice(price: number, szDecimals: number): string {
   const maxDecimals = Math.max(0, 6 - szDecimals);
   const sig = Number(price.toPrecision(5));
   return String(Number(sig.toFixed(maxDecimals)));
+}
+
+// Nº de decimales válidos en HL para un precio: el MÁS RESTRICTIVO entre el tope por szDecimals
+// (6 − szDecimals) y el tope por 5 cifras significativas (5 − díg. enteros). Para precios < 1 las
+// cifras significativas no limitan los decimales (los ceros a la izquierda no cuentan).
+function hlAllowedDecimals(price: number, szDecimals: number): number {
+  const maxDecimals = Math.max(0, 6 - szDecimals);
+  // intDigits es NEGATIVO para price < 1 (p.ej. 0.0123 → −1), de modo que sigDecimals cuente los
+  // ceros a la izquierda: 5 cifras significativas de 0.0123 abarcan 6 decimales. No clampar a 0.
+  const intDigits = Math.floor(Math.log10(price)) + 1;
+  const sigDecimals = Math.max(0, 5 - intDigits);
+  return Math.min(maxDecimals, sigDecimals);
+}
+
+// Cota SUPERIOR conservadora: el precio HL-válido más pequeño ≥ price (redondeo dirigido ARRIBA al
+// tick que impone HL). Respeta SIMULTÁNEAMENTE 5 cifras significativas y (6 − szDecimals) decimales.
+// (formatHlPrice redondea al más cercano y podría bajar el cap → subreservar.) Garantiza ≥ price:
+// sin epsilon (que podía bajar de un tick); si por ruido flotante quedó por debajo, sube un tick.
+function ceilHlPrice(price: number, szDecimals: number): number {
+  const decimals = hlAllowedDecimals(price, szDecimals);
+  const tick = 10 ** -decimals;
+  let c = Number((Math.ceil(price / tick) * tick).toFixed(decimals));
+  if (c < price) c = Number((c + tick).toFixed(decimals));
+  return c;
 }
 
 type AssetMeta = { assetId: number; szDecimals: number; markPx: number };
@@ -94,29 +121,33 @@ async function fillsByCloid(info: InfoClient, user: string, target: string): Pro
   return { size, avgPx: size > 0 ? notional / size : 0 };
 }
 
-// Precio de SL y su límite (stop-limit) según el lado de la posición.
-function slPrices(side: "Long" | "Short", entryPx: number, stopLossPct: number, bufferPct: number) {
+// Precio trigger del SL stop-market según el lado de la posición.
+function slTriggerPx(side: "Long" | "Short", entryPx: number, stopLossPct: number): number {
   // Long protege con un Sell por debajo; Short con un Buy por encima.
-  const triggerPx = side === "Long" ? entryPx * (1 - stopLossPct / 100) : entryPx * (1 + stopLossPct / 100);
-  // Límite adverso (buffer) para que se llene al activarse.
-  const limitPx = side === "Long" ? triggerPx * (1 - bufferPct / 100) : triggerPx * (1 + bufferPct / 100);
-  return { triggerPx, limitPx };
+  return side === "Long" ? entryPx * (1 - stopLossPct / 100) : entryPx * (1 + stopLossPct / 100);
 }
 
-// Coloca la orden de SL stop-limit reduceOnly. Devuelve el oid o lanza.
+// Resultado de colocar el SL:
+//  - resting/filled: con oid → SL en el book / ya ejecutado.
+//  - pending: HL aceptó el trigger pero devolvió "waitingForTrigger" (literal, SIN oid) → se
+//    confirma luego por CLOID en reconcileExecution; NO inventar oid ni declarar protegido.
+type SlPlaceResult =
+  | { state: "resting" | "filled"; oid: string }
+  | { state: "pending" };
+
+// Coloca el SL stop-MARKET reduceOnly (banda fija SL_MARKET_SLIPPAGE_FRACTION). Devuelve el
+// resultado discriminado o lanza si HL rechaza.
 async function placeStopLoss(
   exchange: ExchangeClient, assetId: number, szDecimals: number,
   side: "Long" | "Short", filledSize: number, entryPx: number,
-  stopLossPct: number, bufferPct: number, slCloidVal: `0x${string}`,
-): Promise<{ oid: string; state: "resting" | "filled" }> {
-  // triggerPx (cuándo se activa) según stopLossPct. bufferPct ya no fija el límite: el stop-MARKET
-  // usa un tope de slippage agresivo para garantizar el llenado al activarse.
-  const { triggerPx } = slPrices(side, entryPx, stopLossPct, bufferPct);
-  // Precio límite muy agresivo (peor precio aceptable) para que el stop-market se llene:
-  // al cerrar un Short se compra hasta +SLIPPAGE; al cerrar un Long se vende hasta −SLIPPAGE.
+  stopLossPct: number, slCloidVal: `0x${string}`,
+): Promise<SlPlaceResult> {
+  const triggerPx = slTriggerPx(side, entryPx, stopLossPct);
+  // Peor precio aceptable al activarse (banda 1%): cerrar un Short = comprar hasta +1%;
+  // cerrar un Long = vender hasta −1%. Banda fina: en un gap > 1% puede NO llenarse.
   const marketLimitPx = side === "Short"
-    ? triggerPx * (1 + SL_MARKET_SLIPPAGE)
-    : triggerPx * (1 - SL_MARKET_SLIPPAGE);
+    ? triggerPx * (1 + SL_MARKET_SLIPPAGE_FRACTION)
+    : triggerPx * (1 - SL_MARKET_SLIPPAGE_FRACTION);
   const ac = abortAfter(HL_ORDER_TIMEOUT_MS);
   let resp: unknown;
   try {
@@ -132,21 +163,30 @@ async function placeStopLoss(
       }],
       grouping: "na",
     }, { signal: ac.signal, expiresAfter: Date.now() + HL_ORDER_TIMEOUT_MS });
+  } catch (e) {
+    // Clasificación por CAPA de error del SDK (jerarquía: HttpRequestError extends TransportError):
+    //  - TransportError (incl. el timeout INTERNO de 10s del transporte, red, 5xx, 4xx): la orden
+    //    PUDO despacharse y aceptarse aunque la respuesta se perdiera → AMBIGUO → pending
+    //    (slSubmittedAt + grace + confirmación por CLOID en reconcileExecution).
+    //  - Resto (ValidationError y errores de firma pre-envío, ApiRequestError = rechazo EXPLÍCITO
+    //    de HL): DEFINITIVO sin orden colocada → throw → sl_failed (observable). La consulta
+    //    orderStatus(slCloid) ANTES de recolocar + idempotencia por CLOID impiden un 2º SL aunque
+    //    HL hubiera aceptado (el siguiente ciclo lo ve como open→protected y no recoloca).
+    if (e instanceof TransportError) return { state: "pending" };
+    throw e;
   } finally {
     ac.clear();
   }
+  // Defensa en profundidad: si una versión del SDK devolviera el error en vez de lanzarlo.
   const st = (resp as any)?.response?.data?.statuses?.[0];
-  if (st?.error) throw new Error(String(st.error));
-  // Solo resting o filled con oid cuentan como SL colocado. Filled = el SL ya cerró la posición.
-  if (st?.resting?.oid != null) return { oid: String(st.resting.oid), state: "resting" };
-  if (st?.filled?.oid != null) return { oid: String(st.filled.oid), state: "filled" };
-  throw new Error("Respuesta de SL ambigua (sin resting/filled oid)");
-}
-
-async function slBufferPct(ctx: any): Promise<number> {
-  const row = await ctx.runQuery(internal.systemConfig.getConfigInternal, { key: "slBufferPct" });
-  const v = typeof row?.value === "number" ? row.value : LIMIT_DEFAULTS.slBufferPct;
-  return Number.isFinite(v) && v >= 0 ? v : LIMIT_DEFAULTS.slBufferPct;
+  if (st?.error) throw new Error(String(st.error));   // rechazo EXPLÍCITO de HL: sin orden → sl_failed (rota CLOID al reintentar)
+  // resting/filled traen oid. "waitingForTrigger" y "waitingForFill" son LITERALES string (SDK
+  // 0.32.2), respuestas EXITOSAS de order() sin oid: orden aceptada a la espera del cruce / del
+  // llenado → pending (se confirma por CLOID en la reconciliación, NO inventar oid ni protected).
+  if (st?.resting?.oid != null) return { state: "resting", oid: String(st.resting.oid) };
+  if (st?.filled?.oid != null) return { state: "filled", oid: String(st.filled.oid) };
+  if (st === "waitingForTrigger" || st === "waitingForFill") return { state: "pending" };
+  throw new Error(`Respuesta de SL ambigua: ${JSON.stringify(st ?? null).slice(0, 120)}`);
 }
 
 function makeClients(privKey: `0x${string}`, isTestnet: boolean) {
@@ -223,10 +263,23 @@ export const executePerpMarketOrder = action({
     const { info, exchange } = makeClients(decryptPrivateKey(credential), hlIsTestnet());
     const { assetId, szDecimals, markPx } = await getAssetMeta(info, asset);
 
-    // Precio server-side: tamaño truncado hacia abajo, nocional efectivo.
-    const size = floorToDecimals(args.tradeAmount / markPx, szDecimals);
+    // Dos precios distintos (Codex): el que se ENVÍA y el que se usa para DIMENSIONAR/RESERVAR.
+    //  - orderLimitPx: límite agresivo de la IOC para cruzar el book (Long arriba, Short abajo).
+    //  - notionalCapPx: cota de precio de fill = markPx*(1+slip) para AMBOS lados, redondeada ARRIBA.
+    //    En Long es garantía DURA del nocional (el límite de compra es techo del precio). En Short
+    //    NO hay cota dura: el límite de venta es un suelo y la venta se llena ≈ al bid; un spike
+    //    alcista sub-segundo entre el snapshot de markPx y el fill PODRÍA superar la cota (residuo
+    //    posible, no garantizado). El MARGIN_SAFETY_BUFFER da holgura de margen, NO acota el nocional.
+    const orderLimitPx = args.side === "Long"
+      ? markPx * (1 + ENTRY_IOC_SLIPPAGE)
+      : markPx * (1 - ENTRY_IOC_SLIPPAGE);
+    const orderLimitPxStr = formatHlPrice(orderLimitPx, szDecimals);
+    const notionalCapPx = ceilHlPrice(markPx * (1 + ENTRY_IOC_SLIPPAGE), szDecimals);
+    // Dimensionar con el techo (ya redondeado): el fill nunca supera el nocional reservado (Long);
+    // en Short queda dentro salvo spike sub-segundo.
+    const size = floorToDecimals(args.tradeAmount / notionalCapPx, szDecimals);
     if (size <= 0) throw new Error("Order size rounds to zero at current price");
-    const actualNotional = size * markPx;
+    const actualNotional = size * notionalCapPx;
 
     const entryCloid = cloid(args.idempotencyKey);
     const slCloid = cloid(args.idempotencyKey, ":sl:0");
@@ -310,16 +363,13 @@ export const executePerpMarketOrder = action({
 
     let entryResp: unknown;
     const ac = abortAfter(HL_ORDER_TIMEOUT_MS);
-    // Precio agresivo (market-like) para que la IOC cruce el book: comprar un poco por encima /
-    // vender un poco por debajo del mark. Sin esto, una IOC al mark exacto no cruza y se cancela.
-    const entryLimitPx = args.side === "Long"
-      ? markPx * (1 + ENTRY_IOC_SLIPPAGE)
-      : markPx * (1 - ENTRY_IOC_SLIPPAGE);
+    // Usa el orderLimitPx ya calculado/formateado (agresivo para cruzar el book). NO se recalcula
+    // aquí: el mismo precio sustenta el dimensionado/reserva (Codex: coherencia precio↔nocional).
     try {
       entryResp = await exchange.order({
         orders: [{
           a: assetId, b: args.side === "Long",
-          p: formatHlPrice(entryLimitPx, szDecimals), s: String(size),
+          p: orderLimitPxStr, s: String(size),
           r: false, t: { limit: { tif: "Ioc" } }, c: entryCloid,
         }],
         grouping: "na",
@@ -418,7 +468,9 @@ export const reconcileExecution = internalAction({
         return { skipped: "invalid_fill" };
       }
 
-      // (b) Posición abierta. Estado del SL actual: solo open/triggered/filled cuentan.
+      // (b) Posición abierta. Estado del SL actual. orderStatus devuelve open/triggered/filled/
+      // terminales/unknownOid (NUNCA "waitingForTrigger": ese literal solo aparece en la respuesta
+      // de exchange.order, manejado en placeStopLoss).
       const slStatus: any = await info.orderStatus({ user: user as `0x${string}`, oid: req.slCloid });
       let slCloidToUse: `0x${string}`;
       if (slStatus.status === "order") {
@@ -427,9 +479,15 @@ export const reconcileExecution = internalAction({
           await ctx.runMutation(internal.executions.settleExecution, { requestId, token, status: "closed", filledSize, entryPrice });
           return { result: "closed" };
         }
-        if (state === "open" || state === "triggered") {
+        if (state === "open") {
+          // Único estado que representa el trigger en reposo → protegido.
           await ctx.runMutation(internal.executions.settleExecution, { requestId, token, status: "protected", filledSize, entryPrice });
           return { result: "protected_existing" };
+        }
+        if (state === "triggered") {
+          // Disparado pero AÚN sin llenar (con banda 1% puede no cerrar). NO marcar protected ni
+          // closed: salida pendiente, reconciliable en el siguiente ciclo. Observabilidad explícita.
+          return { skipped: "sl_triggered_pending" };
         }
         // canceled/rejected/… → el cloid actual está consumido: recolocar con uno NUEVO (CAS + fencing).
         const attempt = (req.slAttempt ?? 0) + 1;
@@ -438,18 +496,32 @@ export const reconcileExecution = internalAction({
         if (!prep.ok) return { skipped: "sl_retry_race" };
         slCloidToUse = next;
       } else {
-        // unknownOid: el SL nunca se colocó con este cloid → colocarlo con el cloid actual.
+        // unknownOid. Si ya aceptamos un SL con este cloid (slSubmittedAt) dentro del grace, es lag
+        // de orderStatus → NO recolocar (evita un 2º SL); esperar al siguiente ciclo.
+        if (req.slSubmittedAt && Date.now() - req.slSubmittedAt < SL_SUBMIT_GRACE_MS) {
+          return { skipped: "sl_submit_grace" };
+        }
+        // El SL nunca se colocó con este cloid (o el grace ya venció sin aparecer) → colocarlo.
         slCloidToUse = req.slCloid as `0x${string}`;
       }
 
-      // El buffer se obtiene ANTES; la renovación del claim es la ÚLTIMA operación previa al envío.
-      const buffer = await slBufferPct(ctx);
+      // La renovación del claim es la ÚLTIMA operación previa al envío.
       const renew = await ctx.runMutation(internal.executions.renewReconcile, { requestId, token });
       if (!renew.ok) return { skipped: "lease_lost" };
       try {
-        const sl = await placeStopLoss(exchange, assetId, szDecimals, req.side, filledSize, entryPrice, req.stopLossPct, buffer, slCloidToUse);
+        const sl = await placeStopLoss(exchange, assetId, szDecimals, req.side, filledSize, entryPrice, req.stopLossPct, slCloidToUse);
+        if (sl.state === "pending") {
+          // waitingForTrigger: SL aceptado sin oid. Marcar slSubmittedAt y dejar entry_filled; el
+          // siguiente ciclo lo confirma por CLOID (open→protected). Evita declarar protected sin oid.
+          await ctx.runMutation(internal.executions.markSlSubmitted, { requestId, token });
+          return { result: "sl_pending_confirmation" };
+        }
         const st = sl.state === "filled" ? "closed" as const : "protected" as const;
-        await ctx.runMutation(internal.executions.settleExecution, { requestId, token, status: st, slOrderId: sl.oid, filledSize, entryPrice });
+        // En resting marcamos también slSubmittedAt (grace anti-doble-SL si hay lag posterior).
+        await ctx.runMutation(internal.executions.settleExecution, {
+          requestId, token, status: st, slOrderId: sl.oid, filledSize, entryPrice,
+          slSubmittedAt: sl.state === "resting" ? Date.now() : undefined,
+        });
         return { result: st === "closed" ? "closed_placed" : "protected_placed" };
       } catch (e) {
         await ctx.runMutation(internal.executions.settleExecution, { requestId, token, status: "sl_failed", filledSize, entryPrice, error: String((e as Error)?.message ?? e) });

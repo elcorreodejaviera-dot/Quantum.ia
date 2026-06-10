@@ -1,7 +1,8 @@
 # Runbook — Beta mainnet (ejecución HL real)
 
-> ⚠️ **Dinero real.** Cada usuario opera con su propia cuenta HL (su capital). El SL es
-> **stop-limit**: en una caída brusca puede activarse y **no llenarse** → posición sin cortar.
+> ⚠️ **Dinero real.** Cada usuario opera con su propia cuenta HL (su capital). El SL es una orden
+> trigger **stop-market** con banda de slippage fija (1%): si el mercado **atraviesa la banda** en
+> un gap brusco, puede activarse y **no llenarse** → posición sin cortar. No garantiza el cierre.
 
 ## 0. Pre-requisitos (configuración)
 
@@ -20,7 +21,7 @@
 
 > Recomendación de la auditoría: idealmente probar en **testnet** completo primero (`HL_NETWORK=testnet`). Si se omite, la gradación de abajo es el mínimo.
 
-1. **Admin fija límites mínimos** (Panel Admin → Límites de ejecución): `maxNotionalPerOrder = 15`, `maxNotionalPerUserDaily = 50`, `slBufferPct = 0.3`.
+1. **Admin fija límites mínimos** (Panel Admin → Límites de ejecución): `maxNotionalPerOrder = 15`, `maxNotionalPerUserDaily = 50`. (El SL ya no tiene buffer configurable: es stop-market con banda fija del 1%.)
 2. **Admin enciende el master switch**: Panel Admin → *Desactivar SIM* + *Activar LIVE* (`simulationMode=false`, `tradingEnabled=true`).
 3. **Admin (solo él)** conecta su cuenta HL, crea un bot, lo pone en **Modo real** (toggle del modal), y usa **"Probar ejecución"** con nocional mínimo (~$10–12).
 4. **Verificar** en *Panel Admin → Ejecuciones recientes* que la fila avanza `submitting → entry_filled → protected`, y confirmar el SL en `app.hyperliquid.xyz`.

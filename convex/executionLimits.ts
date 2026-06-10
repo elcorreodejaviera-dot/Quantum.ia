@@ -5,13 +5,13 @@ import type { QueryCtx, MutationCtx } from "./_generated/server";
 export const LIMIT_DEFAULTS = {
   maxNotionalPerOrder: 500,
   maxNotionalPerUserDaily: 2000,
-  slBufferPct: 0.3,
 } as const;
 
 export type LimitKey = keyof typeof LIMIT_DEFAULTS;
 
 // Valor efectivo: el de system_config si existe y es válido, si no el default.
-// slBufferPct admite 0 (sin buffer); los límites de nocional exigen > 0.
+// Los límites de nocional exigen > 0. (El antiguo slBufferPct del SL se eliminó: el SL es
+// stop-market con banda fija en hyperliquid.ts, no configurable.)
 export async function getLimit(ctx: QueryCtx | MutationCtx, key: LimitKey): Promise<number> {
   const row = await ctx.db
     .query("system_config")
@@ -22,7 +22,7 @@ export async function getLimit(ctx: QueryCtx | MutationCtx, key: LimitKey): Prom
     throw new Error(`${key} en system_config tiene tipo inválido (${typeof row.value})`);
   }
   const val = typeof row?.value === "number" ? row.value : LIMIT_DEFAULTS[key];
-  const valid = Number.isFinite(val) && (key === "slBufferPct" ? val >= 0 : val > 0);
+  const valid = Number.isFinite(val) && val > 0;
   if (!valid) throw new Error(`${key} inválido`);
   return val;
 }

@@ -11,7 +11,6 @@ export const getExecutionLimits = query({
     return {
       maxNotionalPerOrder: await getLimit(ctx, "maxNotionalPerOrder"),
       maxNotionalPerUserDaily: await getLimit(ctx, "maxNotionalPerUserDaily"),
-      slBufferPct: await getLimit(ctx, "slBufferPct"),
     };
   },
 });
@@ -101,22 +100,17 @@ export const setExecutionLimitInternal = internalMutation({
     key: v.union(
       v.literal("maxNotionalPerOrder"),
       v.literal("maxNotionalPerUserDaily"),
-      v.literal("slBufferPct"),
     ),
     value: v.number(),
   },
   handler: async (ctx, { key, value }) => {
     if (!Number.isFinite(value)) throw new Error("value debe ser finito");
-    if (key === "slBufferPct") {
-      if (value < 0 || value > 10) throw new Error("slBufferPct debe estar entre 0 y 10");
-    } else {
-      if (value <= 0) throw new Error(`${key} debe ser > 0`);
-      const perOrder = key === "maxNotionalPerOrder"
-        ? value : await readNum(ctx, "maxNotionalPerOrder", LIMIT_DEFAULTS.maxNotionalPerOrder);
-      const daily = key === "maxNotionalPerUserDaily"
-        ? value : await readNum(ctx, "maxNotionalPerUserDaily", LIMIT_DEFAULTS.maxNotionalPerUserDaily);
-      if (perOrder > daily) throw new Error("maxNotionalPerOrder no puede superar maxNotionalPerUserDaily");
-    }
+    if (value <= 0) throw new Error(`${key} debe ser > 0`);
+    const perOrder = key === "maxNotionalPerOrder"
+      ? value : await readNum(ctx, "maxNotionalPerOrder", LIMIT_DEFAULTS.maxNotionalPerOrder);
+    const daily = key === "maxNotionalPerUserDaily"
+      ? value : await readNum(ctx, "maxNotionalPerUserDaily", LIMIT_DEFAULTS.maxNotionalPerUserDaily);
+    if (perOrder > daily) throw new Error("maxNotionalPerOrder no puede superar maxNotionalPerUserDaily");
     await upsertConfig(ctx, key, value);
     return { key, value };
   },
@@ -149,14 +143,5 @@ export const setMaxNotionalPerUserDaily = mutation({
     const perOrder = await readNum(ctx, "maxNotionalPerOrder", LIMIT_DEFAULTS.maxNotionalPerOrder);
     if (value < perOrder) throw new Error("maxNotionalPerUserDaily no puede ser menor que maxNotionalPerOrder");
     await upsertConfig(ctx, "maxNotionalPerUserDaily", value);
-  },
-});
-
-export const setSlBufferPct = mutation({
-  args: { value: v.number() },
-  handler: async (ctx, { value }) => {
-    await requireAdmin(ctx);
-    if (!Number.isFinite(value) || value < 0 || value > 10) throw new Error("slBufferPct debe estar entre 0 y 10");
-    await upsertConfig(ctx, "slBufferPct", value);
   },
 });

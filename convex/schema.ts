@@ -290,6 +290,8 @@ export default defineSchema({
     reservedNotional: v.number(),
     marginReserved: v.number(),
     lowerEdge: v.number(),               // minRange del pool al armar
+    upperEdge: v.optional(v.number()),   // maxRange normalizado (entry_upper, si allowReentryFromAbove)
+    allowReentryFromAbove: v.optional(v.boolean()),  // 2ª entrada (borde superior) + OCO
     stopLossPct: v.number(),             // snapshot del SL del bot (para armar el SL post-fill)
     bufferPct: v.optional(v.number()),   // snapshot del búfer (% del pool) — TPs solo sobre el búfer
     tps: v.optional(v.array(v.object({ gainPct: v.number(), closePct: v.number() }))),  // snapshot config TPs
@@ -320,7 +322,7 @@ export default defineSchema({
   // Cada orden trigger nativa de un arm. CLOID = identidad primaria determinista.
   trigger_orders: defineTable({
     armId: v.id("trigger_arms"),
-    role: v.union(v.literal("entry_lower"), v.literal("sl_upper"), v.literal("tp")),  // entrada + SL + TPs
+    role: v.union(v.literal("entry_lower"), v.literal("entry_upper"), v.literal("sl_upper"), v.literal("tp")),  // entradas (2) + SL + TPs
     tpIndex: v.optional(v.number()),      // solo role:"tp" (0..N-1) — unicidad por (armId, "tp", tpIndex)
     cloid: v.string(),                    // determinista botId|generation|role[:tpIndex]:attempt
     oid: v.optional(v.string()),          // de HL; OPCIONAL (waitingForTrigger/timeout sin oid)

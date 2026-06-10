@@ -358,6 +358,16 @@ export const reconcileArm = internalAction({
         // arm.filledSize: si ambas entradas llenaron (2x), el SL full-size cubre el tamaño real.
         const realSize = Math.abs(szi) > 0 ? Math.abs(szi) : filledSize;
         const posEntryPx = (p && Number(p.position?.entryPx) > 0) ? Number(p.position.entryPx) : entryPrice;
+
+        // (Codex #1) Reducir reserva 2×→1× SOLO ahora que la posición está abierta: confirmar por CLOID
+        // que las entradas hermanas MURIERON (ensureOrdersDead) y que la posición es de 1× (no doble-
+        // fill: szi ≈ una sola entrada). Nunca liberar margen con una hermana aún viva.
+        if (arm.allowReentryFromAbove && !arm.reservationReduced) {
+          const entryCloidsP = allOrders.filter((o) => o.role === "entry_lower" || o.role === "entry_upper").map((o) => o.cloid);
+          if (Math.abs(szi) > 0 && Math.abs(szi) <= arm.size * 1.5 && (await ensureOrdersDead(info, exchange, user, assetId, entryCloidsP))) {
+            await ctx.runMutation(internal.triggerArms.reduceArmReservation, { armId, token, reservedNotional: arm.reservedNotional / 2, marginReserved: arm.marginReserved / 2 });
+          }
+        }
         if (flat) {
           if (Date.now() - (arm.filledAt ?? arm.createdAt) <= CLOSE_CONFIRM_GRACE_MS) return { skipped: "close_confirm_grace" };
           const renewC = await ctx.runMutation(internal.triggerArms.renewArmReconcile, { armId, token });
@@ -527,17 +537,12 @@ export const reconcileArm = internalAction({
           if (!(f.size > 0 && f.avgPx > 0)) return { skipped: "fill_data_pending" };
           await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: eo.role, observedStatus: "filled", oid: eo.oid });
           await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "filled", filledSize: f.size, entryPrice: f.avgPx });
-          // Cancelar las OTRAS entradas (OCO) y comprobar si alguna también llenó (doble-fill).
-          let siblingFilled = false;
+          // Cancelar las OTRAS entradas (OCO). La REDUCCIÓN de reserva 2×→1× NO se hace aquí: se hace
+          // en la fase de posición SOLO tras confirmar (ensureOrdersDead) que las hermanas murieron y
+          // que la posición es de 1× (no doble-fill) — evita liberar margen con una hermana aún viva.
           for (const other of entryOrders) {
             if (other._id === eo._id) continue;
-            const of = await fillsByCloid(info, user, other.cloid);
-            if (of.size > 0) { siblingFilled = true; await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: other.role, observedStatus: "filled" }); }
-            else { try { await exchange.cancelByCloid({ cancels: [{ asset: assetId, cloid: other.cloid as `0x${string}` }] }); } catch { /* cron */ } }
-          }
-          // Reducir la reserva 2×→1× SOLO si ninguna hermana llenó (si doble-fill, mantener 2×).
-          if (!siblingFilled && arm.allowReentryFromAbove) {
-            await ctx.runMutation(internal.triggerArms.reduceArmReservation, { armId, token, reservedNotional: arm.reservedNotional / 2, marginReserved: arm.marginReserved / 2 });
+            try { await exchange.cancelByCloid({ cancels: [{ asset: assetId, cloid: other.cloid as `0x${string}` }] }); } catch { /* cron */ }
           }
           return { result: "filled_oco" };
         }
@@ -568,9 +573,17 @@ export const reconcileArm = internalAction({
       }
       if (anyAlive) {
         if (arm.status !== "armed") await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "armed" });
-        // Si una de dos entradas murió pero la otra vive, reducir la reserva a 1× (ya no hay doble-fill posible).
-        if (arm.allowReentryFromAbove && entryOrders.some((o) => o.observedStatus === "canceled")) {
-          await ctx.runMutation(internal.triggerArms.reduceArmReservation, { armId, token, reservedNotional: arm.reservedNotional / 2, marginReserved: arm.marginReserved / 2 });
+        // (Fix #2) Si quedó UNA sola entrada viva (la otra confirmada muerta), ya no hay doble-fill
+        // posible → reducir reserva a 1×. Con datos FRESCOS (re-query, no el array obsoleto) y
+        // confirmando muertas las no-vivas por CLOID (ensureOrdersDead las cancela y prueba).
+        if (arm.allowReentryFromAbove && !arm.reservationReduced && entryOrders.length > 1) {
+          const fresh = (await ctx.runQuery(internal.triggerArms.getArmOrdersInternal, { armId }))
+            .filter((o) => o.role === "entry_lower" || o.role === "entry_upper");
+          const liveRoles = fresh.filter((o) => o.observedStatus === "open" || o.observedStatus === "triggered" || o.observedStatus === "pending");
+          const deadCloids = fresh.filter((o) => !liveRoles.includes(o)).map((o) => o.cloid);
+          if (liveRoles.length <= 1 && (await ensureOrdersDead(info, exchange, user, assetId, deadCloids))) {
+            await ctx.runMutation(internal.triggerArms.reduceArmReservation, { armId, token, reservedNotional: arm.reservedNotional / 2, marginReserved: arm.marginReserved / 2 });
+          }
         }
         return { result: "armed" };
       }

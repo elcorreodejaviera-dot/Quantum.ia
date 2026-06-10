@@ -292,6 +292,7 @@ export default defineSchema({
     lowerEdge: v.number(),               // minRange del pool al armar
     upperEdge: v.optional(v.number()),   // maxRange normalizado (entry_upper, si allowReentryFromAbove)
     allowReentryFromAbove: v.optional(v.boolean()),  // 2ª entrada (borde superior) + OCO
+    reservationReduced: v.optional(v.boolean()),     // la reserva 2×→1× ya se aplicó (tras OCO confirmado)
     stopLossPct: v.number(),             // snapshot del SL del bot (para armar el SL post-fill)
     bufferPct: v.optional(v.number()),   // snapshot del búfer (% del pool) — TPs solo sobre el búfer
     tps: v.optional(v.array(v.object({ gainPct: v.number(), closePct: v.number() }))),  // snapshot config TPs

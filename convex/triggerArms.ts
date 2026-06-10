@@ -235,9 +235,10 @@ export const reduceArmReservation = internalMutation({
     const arm = await ctx.db.get(armId);
     if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
     if (isArmTerminal(arm.status)) return { ok: false as const };
+    if (arm.reservationReduced) return { ok: true as const };   // idempotente
     const newRes = Math.min(arm.reservedNotional, reservedNotional);
     const newMar = Math.min(arm.marginReserved, marginReserved);
-    await ctx.db.patch(armId, { reservedNotional: newRes, marginReserved: newMar, updatedAt: Date.now() });
+    await ctx.db.patch(armId, { reservedNotional: newRes, marginReserved: newMar, reservationReduced: true, updatedAt: Date.now() });
     return { ok: true as const };
   },
 });

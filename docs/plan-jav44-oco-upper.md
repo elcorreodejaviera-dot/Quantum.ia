@@ -1,4 +1,22 @@
-# Plan JAV-44 — 2º trigger (borde superior) + OCO entre las dos entradas
+# Plan JAV-44 — 2º trigger (borde superior) + OCO entre las dos entradas — rev.2
+
+## (Codex #1) Margen del DOBLE-FILL — ELIMINAR el hueco, no amortiguar
+Las dos entradas son triggers nativos independientes → en un spike ambas pueden llenarse antes del
+OCO → exposición real 2x el total. Política que lo ELIMINA: **cuando se arman DOS entradas
+(`allowReentryFromAbove`), `reserveArm` reserva el PEOR CASO = 2× (`reservedNotional` y
+`marginReserved` = 2× el del total pool+búfer).** Así el colateral siempre cubre un doble-fill, NO
+solo el buffer de seguridad. Con UNA sola entrada, reserva 1×. Tras el OCO (una entrada cancelada
+confirmada) o el fill, `reconcileArm` puede **reducir la reserva a 1×** (mutation que baja
+`marginReserved`/`reservedNotional` del arm) liberando colateral. El margen compartido suma el valor
+reservado del arm (2× mientras ambas vivan, 1× tras OCO). Esto garantiza margen para el doble-fill en
+mainnet (no es una amortiguación).
+
+## (Codex #2) tpsl de `entry_upper` — CERRADO
+`entry_upper` = **SELL, `reduceOnly:false`, trigger "price ABOVE maxRange", `tpsl:"tp"`** (un sell que
+dispara al SUBIR = dirección take-profit), per el issue JAV-44. `entry_lower` = SELL trigger BELOW
+minRange, `tpsl:"sl"`. (Verificar la forma exacta en el SDK 0.32.2 al implementar, pero el plan se
+COMPROMETE con `tpsl:"tp"` para el upper.)
+
 
 Sobre la pieza TPs (PR #21). Hoy el arm coloca UNA entrada (`entry_lower`, SELL trigger BELOW
 `minRange`). Esta pieza añade la **2ª entrada en el borde superior** (`entry_upper`) y el **OCO**:
@@ -53,11 +71,11 @@ Hoy la fase pre-fill mira solo `entry_lower`. Cambios:
 - `placeStopLoss`/cierre de emergencia: usar `Math.abs(szi)` como size (cubre el tamaño real).
 
 ## Invariantes a preservar
-- Nunca un short desnudo (SL full-size sobre el tamaño REAL). Nunca trigger huérfano (ensureOrdersDead
-  sobre todos los roles, incl. entry_upper). Sin doble-SL/doble-TP. Margen: la reserva ya cubre el
-  total (pool+búfer); las DOS entradas reservan el MISMO total (no duplicar la reserva — una sola
-  reserva por arm; las dos entradas son alternativas, no aditivas). OJO: si doble-fill, el margen real
-  sería 2x el reservado → el `MARGIN_SAFETY_BUFFER` + el cierre de emergencia lo amortiguan; documentar.
+- Nunca un short desnudo (SL full-size sobre el tamaño REAL `szi`). Nunca trigger huérfano
+  (ensureOrdersDead sobre todos los roles, incl. entry_upper). Sin doble-SL/doble-TP.
+- **Margen (Codex #1): con dos entradas, reservar 2× (peor caso doble-fill); reducir a 1× tras OCO.**
+  El margen compartido suma el `marginReserved` actual del arm (2× → 1×). Garantiza cobertura, no
+  amortigua.
 
 ## Verificación (mainnet real)
 1. Bot IL con `allowReentryFromAbove=true` → al armar, 2 órdenes SELL en HL (abajo en minRange,
@@ -65,8 +83,7 @@ Hoy la fase pre-fill mira solo `entry_lower`. Cambios:
 2. El precio sale por abajo → llena `entry_lower` → se cancela `entry_upper` (OCO) → SL+TPs.
 3. (otra vez) El precio sale por arriba → llena `entry_upper` → se cancela `entry_lower` → SL+TPs.
 
-## Decisiones para Codex/usuario
-- Doble-fill: ¿SL/emergencia con `szi` real (propuesta) o rechazar/cerrar el exceso? (propuesta: szi real).
-- ¿La reserva de margen debe contemplar el peor caso doble-fill (2x)? (propuesta: no duplicar la
-  reserva; cubrir con buffer + emergencia; o reservar 2x conscientemente — decidir).
-- `tpsl` exacto de `entry_upper` (SELL trigger arriba) en el SDK 0.32.2 — confirmar.
+## Decisiones (CERRADAS)
+- Doble-fill SL/emergencia: con `szi` REAL (cubre el tamaño real aunque sea 2x). ✓
+- Margen: reservar 2× con dos entradas (peor caso), reducir a 1× tras OCO. ✓ (Codex #1)
+- `tpsl` de `entry_upper`: SELL trigger ABOVE maxRange, `tpsl:"tp"`. ✓ (Codex #2)

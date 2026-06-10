@@ -1,4 +1,21 @@
-# Plan JAV-44 — TPs parciales sobre el BÚFER (recuperar pérdidas de SL encadenados)
+# Plan JAV-44 — TPs parciales sobre el BÚFER (recuperar pérdidas de SL encadenados) — rev.2
+
+## (Codex #1) Representación CERRADA de N TPs
+`trigger_orders`: `role: "entry_lower" | "sl_upper" | "tp"` + **`tpIndex: v.optional(v.number())`**
+(solo presente en `role:"tp"`, valores 0..N-1). **Índice nuevo `by_arm_role_index` = `[armId, role,
+tpIndex]`** para lookup/unicidad por TP individual (el `by_arm_role` actual `[armId, role]` solo da
+UNA fila por role → no sirve para N TPs). Unicidad de un TP = `(armId, "tp", tpIndex)`. cloid
+determinista `botId|generation|tp:<tpIndex>:<attempt>`. `entry_lower`/`sl_upper` no usan `tpIndex`.
+`getArmOrdersInternal` (todos por armId) sigue sirviendo para `ensureOrdersDead`/cancelación. Para
+un TP concreto: query por `by_arm_role_index` con `tpIndex`.
+
+## (Codex #2) Tamaño mínimo por TP tras redondeo
+Cada `TP_i size = floorToDecimals(bufferSize * closePct_i/100, szDecimals)`. **Si queda ≤ 0 → OMITIR
+ese TP** (no se coloca): su porción de búfer simplemente NO se cierra con TP y queda como parte de la
+posición protegida por el SL full-size (seguro, no desnuda nada). Validar también en el armado:
+`tps[i].gainPct > 0`, `closePct_i > 0`, `Σ closePct_i ≤ 100`. Con búfer pequeño o muchos TPs, los que
+redondeen a 0 se descartan silenciosamente (alerta opcional), nunca se envía un size 0/ inválido a HL.
+
 
 Sobre la pieza SL post-fill (PR #20). El bot ya: entra (trigger nativo) → al llenarse arma el SL
 full-size → `protected` → cierre de emergencia como red. Esta pieza añade los **Take Profit parciales**.
@@ -27,9 +44,8 @@ TPs** → sigue abierto bajo el SL full-size. Objetivo: recuperar las pérdidas 
 - Por cada `tps[i] = {gainPct, closePct}`: **Take Profit Market**, cerrar short = **BUY** reduceOnly,
   `tpsl:"tp"`, trigger BELOW = `entryPrice * (1 - gainPct/100)` (normalizado al tick, floor), banda
   agresiva ceil para el market de cierre. cloid determinista `botId|generation|tp:i|attempt`.
-- Roles nuevos de `trigger_orders`: `tp_0`, `tp_1`, … (o `role:"tp"` + `tpIndex`). Preferible
-  `role:"tp"` con un campo `tpIndex` para no explotar el union; índice `by_arm_role` sigue sirviendo
-  (un SL + N TPs por arm → cambiar la unicidad de `by_arm_role` o usar `by_arm` + filtro por rol+idx).
+- Representación: `role:"tp"` + `tpIndex` (ver Codex #1 arriba). Lookup/unicidad por
+  `by_arm_role_index [armId, role, tpIndex]`. cloid `botId|generation|tp:<tpIndex>:<attempt>`.
 
 ## Flujo (extender la FASE DE POSICIÓN de reconcileArm, sin romper lo auditado)
 Cuando el arm está en `protected` (SL ya colocado) y aún no se han colocado los TPs:
@@ -44,9 +60,10 @@ Cuando el arm está en `protected` (SL ya colocado) y aún no se han colocado lo
    NO escalar a cierre de emergencia (eso es solo para el SL). El pool sigue protegido por el SL.
 
 ## Cambios concretos
-- `schema`: `trigger_orders.role` += `tp` (+ `tpIndex: v.optional(v.number())`); `trigger_arms`
-  marcadores por TP (p.ej. `tpsPlaced: boolean` o por-orden `slSubmittedAt`-equivalente). Revisar la
-  unicidad `by_arm_role` (ahora varios `tp`).
+- `schema`: `trigger_orders.role` += `tp` + `tpIndex: v.optional(v.number())` + índice
+  `by_arm_role_index [armId, role, tpIndex]`. Marcador `submittedAt`-equivalente POR TP (en el
+  propio `trigger_order`, p.ej. `submittedAt` en la fila, en vez de un único campo en el arm) para el
+  confirmar-antes-de-rotar por TP. Validar `Σ closePct ≤ 100` y omitir TPs que redondeen a 0 (Codex #2).
 - `armPoolBotEntry`: sizing total (pool+búfer); validar `Σ closePct ≤ 100`, `bufferPct` válido,
   `tps` válidos; persistir `bufferPct`/`tps` en el snapshot del arm (inmutable).
 - `reconcileArm`: tras `protected`, colocar/confirmar los TPs (reusar el patrón del SL: prepareTpAttempt,
@@ -69,4 +86,5 @@ Cuando el arm está en `protected` (SL ya colocado) y aún no se han colocado lo
 ## Riesgos / decisiones para Codex/usuario
 - ¿`bufferNotional` = `hedge*bufferPct/100` (porcentaje del pool) o un campo propio? (propuesta: % del pool).
 - Banda del TP market (1%? como el SL) — gap puede no llenar; aceptable (no desprotege).
-- Unicidad `by_arm_role` con varios `tp` → ajustar índice o clave.
+- (CERRADO Codex #1) Unicidad de TPs: `role:"tp"`+`tpIndex` + índice `by_arm_role_index`.
+- (CERRADO Codex #2) TPs que redondean a 0 → se omiten (quedan como pool bajo el SL).

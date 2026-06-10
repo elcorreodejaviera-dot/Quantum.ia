@@ -25,7 +25,7 @@ const ENTRY_GRACE_MS = 5 * 60_000;
 const SL_SUBMIT_GRACE_MS = 60_000;
 
 // Aborta REALMENTE la request (AbortController + signal del SDK). clearTimeout evita el timer colgante.
-function abortAfter(ms: number): { signal: AbortSignal; clear: () => void } {
+export function abortAfter(ms: number): { signal: AbortSignal; clear: () => void } {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(new Error("HL request timeout")), ms);
   return { signal: ctrl.signal, clear: () => clearTimeout(t) };
@@ -40,13 +40,13 @@ function cloid(key: string, suffix = ""): `0x${string}` {
 }
 
 // Trunca hacia abajo a szDecimals — nunca por encima del nocional reservado.
-function floorToDecimals(value: number, decimals: number): number {
+export function floorToDecimals(value: number, decimals: number): number {
   const f = 10 ** decimals;
   return Math.floor(value * f) / f;
 }
 
 // Precisión de precio de perps en HL: ≤5 cifras significativas y ≤ (6 − szDecimals) decimales.
-function formatHlPrice(price: number, szDecimals: number): string {
+export function formatHlPrice(price: number, szDecimals: number): string {
   const maxDecimals = Math.max(0, 6 - szDecimals);
   const sig = Number(price.toPrecision(5));
   return String(Number(sig.toFixed(maxDecimals)));
@@ -77,7 +77,7 @@ function hlAllowedDecimals(price: number, szDecimals: number): number {
  * @param dir "ceil" → menor precio válido ≥ price; "floor" → mayor precio válido ≤ price.
  * @returns Precio HL-válido redondeado en la dirección pedida.
  */
-function roundHlPrice(price: number, szDecimals: number, dir: "ceil" | "floor"): number {
+export function roundHlPrice(price: number, szDecimals: number, dir: "ceil" | "floor"): number {
   const decimals = hlAllowedDecimals(price, szDecimals);   // puede ser negativo
   const tick = 10 ** -decimals;                            // negativo → 10, 100, …
   const outDecimals = Math.max(0, decimals);
@@ -97,7 +97,7 @@ function roundHlPrice(price: number, szDecimals: number, dir: "ceil" | "floor"):
  * @param szDecimals Decimales de tamaño del activo en HL.
  * @returns Precio HL-válido ≥ price.
  */
-function ceilHlPrice(price: number, szDecimals: number): number {
+export function ceilHlPrice(price: number, szDecimals: number): number {
   return roundHlPrice(price, szDecimals, "ceil");
 }
 
@@ -111,12 +111,12 @@ function ceilHlPrice(price: number, szDecimals: number): number {
  * @param isBuy true = compra (ceil); false = venta (floor).
  * @returns Precio HL-válido como string, listo para el campo `p` de la orden.
  */
-function aggressiveHlPriceStr(price: number, szDecimals: number, isBuy: boolean): string {
+export function aggressiveHlPriceStr(price: number, szDecimals: number, isBuy: boolean): string {
   return String(roundHlPrice(price, szDecimals, isBuy ? "ceil" : "floor"));
 }
 
 type AssetMeta = { assetId: number; szDecimals: number; markPx: number };
-async function getAssetMeta(info: InfoClient, asset: string): Promise<AssetMeta> {
+export async function getAssetMeta(info: InfoClient, asset: string): Promise<AssetMeta> {
   const [meta, ctxs] = await info.metaAndAssetCtxs();
   const idx = meta.universe.findIndex((u: any) => u.name === asset);
   if (idx < 0) throw new Error(`Asset no encontrado en HL: ${asset}`);
@@ -148,7 +148,7 @@ function parseEntryResult(response: unknown): EntryResult {
 }
 
 // Suma de fills de un cloid concreto (tamaño y precio medio ponderado).
-async function fillsByCloid(info: InfoClient, user: string, target: string): Promise<{ size: number; avgPx: number }> {
+export async function fillsByCloid(info: InfoClient, user: string, target: string): Promise<{ size: number; avgPx: number }> {
   const fills = await info.userFills({ user: user as `0x${string}` });
   let size = 0, notional = 0;
   for (const f of fills as any[]) {
@@ -232,7 +232,7 @@ async function placeStopLoss(
   throw new Error(`Respuesta de SL ambigua: ${JSON.stringify(st ?? null).slice(0, 120)}`);
 }
 
-function makeClients(privKey: `0x${string}`, isTestnet: boolean) {
+export function makeClients(privKey: `0x${string}`, isTestnet: boolean) {
   const wallet = privateKeyToAccount(privKey);
   const transport = new HttpTransport({ isTestnet });
   return {

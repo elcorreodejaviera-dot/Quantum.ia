@@ -3,6 +3,7 @@ import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import { requireUser, requireBotManager, deriveBaseAsset, hasPermission } from "./helpers";
+import { hasNonTerminalArmForBot, requestDisarmAndDeactivateImpl } from "./triggerArms";
 
 function validateBotNumbers(fields: {
   capitalPerTrade?: number;
@@ -173,6 +174,7 @@ interface PoolBotConfig {
   allowReentryFromAbove?: boolean;
   autoRearm?: boolean;
   tps?: { gainPct: number; closePct: number }[];
+  hedgeNotionalUsd?: number;   // JAV-44: nocional de cobertura explícito (fuente backend del motor)
 }
 
 // Convex v.number() admite NaN/Infinity y `NaN < 1` es false → evadiría los rangos.
@@ -196,6 +198,10 @@ function validatePoolBotConfig(kind: PoolBotKind, c: PoolBotConfig) {
   assertFinite("breakevenPct", c.breakevenPct);
   assertFinite("trailingPct", c.trailingPct);
   assertFinite("preTriggerPct", c.preTriggerPct);
+  assertFinite("hedgeNotionalUsd", c.hedgeNotionalUsd);
+  if (c.hedgeNotionalUsd !== undefined && c.hedgeNotionalUsd <= 0) {
+    throw new Error("hedgeNotionalUsd debe ser > 0.");
+  }
   // Apalancamiento: fuente única; si autoLeverage está activo se ignora el valor manual.
   if (!c.autoLeverage && c.leverage !== undefined && (c.leverage < 1 || c.leverage > 20)) {
     throw new Error("leverage debe estar entre 1 y 20.");
@@ -266,6 +272,7 @@ export const getOrCreatePoolBot = mutation({
     allowReentryFromAbove: v.optional(v.boolean()),
     autoRearm: v.optional(v.boolean()),
     tps: v.optional(v.array(v.object({ gainPct: v.number(), closePct: v.number() }))),
+    hedgeNotionalUsd: v.optional(v.number()),
     active: v.optional(v.boolean()),
     simulationMode: v.optional(v.boolean()),
   },
@@ -313,11 +320,24 @@ export const getOrCreatePoolBot = mutation({
     // Estado resultante (upsert de estado completo): la cuenta resultante es la del arg.
     const willBeActive = active ?? existingBot?.active ?? false;
     if (willBeActive) await assertActivatablePoolBot(ctx, poolId, hlAccountId, user._id);
+    // JAV-44: no reactivar mientras se está cancelando un trigger (pausa en curso).
+    if (willBeActive && existingBot?.disarmPending) {
+      throw new Error("El bot se está pausando (cancelando su trigger); espera a que termine.");
+    }
 
     if (existingBot) {
+      // JAV-44 (H1/N2): pausar un bot con un trigger_arm vivo NO desactiva de golpe — pasa por
+      // desarmado confirmado (disarmPending + cron) para no dejar un trigger huérfano en HL.
+      const pausingActive = existingBot.active && !willBeActive;
       await ctx.db.patch(existingBot._id, {
-        ...config, hlAccountId, baseAsset, active: willBeActive, simulationMode: resultMode,
+        ...config, hlAccountId, baseAsset, simulationMode: resultMode,
+        ...(pausingActive ? {} : { active: willBeActive }),
       });
+      if (pausingActive) {
+        await requestDisarmAndDeactivateImpl(ctx, existingBot._id);
+      } else if (willBeActive && existingBot.disarmPending) {
+        await ctx.db.patch(existingBot._id, { disarmPending: false });
+      }
       return existingBot._id;
     }
     const name = `${kind === "il" ? "IL" : "Trading"} ${baseAsset} ${pool.network}`;

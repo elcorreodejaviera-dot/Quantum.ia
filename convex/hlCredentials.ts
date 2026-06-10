@@ -1,6 +1,7 @@
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { requireUser } from "./helpers";
+import { hasNonTerminalArmForAccount } from "./triggerArms";
 
 // Legacy de cuenta única eliminado (status/revoke/getForUserInternal/save): usaban `.first()`
 // ambiguo en un modelo multi-cuenta. Reemplazado por list/revokeById/connectAccount.
@@ -45,6 +46,11 @@ export const revokeById = mutation({
     const hasOpen = open.some((r) => !["closed", "failed"].includes(r.status));
     if (hasOpen) {
       throw new Error("La cuenta tiene ejecuciones abiertas; espera a que se cierren antes de revocar.");
+    }
+    // JAV-44 (R4): tampoco revocar si hay un trigger_arm NO terminal (incluido filled = posición
+    // abierta): perderíamos la clave privada para cancelar/cerrar el trigger en HL.
+    if (await hasNonTerminalArmForAccount(ctx, id)) {
+      throw new Error("La cuenta tiene cobertura automática activa; pausa/cierra el trigger antes de revocar.");
     }
     const linked = await ctx.db
       .query("bots")

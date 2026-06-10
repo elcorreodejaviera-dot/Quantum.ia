@@ -1,6 +1,7 @@
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { requireAdmin, requireUser } from "./helpers";
+import { hasNonTerminalArmForBot } from "./triggerArms";
 
 export const listPools = query({
   args: {},
@@ -135,6 +136,13 @@ export const deletePool = mutation({
     // Desvincular y pausar atómicamente los bots que protegían este pool, para
     // no dejar poolId colgante (Convex no aplica claves foráneas).
     const linkedBots = await ctx.db.query("bots").withIndex("by_pool", q => q.eq("poolId", id)).collect();
+    // JAV-44 (R4): no borrar el pool si algún bot tiene un trigger_arm NO terminal — se perdería el
+    // snapshot necesario para cancelar/cerrar el trigger vivo en HL.
+    for (const bot of linkedBots) {
+      if (await hasNonTerminalArmForBot(ctx, bot._id)) {
+        throw new Error("El pool tiene un bot con cobertura automática activa; pausa/cierra el trigger antes de eliminar.");
+      }
+    }
     for (const bot of linkedBots) {
       await ctx.db.patch(bot._id, { active: false, poolId: undefined });
     }

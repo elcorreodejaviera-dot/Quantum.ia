@@ -35,6 +35,38 @@ function isArmTerminal(status: string): boolean {
   return ARM_TERMINAL.has(status);
 }
 
+// --- Helpers planos (invocables DIRECTAMENTE desde otras mutations; no via runMutation) ---
+
+// ¿El bot tiene algún arm NO terminal? (bloquea borrados/pausas destructivas — H1/R4).
+export async function hasNonTerminalArmForBot(ctx: MutationCtx, botId: Id<"bots">): Promise<boolean> {
+  const arms = await ctx.db.query("trigger_arms").withIndex("by_bot_generation", (q) => q.eq("botId", botId)).collect();
+  return arms.some((a) => !isArmTerminal(a.status));
+}
+
+// ¿La cuenta HL tiene algún arm NO terminal? (bloquea revocación de credencial — R4).
+export async function hasNonTerminalArmForAccount(ctx: MutationCtx, hlAccountId: Id<"hl_api_credentials">): Promise<boolean> {
+  const arms = await ctx.db.query("trigger_arms").withIndex("by_account", (q) => q.eq("hlAccountId", hlAccountId)).collect();
+  return arms.some((a) => !isArmTerminal(a.status));
+}
+
+// Pausa segura (N2 + H1): si no hay arm vivo → desactiva YA; si lo hay → desiredState=disarmed +
+// disarmPending (el cron cancela en HL y luego completa active=false). Devuelve si se desactivó ya.
+export async function requestDisarmAndDeactivateImpl(ctx: MutationCtx, botId: Id<"bots">): Promise<{ deactivated: boolean }> {
+  const bot = await ctx.db.get(botId);
+  if (!bot) return { deactivated: false };
+  const arms = await ctx.db.query("trigger_arms").withIndex("by_bot_generation", (q) => q.eq("botId", botId)).collect();
+  const live = arms.filter((a) => !isArmTerminal(a.status));
+  if (live.length === 0) {
+    await ctx.db.patch(botId, { active: false, disarmPending: false });
+    return { deactivated: true };
+  }
+  for (const a of live) {
+    if (a.desiredState !== "disarmed") await ctx.db.patch(a._id, { desiredState: "disarmed", updatedAt: Date.now() });
+  }
+  await ctx.db.patch(botId, { disarmPending: true });
+  return { deactivated: false };
+}
+
 // cloid determinista del arm: botId|generation|role (identidad primaria). Web Crypto (runtime Convex),
 // NO Node `require`. Formato HL: "0x" + 32 hex (16 bytes).
 export async function armCloid(botId: string, generation: number, role: string): Promise<string> {
@@ -218,24 +250,8 @@ export const releaseArmReconcile = internalMutation({
 export const requestDisarmAndDeactivate = internalMutation({
   args: { botId: v.id("bots") },
   handler: async (ctx, { botId }) => {
-    const bot = await ctx.db.get(botId);
-    if (!bot) return { ok: false as const };
-    const arms = await ctx.db
-      .query("trigger_arms")
-      .withIndex("by_bot_generation", (q) => q.eq("botId", botId))
-      .collect();
-    const live = arms.filter((a) => !isArmTerminal(a.status));
-    if (live.length === 0) {
-      // No hay nada que cancelar → desactivar inmediatamente (caso base N2).
-      await ctx.db.patch(botId, { active: false, disarmPending: false });
-      return { ok: true as const, deactivated: true as const };
-    }
-    // Marcar la intención de desarmar; el cron/reconcileArm cancela y luego completa active=false.
-    for (const a of live) {
-      if (a.desiredState !== "disarmed") await ctx.db.patch(a._id, { desiredState: "disarmed", updatedAt: Date.now() });
-    }
-    await ctx.db.patch(botId, { disarmPending: true });
-    return { ok: true as const, deactivated: false as const };
+    const r = await requestDisarmAndDeactivateImpl(ctx, botId);
+    return { ok: true as const, deactivated: r.deactivated };
   },
 });
 

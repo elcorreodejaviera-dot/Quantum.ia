@@ -25,11 +25,32 @@ const CLOSE_CONFIRM_GRACE_MS = 2 * 60_000;
 // límites; superados → CIERRE DE EMERGENCIA (reduceOnly market) para no dejar la posición desnuda.
 const SL_MAX_ATTEMPTS = 3;
 const SL_PROTECT_DEADLINE_MS = 4 * 60_000;
+// Grace tras enviar el SL: antes de rotar el cloid (nuevo intento), confirmar por CLOID que el
+// anterior NO está vivo (igual que JAV-43). Evita doble SL / SL huérfano.
+const SL_SUBMIT_GRACE_MS = 60_000;
 
 // ¿Hay una orden VIVA con este cloid en el book? (parte de la prueba negativa R3 — no liberar a ciegas).
 async function openByCloid(info: any, user: `0x${string}`, cloid: string): Promise<boolean> {
   const oo: any[] = await info.frontendOpenOrders({ user });
   return oo.some((o) => typeof o?.cloid === "string" && o.cloid.toLowerCase() === cloid.toLowerCase());
+}
+
+// (Codex #2) Cancela cualquier trigger_order del arm que SIGA VIVO en el book y devuelve si TODOS
+// están muertos (prueba negativa por CLOID). Se llama una vez en frontendOpenOrders y cancela los
+// que sigan abiertos. Garantiza que un arm no alcance `closed` con una orden viva (anti-huérfano).
+async function ensureOrdersDead(
+  info: any, exchange: any, user: `0x${string}`, assetId: number, cloids: string[],
+): Promise<boolean> {
+  const oo: any[] = await info.frontendOpenOrders({ user });
+  const liveSet = new Set(oo.map((o) => (typeof o?.cloid === "string" ? o.cloid.toLowerCase() : "")));
+  let allDead = true;
+  for (const c of cloids) {
+    if (liveSet.has(c.toLowerCase())) {
+      allDead = false;
+      try { await exchange.cancelByCloid({ cancels: [{ asset: assetId, cloid: c as `0x${string}` }] }); } catch { /* reintenta */ }
+    }
+  }
+  return allDead;
 }
 
 // Coloca/observa órdenes trigger por CLOID. Política de COLOCACIÓN: todos los gates + hard-gate testnet.
@@ -297,14 +318,23 @@ export const reconcileArm = internalAction({
         }
         const filledSize = arm.filledSize, entryPrice = arm.entryPrice;
         const slOrder = await ctx.runQuery(internal.triggerArms.getArmOrderByRole, { armId, role: "sl_upper" });
+        const allOrders = await ctx.runQuery(internal.triggerArms.getArmOrdersInternal, { armId });
+        const allCloids = allOrders.map((o) => o.cloid);
 
-        // (1) Detección de CIERRE (posición flat) — grace + doble lectura (Fix #2b/#2c).
+        // (1) Detección de CIERRE (posición flat) — grace + doble lectura (Fix #2). Además (Codex #2)
+        // NO declarar `closed` mientras quede una orden VIVA en el book (cancelarla primero): un
+        // trigger resido podría dispararse sobre un arm ya cerrado (huérfano).
         const ch: any = await info.clearinghouseState({ user });
         const p = (ch.assetPositions ?? []).find((x: any) => x.position?.coin === arm.asset.toUpperCase());
         const szi = p ? Number(p.position?.szi ?? 0) : 0;
         const flat = Math.abs(szi) === 0;
         if (flat) {
           if (Date.now() - (arm.filledAt ?? arm.createdAt) <= CLOSE_CONFIRM_GRACE_MS) return { skipped: "close_confirm_grace" };
+          const renewC = await ctx.runMutation(internal.triggerArms.renewArmReconcile, { armId, token });
+          if (!renewC.ok) return { skipped: "lease_lost" };
+          if (!(await ensureOrdersDead(info, exchange, user, assetId, allCloids))) {
+            return { skipped: "closing_cancel_live_orders" };   // había una orden viva → cancelada; reintentar
+          }
           if (arm.closeConfirmSince == null) {
             await ctx.runMutation(internal.triggerArms.setArmCloseConfirm, { armId, token, value: Date.now() });
             return { skipped: "close_first_flat" };
@@ -320,15 +350,13 @@ export const reconcileArm = internalAction({
         const tooManyAttempts = (arm.slAttempts ?? 0) >= SL_MAX_ATTEMPTS;
         const mustEmergencyClose = wantDisarm || ((deadlinePassed || tooManyAttempts) && arm.status !== "protected");
         if (mustEmergencyClose) {
-          // Cancelar TODO trigger_order vivo (entry residual + SL) antes de cerrar a mercado.
-          const all = await ctx.runQuery(internal.triggerArms.getArmOrdersInternal, { armId });
-          for (const o of all) {
-            try { await exchange.cancelByCloid({ cancels: [{ asset: assetId, cloid: o.cloid as `0x${string}` }] }); } catch { /* idempotente */ }
-          }
-          // Cierre reduceOnly MARKET (IOC agresivo, comprar para cerrar el short). cloid determinista
-          // por generación → idempotente; reduceOnly impide sobre-cerrar aunque se repita.
           const renew = await ctx.runMutation(internal.triggerArms.renewArmReconcile, { armId, token });
           if (!renew.ok) return { skipped: "lease_lost" };
+          // (Codex #2) Cancelar TODO trigger_order vivo y CONFIRMAR por CLOID que murieron antes de
+          // dar por cerrado (el `closed` se gatea en (1) con ensureOrdersDead). Aquí cancelamos.
+          await ensureOrdersDead(info, exchange, user, assetId, allCloids);
+          // Cierre reduceOnly MARKET (IOC agresivo, comprar para cerrar el short). cloid determinista
+          // por generación → idempotente; reduceOnly impide sobre-cerrar aunque se repita.
           const closeCloid = await armCloid(arm.botId, arm.generation, "close");
           const closeLimitPx = aggressiveHlPriceStr(assetMeta.markPx * (1 + 0.02), szDecimals, true);
           const ac2 = abortAfter(HL_ORDER_TIMEOUT_MS);
@@ -337,30 +365,40 @@ export const reconcileArm = internalAction({
               orders: [{ a: assetId, b: true, p: closeLimitPx, s: String(floorToDecimals(Math.abs(szi), szDecimals)), r: true, t: { limit: { tif: "Ioc" } }, c: closeCloid as `0x${string}` }],
               grouping: "na",
             }, { signal: ac2.signal, expiresAfter: Date.now() + HL_ORDER_TIMEOUT_MS });
-          } catch { /* el siguiente ciclo reintenta; szi==0 → closed */ } finally { ac2.clear(); }
+          } catch { /* el siguiente ciclo reintenta; szi==0 + órdenes muertas → closed */ } finally { ac2.clear(); }
           return { result: "emergency_close_sent" };
         }
 
-        // (3) ARMADO dentro del deadline: confirmar o colocar el SL.
-        if (slOrder && slOrder.observedStatus !== "pending") {
+        // (3) ARMADO dentro del deadline: CONFIRMAR el SL existente (sin rotar) o colocar uno nuevo.
+        // (Codex #1) Si el SL ya se observó vivo O se envió (slSubmittedAt), confirmar por CLOID y NO
+        // rotar el cloid hasta probar que el anterior murió (grace + prueba negativa) → anti-doble-SL.
+        if (slOrder && (slOrder.observedStatus !== "pending" || arm.slSubmittedAt != null)) {
           const slStatus: any = await info.orderStatus({ user, oid: slOrder.cloid as `0x${string}` });
           const slState = slStatus?.status === "order" ? slStatus.order?.status : undefined;
-          if (slState === "open") {
+          const slOpen = await openByCloid(info, user, slOrder.cloid);
+          const slFill = await fillsByCloid(info, user, slOrder.cloid);
+          if (slState === "filled" || slFill.size > 0) {
+            await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "filled" });
+            return { skipped: "sl_fired_awaiting_flat" };   // szi==0 en el próximo ciclo → closed
+          }
+          if (slState === "open" || slOpen) {
             await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "open", oid: slOrder.oid });
             if (arm.status !== "protected") await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "protected" });
             return { result: "protected" };
-          }
-          if (slState === "filled") {
-            await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "filled" });
-            return { skipped: "sl_fired_awaiting_flat" };   // szi==0 en el próximo ciclo → closed
           }
           if (slState === "triggered") {
             await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "triggered" });
             return { skipped: "sl_triggered_pending" };
           }
-          // terminal/unknownOid → reintentar SL (abajo), salvo que ya toque emergencia (ya cubierto).
+          // No vivo, sin fills, no triggered: si está dentro del grace desde el envío → esperar (lag).
+          if (arm.slSubmittedAt && Date.now() - arm.slSubmittedAt < SL_SUBMIT_GRACE_MS) {
+            return { skipped: "sl_submit_grace" };
+          }
+          // Grace vencido + prueba negativa (no en book, sin fills) → el intento murió → rotar (abajo).
+          await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "canceled" });
         }
-        // Colocar un intento de SL: filled→protecting; rota cloid …|sl|attempt; placeStopLoss de JAV-43.
+        // Colocar un NUEVO intento de SL (no hay order, nunca enviado, o el anterior se confirmó muerto).
+        if ((arm.slAttempts ?? 0) >= SL_MAX_ATTEMPTS) return { skipped: "sl_max_attempts" };   // (2) escala a emergencia
         if (arm.status === "filled") await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "protecting" });
         const prep = await ctx.runMutation(internal.triggerArms.prepareSlAttempt, { armId, token, protectDeadlineMs: SL_PROTECT_DEADLINE_MS });
         if (!prep.ok) return { skipped: "sl_prep_race" };
@@ -370,16 +408,22 @@ export const reconcileArm = internalAction({
           const sl = await placeStopLoss(exchange, assetId, szDecimals, "Short", filledSize, entryPrice, arm.stopLossPct, prep.cloid as `0x${string}`);
           if (sl.state === "resting") {
             await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "open", oid: sl.oid });
+            await ctx.runMutation(internal.triggerArms.markArmSlSubmitted, { armId, token });
             await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "protected" });
             return { result: "protected_placed" };
           }
           if (sl.state === "filled") {
             await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "filled", oid: sl.oid });
+            await ctx.runMutation(internal.triggerArms.markArmSlSubmitted, { armId, token });
             return { skipped: "sl_fired_immediately" };
           }
-          return { skipped: "sl_pending" };   // pending/timeout → sigue protecting; reconcilia por CLOID
+          // pending/timeout: marcar slSubmittedAt → el próximo ciclo CONFIRMA por CLOID, NO rota (anti-doble-SL).
+          await ctx.runMutation(internal.triggerArms.markArmSlSubmitted, { armId, token });
+          return { skipped: "sl_pending" };
         } catch {
-          // rechazo definitivo → sigue protecting; reintenta (slAttempts ya subió); el deadline/limite escala a emergencia.
+          // Rechazo DEFINITIVO (no TransportError): el SL no se colocó. NO marcar slSubmittedAt → el
+          // siguiente ciclo puede rotar (prueba negativa inmediata). slAttempts ya subió; deadline/max
+          // escala a cierre de emergencia.
           return { skipped: "sl_place_error" };
         }
       }

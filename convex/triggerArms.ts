@@ -206,6 +206,18 @@ export const gateArmBeforeOrder = internalMutation({
   },
 });
 
+// Marca slSubmittedAt del SL (intento enviado/aceptado): grace anti-doble-SL antes de rotar cloid.
+export const markArmSlSubmitted = internalMutation({
+  args: { armId: v.id("trigger_arms"), token: v.string() },
+  handler: async (ctx, { armId, token }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (isArmTerminal(arm.status)) return { ok: false as const };
+    await ctx.db.patch(armId, { slSubmittedAt: Date.now(), updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
 // Marca/limpia closeConfirmSince (doble lectura szi==0) bajo el claim. value=null limpia.
 export const setArmCloseConfirm = internalMutation({
   args: { armId: v.id("trigger_arms"), token: v.string(), value: v.union(v.number(), v.null()) },
@@ -420,6 +432,7 @@ export const prepareSlAttempt = internalMutation({
     }
     await ctx.db.patch(armId, {
       slAttempts: attempt,
+      slSubmittedAt: undefined,   // nuevo intento aún NO enviado (se marca al aceptarse en HL)
       protectDeadline: arm.protectDeadline ?? (arm.filledAt ?? now) + protectDeadlineMs,
       updatedAt: now,
     });

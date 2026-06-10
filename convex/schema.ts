@@ -293,6 +293,7 @@ export default defineSchema({
     stopLossPct: v.number(),             // snapshot del SL del bot (para armar el SL post-fill)
     // SL post-fill
     slAttempts: v.optional(v.number()),  // nº de intentos de colocar el SL (cloid …|sl|attempt)
+    slSubmittedAt: v.optional(v.number()),  // SL enviado (resting/pending): grace+prueba negativa antes de rotar cloid (anti-doble-SL)
     protectDeadline: v.optional(v.number()),  // filledAt + SL_PROTECT_DEADLINE_MS → escala a cierre de emergencia
     // fill
     filledSize: v.optional(v.number()),

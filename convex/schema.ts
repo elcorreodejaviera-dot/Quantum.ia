@@ -97,6 +97,12 @@ export default defineSchema({
     allowReentryFromAbove: v.optional(v.boolean()),// IL: proteger también al reentrar por arriba
     autoRearm: v.optional(v.boolean()),            // reabrir tras SL automáticamente
     tps: v.optional(v.array(v.object({ gainPct: v.number(), closePct: v.number() }))),
+    // JAV-44: nocional de cobertura explícito (USDC), fuente de verdad backend para el motor
+    // automático (no se deriva del frontend ni de un campo LP inexistente). Validado finito > 0.
+    hedgeNotionalUsd: v.optional(v.number()),
+    // JAV-44: pausa segura — bloquea nuevos arms mientras se cancela un trigger vivo, manteniendo
+    // active=true hasta confirmar la cancelación en HL (requestDisarmAndDeactivate).
+    disarmPending: v.optional(v.boolean()),
     // Órdenes trigger/límit colocadas en HL (Fase 3). oids para modificar/cancelar.
     // Opcional/vacío hasta que la colocación real exista (bloqueado por JAV-37).
     liveOrders: v.optional(v.object({
@@ -260,4 +266,66 @@ export default defineSchema({
     .index("by_status_created", ["status", "createdAt"])
     .index("by_account", ["hlAccountId"])    // bloquear revocación con ejecuciones abiertas
     .index("by_created", ["createdAt"]),     // observabilidad admin (listRecentExecutions)
+
+  // --- JAV-44 Etapa 1: motor de cobertura automática (triggers nativos en HL) ---
+  // Un "armado" de un bot (versión = generation). Snapshot inmutable de la intención + lease/fencing.
+  trigger_arms: defineTable({
+    botId: v.id("bots"),
+    userId: v.id("users"),
+    hlAccountId: v.id("hl_api_credentials"),
+    poolId: v.id("pools"),
+    asset: v.string(),
+    network: v.string(),                 // INMUTABLE "testnet" — el cliente de cancelación se construye de aquí
+    generation: v.number(),              // sube en cada re-arm; generation = max+1 (backend)
+    status: v.union(
+      v.literal("arming"), v.literal("submitting"), v.literal("armed"), v.literal("disarming"),
+      v.literal("disarmed"), v.literal("filled"), v.literal("closed"), v.literal("failed"),
+      v.literal("unknown")),
+    desiredState: v.union(v.literal("armed"), v.literal("disarmed")),
+    // snapshot de config (inmutable durante la vida del arm)
+    side: v.literal("Short"),
+    triggerPx: v.number(),               // triggerPxNormalized (ya redondeado al tick)
+    size: v.number(),
+    appliedLeverage: v.number(),
+    reservedNotional: v.number(),
+    marginReserved: v.number(),
+    lowerEdge: v.number(),               // minRange del pool al armar
+    // fill
+    filledSize: v.optional(v.number()),
+    entryPrice: v.optional(v.number()),
+    filledAt: v.optional(v.number()),    // cuándo se confirmó el fill (grace anti-closed-prematuro por lag)
+    closeConfirmSince: v.optional(v.number()),  // 1ª lectura szi==0 (doble lectura anti single transient read)
+    // ciclo de vida / fencing
+    submittedAt: v.optional(v.number()), // se fija SOLO en el CAS markArmSubmitting (cuarentena N5/N6)
+    error: v.optional(v.string()),
+    reconcileLeaseUntil: v.optional(v.number()),
+    reconcileLeaseToken: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_bot_generation", ["botId", "generation"])  // unicidad + generation = max+1
+    .index("by_bot_status", ["botId", "status"])
+    .index("by_status_updated", ["status", "updatedAt"])  // cron reconcilePoolArms
+    .index("by_updated", ["updatedAt"])                   // cron sin starvation (más antiguo primero)
+    .index("by_user_created", ["userId", "createdAt"])    // límite diario compartido con JAV-43
+    .index("by_account", ["hlAccountId"]),                // bloquear revocación con arm no terminal
+
+  // Cada orden trigger nativa de un arm. CLOID = identidad primaria determinista.
+  trigger_orders: defineTable({
+    armId: v.id("trigger_arms"),
+    role: v.literal("entry_lower"),       // Etapa 1: solo el trigger inferior de entrada
+    cloid: v.string(),                    // determinista botId|generation|role
+    oid: v.optional(v.string()),          // de HL; OPCIONAL (waitingForTrigger/timeout sin oid)
+    triggerPx: v.number(),
+    size: v.number(),
+    reduceOnly: v.boolean(),              // false (abre posición)
+    observedStatus: v.union(
+      v.literal("pending"), v.literal("open"), v.literal("triggered"), v.literal("filled"),
+      v.literal("canceled"), v.literal("rejected"), v.literal("unknown")),
+    submittedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_arm_role", ["armId", "role"])  // unicidad: un entry_lower por arm
+    .index("by_cloid", ["cloid"]),
 });

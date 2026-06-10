@@ -1,7 +1,7 @@
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { paginationOptsValidator } from "convex/server";
-import { requireAdmin, requireAuth, requireUser, requireTradeLive } from "./helpers";
+import { requireAdmin, requireAuth, requireUser, requireTradeLive, hasPermission } from "./helpers";
 
 export const getCurrentAdminInternal = internalQuery({
   args: {},
@@ -143,6 +143,17 @@ export const assertTradeLiveInternal = internalQuery({
   args: {},
   handler: async (ctx) => {
     return await requireTradeLive(ctx);
+  },
+});
+
+// JAV-44: ¿un usuario CONCRETO (por id) tiene canTradeLive vigente? Para el kill-switch del cron
+// (reconcileArm), que corre sin identidad de usuario y debe detectar la revocación del permiso.
+export const hasTradeLiveForUserInternal = internalQuery({
+  args: { userId: v.id("users") },
+  handler: async (ctx, { userId }) => {
+    const user = await ctx.db.get(userId);
+    if (!user) return false;
+    return await hasPermission(ctx, user, "canTradeLive");
   },
 });
 

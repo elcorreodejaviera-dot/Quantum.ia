@@ -27,4 +27,11 @@ crons.interval(
   internal.executionsCron.reconcileStaleExecutions,
 );
 
+// JAV-44 Etapa 1: convergencia de los trigger_arms (kill switch que cancela, pausa, recuperación).
+crons.interval(
+  "reconcile pool arms",
+  { minutes: 1 },
+  internal.triggerEngine.reconcileStaleArms,
+);
+
 export default crons;

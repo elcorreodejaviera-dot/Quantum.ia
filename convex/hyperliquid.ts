@@ -52,28 +52,45 @@ function formatHlPrice(price: number, szDecimals: number): string {
   return String(Number(sig.toFixed(maxDecimals)));
 }
 
-// Nº de decimales válidos en HL para un precio: el MÁS RESTRICTIVO entre el tope por szDecimals
-// (6 − szDecimals) y el tope por 5 cifras significativas (5 − díg. enteros). Para precios < 1 las
-// cifras significativas no limitan los decimales (los ceros a la izquierda no cuentan).
+// Nº de decimales del tick HL para un precio: el MÁS RESTRICTIVO entre el tope por szDecimals
+// (6 − szDecimals) y el tope por 5 cifras significativas (5 − díg. enteros). PUEDE SER NEGATIVO:
+// con ≥6 dígitos enteros (p.ej. BTC 123456) el tick es 10/100 (−1/−2), no 1. Para price < 1,
+// intDigits es negativo y cuenta los ceros a la izquierda (5 sig. de 0.0123 abarcan 6 decimales).
 function hlAllowedDecimals(price: number, szDecimals: number): number {
   const maxDecimals = Math.max(0, 6 - szDecimals);
-  // intDigits es NEGATIVO para price < 1 (p.ej. 0.0123 → −1), de modo que sigDecimals cuente los
-  // ceros a la izquierda: 5 cifras significativas de 0.0123 abarcan 6 decimales. No clampar a 0.
   const intDigits = Math.floor(Math.log10(price)) + 1;
-  const sigDecimals = Math.max(0, 5 - intDigits);
+  const sigDecimals = 5 - intDigits;   // NO clampar a 0: permite tick > 1 en precios de ≥6 dígitos
   return Math.min(maxDecimals, sigDecimals);
 }
 
-// Cota SUPERIOR conservadora: el precio HL-válido más pequeño ≥ price (redondeo dirigido ARRIBA al
-// tick que impone HL). Respeta SIMULTÁNEAMENTE 5 cifras significativas y (6 − szDecimals) decimales.
-// (formatHlPrice redondea al más cercano y podría bajar el cap → subreservar.) Garantiza ≥ price:
-// sin epsilon (que podía bajar de un tick); si por ruido flotante quedó por debajo, sube un tick.
+// Redondeo DIRECCIONAL a un precio HL-válido (respeta 5 cifras significativas y (6−szDecimals)
+// decimales, con tick ≥ 1 para enteros grandes). dir="ceil" → menor válido ≥ price; "floor" →
+// mayor válido ≤ price. Corrige ruido flotante en la dirección correspondiente.
+function roundHlPrice(price: number, szDecimals: number, dir: "ceil" | "floor"): number {
+  const decimals = hlAllowedDecimals(price, szDecimals);   // puede ser negativo
+  const tick = 10 ** -decimals;                            // negativo → 10, 100, …
+  const outDecimals = Math.max(0, decimals);
+  const q = price / tick;
+  const n = dir === "ceil" ? Math.ceil(q) : Math.floor(q);
+  // Normalizar PRIMERO (toFixed introduce ruido binario), corregir la dirección DESPUÉS para que el
+  // invariante se cumpla exactamente (ceil ≥ price, floor ≤ price) pese al redondeo de toFixed.
+  let r = Number((n * tick).toFixed(outDecimals));
+  if (dir === "ceil" && r < price) r = Number((r + tick).toFixed(outDecimals));
+  if (dir === "floor" && r > price) r = Number((r - tick).toFixed(outDecimals));
+  return r;
+}
+
+// Cota SUPERIOR conservadora (sizing/reserva del nocional): menor precio HL-válido ≥ price.
 function ceilHlPrice(price: number, szDecimals: number): number {
-  const decimals = hlAllowedDecimals(price, szDecimals);
-  const tick = 10 ** -decimals;
-  let c = Number((Math.ceil(price / tick) * tick).toFixed(decimals));
-  if (c < price) c = Number((c + tick).toFixed(decimals));
-  return c;
+  return roundHlPrice(price, szDecimals, "ceil");
+}
+
+// Precio HL-válido AGRESIVO (que cruza el book / mantiene la banda): una COMPRA redondea hacia
+// ARRIBA (ceil) y una VENTA hacia ABAJO (floor), siempre alejándose del book. NUNCA usar el
+// redondeo al más cercano (formatHlPrice) en límites sensibles a la ejecución: podría acercar el
+// precio al book (Long con límite más bajo / Short más alto) o estrechar la banda del SL < 1%.
+function aggressiveHlPriceStr(price: number, szDecimals: number, isBuy: boolean): string {
+  return String(roundHlPrice(price, szDecimals, isBuy ? "ceil" : "floor"));
 }
 
 type AssetMeta = { assetId: number; szDecimals: number; markPx: number };
@@ -143,9 +160,10 @@ async function placeStopLoss(
   stopLossPct: number, slCloidVal: `0x${string}`,
 ): Promise<SlPlaceResult> {
   const triggerPx = slTriggerPx(side, entryPx, stopLossPct);
+  const isBuy = side === "Short";                  // cerrar un Short = Buy; cerrar un Long = Sell
   // Peor precio aceptable al activarse (banda 1%): cerrar un Short = comprar hasta +1%;
   // cerrar un Long = vender hasta −1%. Banda fina: en un gap > 1% puede NO llenarse.
-  const marketLimitPx = side === "Short"
+  const marketLimitPx = isBuy
     ? triggerPx * (1 + SL_MARKET_SLIPPAGE_FRACTION)
     : triggerPx * (1 - SL_MARKET_SLIPPAGE_FRACTION);
   const ac = abortAfter(HL_ORDER_TIMEOUT_MS);
@@ -154,8 +172,11 @@ async function placeStopLoss(
     resp = await exchange.order({
       orders: [{
         a: assetId,
-        b: side === "Short",                         // cerrar un Short = Buy; cerrar un Long = Sell
-        p: formatHlPrice(marketLimitPx, szDecimals),
+        b: isBuy,
+        // Límite del market AGRESIVO en la dirección del cierre (buy→ceil, sell→floor) para que la
+        // banda nunca quede < 1% tras normalizar al tick. El triggerPx es el nivel de activación
+        // (no la ejecución) → redondeo al más cercano basta.
+        p: aggressiveHlPriceStr(marketLimitPx, szDecimals, isBuy),
         s: String(floorToDecimals(filledSize, szDecimals)),
         r: true,                                      // reduceOnly
         t: { trigger: { isMarket: true, triggerPx: formatHlPrice(triggerPx, szDecimals), tpsl: "sl" } },
@@ -270,10 +291,13 @@ export const executePerpMarketOrder = action({
     //    NO hay cota dura: el límite de venta es un suelo y la venta se llena ≈ al bid; un spike
     //    alcista sub-segundo entre el snapshot de markPx y el fill PODRÍA superar la cota (residuo
     //    posible, no garantizado). El MARGIN_SAFETY_BUFFER da holgura de margen, NO acota el nocional.
-    const orderLimitPx = args.side === "Long"
+    const isBuy = args.side === "Long";
+    const orderLimitPx = isBuy
       ? markPx * (1 + ENTRY_IOC_SLIPPAGE)
       : markPx * (1 - ENTRY_IOC_SLIPPAGE);
-    const orderLimitPxStr = formatHlPrice(orderLimitPx, szDecimals);
+    // Redondeo AGRESIVO en la dirección de la orden (Long compra→ceil, Short venta→floor) para que
+    // tras normalizar al tick el límite no se acerque al book (reintroduciría el "no cruza/no llena").
+    const orderLimitPxStr = aggressiveHlPriceStr(orderLimitPx, szDecimals, isBuy);
     const notionalCapPx = ceilHlPrice(markPx * (1 + ENTRY_IOC_SLIPPAGE), szDecimals);
     // Dimensionar con el techo (ya redondeado): el fill nunca supera el nocional reservado (Long);
     // en Short queda dentro salvo spike sub-segundo.
@@ -511,9 +535,14 @@ export const reconcileExecution = internalAction({
       try {
         const sl = await placeStopLoss(exchange, assetId, szDecimals, req.side, filledSize, entryPrice, req.stopLossPct, slCloidToUse);
         if (sl.state === "pending") {
-          // waitingForTrigger: SL aceptado sin oid. Marcar slSubmittedAt y dejar entry_filled; el
-          // siguiente ciclo lo confirma por CLOID (open→protected). Evita declarar protected sin oid.
-          await ctx.runMutation(internal.executions.markSlSubmitted, { requestId, token });
+          // waitingForTrigger/waitingForFill o timeout: SL aceptado/incierto sin oid. Marcar
+          // slSubmittedAt y dejar entry_filled; el siguiente ciclo lo confirma por CLOID
+          // (open→protected). Evita declarar protected sin oid.
+          // FAIL-CLOSED (CodeRabbit): si el marcador NO se persiste (lease/token perdido), NO
+          // reportar éxito — otro reconciliador tiene el claim y se encargará; reportar la carrera
+          // para no afirmar pending sin haber dejado el grace anti-doble-SL.
+          const mark = await ctx.runMutation(internal.executions.markSlSubmitted, { requestId, token });
+          if (!mark.ok) return { skipped: "sl_mark_race" };
           return { result: "sl_pending_confirmation" };
         }
         const st = sl.state === "filled" ? "closed" as const : "protected" as const;

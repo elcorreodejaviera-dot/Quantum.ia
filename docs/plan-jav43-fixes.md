@@ -79,19 +79,31 @@ NO afirma garantía para Short.
 1. `orderLimitPx` (precio enviado a HL): Long `markPx*(1+ENTRY_IOC_SLIPPAGE)`,
    Short `markPx*(1−ENTRY_IOC_SLIPPAGE)`.
 2. `notionalCapPx` = `markPx*(1+ENTRY_IOC_SLIPPAGE)` para AMBOS lados (techo p/ dimensionar/reservar).
-3. **Redondeo dirigido (Codex rev.2 #2):** `formatHlPrice` redondea al más cercano y puede bajar
-   el cap → subreserva. Implementar un redondeo **hacia ARRIBA al tick** para `notionalCapPx`
-   (helper `ceilHlPrice`/sumar 1 tick tras formatear) y volver a `Number` ANTES de dimensionar.
-   `orderLimitPx` se formatea normal (debe seguir cruzando).
+3. **Redondeo dirigido al tick de HL.** Algoritmo (`hlAllowedDecimals` + `roundHlPrice`):
+   - `maxDecimals = max(0, 6 − szDecimals)`; `intDigits = floor(log10(price)) + 1`;
+     `sigDecimals = 5 − intDigits` (**puede ser negativo**: con ≥6 dígitos enteros, p.ej. BTC
+     123456, el tick es 10/100, no 1); `decimals = min(maxDecimals, sigDecimals)` (puede ser < 0).
+   - `tick = 10^(−decimals)`. `roundHlPrice(price, dir)`: `q = price/tick`; `n = ceil(q)` (dir=ceil)
+     o `floor(q)` (dir=floor); `c = n*tick`; corrección de ruido flotante en la misma dirección
+     (ceil: si `c < price` → `+tick`; floor: si `c > price` → `−tick`); normalizar con
+     `toFixed(max(0, decimals))`.
+   - `ceilHlPrice = roundHlPrice(·, "ceil")` → menor precio HL-válido ≥ price (para `notionalCapPx`).
+   - `aggressiveHlPriceStr(price, isBuy)` = `roundHlPrice(·, isBuy ? "ceil" : "floor")` → precio
+     **alejándose del book** (compra ceil / venta floor) para límites sensibles a la ejecución.
 4. `size = floorToDecimals(args.tradeAmount / notionalCapPxCeil, szDecimals)`.
 5. `reservedNotional = size * notionalCapPxCeil`. `marginRequired = reservedNotional / appliedLeverage`.
 6. La reserva y los límites por orden/día se evalúan contra `reservedNotional`.
-7. La orden de entrada usa `orderLimitPx` formateado (Long arriba, Short abajo) — NO el cap.
-8. Actualizar el comentario "Precio server-side / nocional efectivo": ahora es techo worst-case
-   (garantía dura solo en Long; estimación conservadora en Short).
+7. **Precios enviados con redondeo AGRESIVO direccional, NO al más cercano (CodeRabbit):** la IOC de
+   entrada (`orderLimitPx`) y el `marketLimitPx` del SL usan `aggressiveHlPriceStr` (Long/cierre-Short
+   = compra → ceil; Short/cierre-Long = venta → floor). El `formatHlPrice` (al más cercano) podría
+   acercar el límite al book (no cruza) o estrechar la banda del SL < 1%. El `triggerPx` del SL
+   (nivel de activación, no ejecución) sigue con `formatHlPrice`.
+8. Comentario "Precio server-side / nocional efectivo": ahora es techo worst-case (garantía dura
+   solo en Long; estimación conservadora en Short).
 
-**Pruebas (Codex #2, #9):** Long y Short, precios pequeños, varios `szDecimals`; casos donde
-`formatHlPrice` redondearía hacia abajo → verificar que `ceilHlPrice` mantiene la cota.
+**Pruebas (Codex #2, #9):** Long y Short, precios pequeños (<0.1), grandes (≥6 dígitos, tick > 1) y
+varios `szDecimals`; verificar `ceilHlPrice ≥ price` siempre y precios HL-válidos; verificar que el
+redondeo agresivo nunca acerca el límite al book.
 
 ---
 

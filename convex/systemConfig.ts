@@ -1,7 +1,7 @@
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { requireAuth, requireAdmin } from "./helpers";
-import { LIMIT_DEFAULTS, getLimit } from "./executionLimits";
+import { getLimit } from "./executionLimits";
 
 // Límites efectivos (config o default) para el panel admin — no campos vacíos que diverjan.
 export const getExecutionLimits = query({
@@ -106,30 +106,22 @@ export const setExecutionLimitInternal = internalMutation({
   handler: async (ctx, { key, value }) => {
     if (!Number.isFinite(value)) throw new Error("value debe ser finito");
     if (value <= 0) throw new Error(`${key} debe ser > 0`);
-    const perOrder = key === "maxNotionalPerOrder"
-      ? value : await readNum(ctx, "maxNotionalPerOrder", LIMIT_DEFAULTS.maxNotionalPerOrder);
-    const daily = key === "maxNotionalPerUserDaily"
-      ? value : await readNum(ctx, "maxNotionalPerUserDaily", LIMIT_DEFAULTS.maxNotionalPerUserDaily);
+    // getLimit (estricto) en vez de readNum: el sibling debe cumplir el mismo contrato; si está
+    // malformado en system_config, fallar aquí en vez de comparar contra un default enmascarado.
+    const perOrder = key === "maxNotionalPerOrder" ? value : await getLimit(ctx, "maxNotionalPerOrder");
+    const daily = key === "maxNotionalPerUserDaily" ? value : await getLimit(ctx, "maxNotionalPerUserDaily");
     if (perOrder > daily) throw new Error("maxNotionalPerOrder no puede superar maxNotionalPerUserDaily");
     await upsertConfig(ctx, key, value);
     return { key, value };
   },
 });
 
-async function readNum(ctx: any, key: string, def: number): Promise<number> {
-  const row = await ctx.db
-    .query("system_config")
-    .withIndex("by_key", (q: any) => q.eq("key", key))
-    .first();
-  return typeof row?.value === "number" ? row.value : def;
-}
-
 export const setMaxNotionalPerOrder = mutation({
   args: { value: v.number() },
   handler: async (ctx, { value }) => {
     await requireAdmin(ctx);
     if (!Number.isFinite(value) || value <= 0) throw new Error("maxNotionalPerOrder debe ser > 0");
-    const daily = await readNum(ctx, "maxNotionalPerUserDaily", LIMIT_DEFAULTS.maxNotionalPerUserDaily);
+    const daily = await getLimit(ctx, "maxNotionalPerUserDaily");
     if (value > daily) throw new Error("maxNotionalPerOrder no puede superar maxNotionalPerUserDaily");
     await upsertConfig(ctx, "maxNotionalPerOrder", value);
   },
@@ -140,7 +132,7 @@ export const setMaxNotionalPerUserDaily = mutation({
   handler: async (ctx, { value }) => {
     await requireAdmin(ctx);
     if (!Number.isFinite(value) || value <= 0) throw new Error("maxNotionalPerUserDaily debe ser > 0");
-    const perOrder = await readNum(ctx, "maxNotionalPerOrder", LIMIT_DEFAULTS.maxNotionalPerOrder);
+    const perOrder = await getLimit(ctx, "maxNotionalPerOrder");
     if (value < perOrder) throw new Error("maxNotionalPerUserDaily no puede ser menor que maxNotionalPerOrder");
     await upsertConfig(ctx, "maxNotionalPerUserDaily", value);
   },

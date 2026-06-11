@@ -88,6 +88,19 @@ export async function committedMarginForAccount(
   return execMargin + armMargin;
 }
 
+// D (JAV-UI): ¿el bot tiene alguna ejecución JAV-37 (IOC manual) ABIERTA? Solo `closed` (SL
+// ejecutado) y `failed` (sin entrada) son seguros: el resto puede tener posición/orden viva en HL
+// — incluido `protected` (SL resting, posición abierta). Bloquea el borrado del bot (huérfanos).
+export async function hasOpenExecutionForBot(
+  ctx: MutationCtx, botId: Id<"bots">,
+): Promise<boolean> {
+  const exec = await ctx.db
+    .query("execution_requests")
+    .withIndex("by_bot", (q) => q.eq("botId", botId))
+    .collect();
+  return exec.some((r) => !["closed", "failed"].includes(r.status));
+}
+
 // Nocional usado en las últimas 24h por un usuario sumando AMBOS motores (límite diario compartido).
 export async function dailyNotionalUsed(
   ctx: MutationCtx, userId: Id<"users">, since: number,

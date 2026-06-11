@@ -192,6 +192,7 @@ function PoolCard({ pool, canManage, canTradeLive }) {
   const deletePoolMutation = useMutation(api.pools.deletePool);
   const allBots = useQuery(api.bots.listBots);
   const savePoolBot = useMutation(api.bots.getOrCreatePoolBot);
+  const deletePoolBotMutation = useMutation(api.bots.deletePoolBot);
   const ilBot = (allBots ?? []).find((b) => b.poolId === pool.id && b.kind === 'il') ?? null;
   const tradingBot = (allBots ?? []).find((b) => b.poolId === pool.id && b.kind === 'trading') ?? null;
   const [botModal, setBotModal] = React.useState(null);   // 'il' | 'trading' | null
@@ -209,10 +210,39 @@ function PoolCard({ pool, canManage, canTradeLive }) {
       setBotBusy(false);
     }
   }
-  const hasPrice = pool.price != null;
+
+  // D: elimina el bot del pool deteniéndolo de forma segura. Si tiene cobertura activa, el backend
+  // pide el desarmado (cron cancela en HL) y devuelve stopping → se avisa al usuario para reintentar.
+  async function deletePoolBotHandler(bot, label) {
+    if (!bot || botBusy) return;
+    if (!window.confirm(`¿Eliminar el bot "${label}" de este pool?\nSe detendrá de forma segura: el borrado esperará hasta que no existan órdenes ni posiciones abiertas en Hyperliquid.`)) return;
+    setBotBusy(true);
+    try {
+      const r = await deletePoolBotMutation({ botId: bot._id });
+      if (r?.blockedByExecution) {
+        window.alert('El bot tiene una ejecución abierta en Hyperliquid (posición con SL activo). NO se puede cancelar a mano: hay que esperar a que su Stop Loss la cierre. Cuando la ejecución termine, vuelve a pulsar "Eliminar".');
+      } else if (r?.stopping) {
+        window.alert('El bot tiene cobertura automática activa: se está deteniendo y cancelando sus órdenes en Hyperliquid. Vuelve a pulsar "Eliminar" en unos segundos para borrarlo del todo.');
+      }
+    } catch (e) {
+      window.alert(e?.message ?? 'No se pudo eliminar el bot.');
+    } finally {
+      setBotBusy(false);
+    }
+  }
+  // (Codex #7) Rango con anchura > 0: protege el denominador frente a min===max (NaN%).
+  const rangeSpan = pool.max - pool.min;
+  const validRange = Number.isFinite(rangeSpan) && rangeSpan > 0;
+  const hasPrice = pool.price != null && validRange;
   const pos = hasPrice
-    ? Math.max(4, Math.min(96, ((pool.price - pool.min) / (pool.max - pool.min)) * 100))
+    ? Math.max(4, Math.min(96, ((pool.price - pool.min) / rangeSpan) * 100))
     : 50;
+  // C: precio de entrada del LP (automático desde la posición). Se oculta si no se ha
+  // capturado todavía, el rango es degenerado, o cae fuera del rango [min, max].
+  const hasEntry = validRange && pool.entryPrice != null && pool.entryPrice >= pool.min && pool.entryPrice <= pool.max;
+  const entryPos = hasEntry
+    ? Math.max(4, Math.min(96, ((pool.entryPrice - pool.min) / rangeSpan) * 100))
+    : 0;
   // APR calculado igual que Uniswap: Vol24h × feeTier/1M × 365 / TVL × 100
   const calcTvl = pool.tvl ?? 0;
   const calcVol = pool.volume1d ?? null;
@@ -336,6 +366,19 @@ function PoolCard({ pool, canManage, canTradeLive }) {
                 style={{ height: `${pos}%` }}
               />
             </div>
+            {hasEntry && (() => {
+              const entryTip = 'Precio observado al detectar la posición por primera vez (aproximado, no verificable on-chain). Uniswap V3 no guarda el precio de entrada real.';
+              return (
+                <div
+                  className="range-chart-entry-line"
+                  style={{ bottom: `${entryPos}%` }}
+                  aria-label={`Entrada aproximada ${formatPrice(pool.pair, pool.entryPrice)}. ${entryTip}`}
+                >
+                  <span title={entryTip}>Entrada aprox.</span>
+                  <strong title={entryTip}>${formatPrice(pool.pair, pool.entryPrice)}</strong>
+                </div>
+              );
+            })()}
             {hasPrice && (
               <div className="range-chart-price-line" style={{ bottom: `${pos}%` }}>
                 <span>Precio</span>
@@ -419,9 +462,11 @@ function PoolCard({ pool, canManage, canTradeLive }) {
       {canManage && (
         <div className="pool-bot-actions" style={{ display: 'flex', gap: 8, marginTop: 10 }}>
           <BotActionButton label="Proteger" bot={ilBot} busy={botBusy} canTradeLive={canTradeLive}
-            onConfig={() => setBotModal('il')} onToggle={() => togglePoolBot(ilBot)} onTest={() => setTestBot(ilBot)} />
+            onConfig={() => setBotModal('il')} onToggle={() => togglePoolBot(ilBot)} onTest={() => setTestBot(ilBot)}
+            onDelete={() => deletePoolBotHandler(ilBot, 'Proteger')} />
           <BotActionButton label="Trading" bot={tradingBot} busy={botBusy} canTradeLive={canTradeLive}
-            onConfig={() => setBotModal('trading')} onToggle={() => togglePoolBot(tradingBot)} onTest={() => setTestBot(tradingBot)} />
+            onConfig={() => setBotModal('trading')} onToggle={() => togglePoolBot(tradingBot)} onTest={() => setTestBot(tradingBot)}
+            onDelete={() => deletePoolBotHandler(tradingBot, 'Trading')} />
         </div>
       )}
 
@@ -1761,6 +1806,8 @@ function ScanTokenIdModal({ onClose, onAdded }) {
         tokenId: result.tokenId,
         initialLiquidityUsd,
         initialLiquidityAt,
+        // C: precio de entrada = precio slot0 al registrar la posición.
+        entryPrice: (result.currentPrice != null && result.currentPrice > 0) ? result.currentPrice : undefined,
       });
       onAdded?.();
       onClose();
@@ -1933,7 +1980,7 @@ function serializePoolBotConfig(bot, overrides = {}) {
 }
 
 // Botón de acción de un pool-bot en la PoolCard: estado + configurar/reconfigurar + pausar/activar.
-function BotActionButton({ label, bot, busy, canTradeLive, onConfig, onToggle, onTest }) {
+function BotActionButton({ label, bot, busy, canTradeLive, onConfig, onToggle, onTest, onDelete }) {
   return (
     <div className="pool-bot-action" style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -1956,6 +2003,18 @@ function BotActionButton({ label, bot, busy, canTradeLive, onConfig, onToggle, o
         {bot && bot.active && !bot.simulationMode && canTradeLive && (
           <button className="mini-btn" onClick={onTest} style={{ color: 'var(--red)', borderColor: 'var(--red)' }}>
             Probar
+          </button>
+        )}
+        {/* D: eliminar el bot del pool (parada segura + borrado). Deshabilitado mientras se desarma. */}
+        {bot && (
+          <button
+            className="mini-btn"
+            onClick={onDelete}
+            disabled={busy || bot.disarmPending}
+            title={bot.disarmPending ? 'Deteniendo el bot (cancelando órdenes en HL)…' : 'Eliminar este bot del pool'}
+            style={{ color: 'var(--red)', borderColor: 'var(--red)' }}
+          >
+            {bot.disarmPending ? 'Deteniendo…' : 'Eliminar'}
           </button>
         )}
       </div>
@@ -3207,6 +3266,8 @@ function Dashboard({ user, onLogout, userId }) {
   const toggleBotMutation = useMutation(api.bots.toggleBot);
   const updateBotMutation = useMutation(api.bots.updateBot);
   const poolsFromDb = useQuery(api.pools.listPools);
+  const setPoolEntryPrice = useMutation(api.pools.setPoolEntryPriceIfMissing);
+  const entryPriceTried = React.useRef(new Set());
   const { prices, connected } = useHyperliquidPrices();
   const { funding } = useHyperliquidFunding();
   const simModeConfig = useQuery(api.systemConfig.getConfig, { key: "simulationMode" });
@@ -3353,6 +3414,27 @@ function Dashboard({ user, onLogout, userId }) {
   React.useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
+
+  // C (JAV-UI): backfill del precio de entrada para pools registrados antes de esta función.
+  // Una sola vez por pool y SESIÓN: si el pool no tiene entryPrice y hay precio en vivo, persistirlo.
+  // La mutation es idempotente (no sobreescribe) y valida ownership. (Codex #4) El pool se marca en
+  // el ref ANTES de llamar y NO se desbloquea aunque falle: cada tick de precio del WebSocket
+  // dispararía el efecto y, sin este bloqueo, repetiría la mutation en bucle. Un fallo transitorio
+  // se reintentará en la próxima recarga (el backfill es best-effort, no crítico).
+  React.useEffect(() => {
+    if (!Array.isArray(poolsFromDb)) return;
+    for (const p of poolsFromDb) {
+      if (p.entryPrice != null) continue;
+      if (entryPriceTried.current.has(p._id)) continue;
+      const asset = normalizeAsset(p.pair?.split('/')[0]);
+      const livePrice = prices[asset];
+      if (!(livePrice > 0)) continue;
+      entryPriceTried.current.add(p._id);
+      setPoolEntryPrice({ id: p._id, price: livePrice }).catch(() => {
+        // no fatal y NO se reintenta en esta sesión (evita el bucle de escrituras por tick).
+      });
+    }
+  }, [poolsFromDb, prices, setPoolEntryPrice]);
 
   function addToast(message) {
     const id = Date.now() + Math.random();
@@ -3563,7 +3645,7 @@ function Dashboard({ user, onLogout, userId }) {
 
         <section className="toolbar" aria-label="Filtros del portal">
           <div className="toolbar-group">
-            <div className="segmented">
+            <div className="segmented network-segmented">
               {NETWORKS.map((item) => (
                 <button key={item} aria-pressed={network === item} onClick={() => setNetwork(item)}>{item}</button>
               ))}

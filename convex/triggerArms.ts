@@ -149,6 +149,18 @@ export const reserveArm = internalMutation({
     }
     if (!(args.stopLossPct > 0 && args.stopLossPct < 100)) throw new Error("[blocked_config] stopLossPct inválido");
 
+    // (Codex #2) Revalidar atómicamente el ESTADO del bot, no solo que exista: una action pudo
+    // leerlo y, antes de llegar aquí, deletePoolBot pudo desactivarlo/borrarlo o cambiar su cuenta/
+    // pool. Sin esto insertaríamos un arm colgante o incoherente que el cron tendría que limpiar.
+    // El ctx.db.get registra la lectura → OCC aborta/reintenta si el bot cambió. (2ª ronda Codex #2.)
+    const bot = await ctx.db.get(args.botId);
+    if (!bot) throw new Error("[transient] El bot ya no existe (posible borrado concurrente).");
+    if (!bot.active) throw new Error("[transient] El bot no está activo.");
+    if (bot.disarmPending) throw new Error("[transient] El bot se está desarmando.");
+    if (bot.userId !== args.userId) throw new Error("[blocked_config] El bot no pertenece al usuario del armado.");
+    if (bot.poolId !== args.poolId) throw new Error("[blocked_config] El pool del armado no coincide con el del bot.");
+    if (bot.hlAccountId !== args.hlAccountId) throw new Error("[blocked_config] La cuenta HL del armado no coincide con la del bot.");
+
     // (1) Unicidad: una sola generación NO terminal por bot.
     const arms = await ctx.db
       .query("trigger_arms")

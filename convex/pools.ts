@@ -89,11 +89,14 @@ export const createPool = mutation({
     tokenId: v.optional(v.number()),
     initialLiquidityUsd: v.optional(v.number()),
     initialLiquidityAt: v.optional(v.number()),
+    entryPrice: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
     if (args.minRange < 0 || args.maxRange < 0) throw new Error("Los rangos deben ser no negativos.");
-    if (args.minRange > args.maxRange) throw new Error("minRange no puede ser mayor que maxRange.");
+    // (Codex #7) Estricto: minRange === maxRange daría anchura 0 → división por cero (NaN%) en el
+    // gráfico de rango (posición de precio y de entrada).
+    if (args.minRange >= args.maxRange) throw new Error("minRange debe ser menor que maxRange.");
     if (args.tokenId != null) {
       const existing = await ctx.db.query("pools")
         .withIndex("by_user", q => q.eq("userId", user._id))
@@ -113,7 +116,26 @@ export const createPool = mutation({
       tokenId: args.tokenId,
       initialLiquidityUsd: args.initialLiquidityUsd,
       initialLiquidityAt: args.initialLiquidityAt,
+      // C: precio de entrada = slot0 al registrar (solo si es válido). Se fija una vez.
+      entryPrice: (args.entryPrice != null && args.entryPrice > 0) ? args.entryPrice : undefined,
+      entryPriceAt: (args.entryPrice != null && args.entryPrice > 0) ? Date.now() : undefined,
     });
+  },
+});
+
+// C (JAV-UI): captura idempotente del precio de entrada para pools ya existentes (registrados antes
+// de esta función). Lo fija la primera vez que el portal tiene un precio en vivo y el pool no lo tiene.
+// Ownership obligatorio y NUNCA sobreescribe un valor ya guardado.
+export const setPoolEntryPriceIfMissing = mutation({
+  args: { id: v.id("pools"), price: v.number() },
+  handler: async (ctx, { id, price }) => {
+    const user = await requireUser(ctx);
+    if (!(price > 0)) return;
+    const pool = await ctx.db.get(id);
+    if (!pool) return;
+    if (pool.userId !== user._id && user.role !== "admin") return;
+    if (pool.entryPrice != null) return; // nunca sobreescribir
+    await ctx.db.patch(id, { entryPrice: price, entryPriceAt: Date.now() });
   },
 });
 
@@ -222,7 +244,8 @@ export const updatePool = mutation({
     const nextMin = fields.minRange ?? current.minRange;
     const nextMax = fields.maxRange ?? current.maxRange;
     if (nextMin < 0 || nextMax < 0) throw new Error("Ranges must be non-negative");
-    if (nextMin > nextMax) throw new Error("minRange cannot be greater than maxRange");
+    // (Codex #7) Estricto: anchura 0 (min===max) daría NaN% en el gráfico de rango.
+    if (nextMin >= nextMax) throw new Error("minRange must be less than maxRange");
 
     const filtered = Object.fromEntries(
       Object.entries(fields).filter(([, v]) => v !== undefined)

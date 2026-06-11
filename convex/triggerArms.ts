@@ -88,8 +88,16 @@ export const reserveArm = internalMutation({
     botId: v.id("bots"), userId: v.id("users"), hlAccountId: v.id("hl_api_credentials"),
     poolId: v.id("pools"), asset: v.string(), network: v.string(),
     triggerPx: v.number(), size: v.number(), appliedLeverage: v.number(),
-    reservedNotional: v.number(), marginReserved: v.number(), lowerEdge: v.number(),
-    stopLossPct: v.number(), availableCollateral: v.number(),
+    orderNotional: v.number(),    // nocional de UNA entrada (para el límite por orden)
+    reservedNotional: v.number(), // worst-case para daily (2× si dos entradas)
+    marginReserved: v.number(),   // worst-case para margen (2× si dos entradas)
+    lowerEdge: v.number(),
+    upperEdge: v.optional(v.number()),
+    allowReentryFromAbove: v.optional(v.boolean()),
+    stopLossPct: v.number(),
+    bufferPct: v.optional(v.number()),
+    tps: v.optional(v.array(v.object({ gainPct: v.number(), closePct: v.number() }))),
+    availableCollateral: v.number(),
   },
   handler: async (ctx, args) => {
     if (args.network !== "testnet" && args.network !== "mainnet") throw new Error("network inválida.");
@@ -101,6 +109,10 @@ export const reserveArm = internalMutation({
     // leverage/lowerEdge inválido dejaría un arm corrupto consumiendo margen hasta fallar más tarde.
     if (!(args.triggerPx > 0) || !(args.appliedLeverage > 0) || !(args.lowerEdge > 0)) {
       throw new Error("triggerPx/appliedLeverage/lowerEdge deben ser > 0");
+    }
+    // (CodeRabbit #22) Validación defensiva: el límite por orden asume orderNotional > 0.
+    if (!(args.orderNotional > 0)) {
+      throw new Error("orderNotional debe ser > 0");
     }
     if (!(args.stopLossPct > 0 && args.stopLossPct < 100)) throw new Error("stopLossPct inválido");
 
@@ -119,8 +131,9 @@ export const reserveArm = internalMutation({
     // (3) Límites compartidos con JAV-43: por orden + diario + margen por cuenta (misma OCC).
     const maxPerOrder = await getLimit(ctx, "maxNotionalPerOrder");
     const maxDaily = await getLimit(ctx, "maxNotionalPerUserDaily");
-    if (args.reservedNotional > maxPerOrder) {
-      throw new Error(`Nocional ${args.reservedNotional} supera el máximo por orden (${maxPerOrder}).`);
+    // Límite POR ORDEN sobre el nocional de UNA entrada (cada trigger es una orden de ese tamaño).
+    if (args.orderNotional > maxPerOrder) {
+      throw new Error(`Nocional ${args.orderNotional} supera el máximo por orden (${maxPerOrder}).`);
     }
     const dailyUsed = await dailyNotionalUsed(ctx, args.userId, Date.now() - DAY_MS);
     if (dailyUsed + args.reservedNotional > maxDaily) {
@@ -133,21 +146,33 @@ export const reserveArm = internalMutation({
         `${args.marginReserved.toFixed(2)} > colateral ${args.availableCollateral.toFixed(2)}.`);
     }
 
-    // (4) Insertar arm (arming) + trigger_order (pending, SIN submittedAt — se fija en el CAS).
+    // (4) Insertar arm (arming) + trigger_order(s) (pending, SIN submittedAt — se fija en el CAS).
     const now = Date.now();
-    const cloid = await armCloid(args.botId, generation, "entry_lower");
+    const cloidLower = await armCloid(args.botId, generation, "entry_lower");
+    const twoEntries = args.allowReentryFromAbove === true && args.upperEdge != null && args.upperEdge > 0;
     const armId = await ctx.db.insert("trigger_arms", {
       botId: args.botId, userId: args.userId, hlAccountId: args.hlAccountId, poolId: args.poolId,
       asset: args.asset, network: args.network, generation, status: "arming", desiredState: "armed",
       side: "Short", triggerPx: args.triggerPx, size: args.size, appliedLeverage: args.appliedLeverage,
       reservedNotional: args.reservedNotional, marginReserved: args.marginReserved, lowerEdge: args.lowerEdge,
-      stopLossPct: args.stopLossPct, createdAt: now, updatedAt: now,
+      upperEdge: twoEntries ? args.upperEdge : undefined,
+      allowReentryFromAbove: twoEntries ? true : undefined,
+      stopLossPct: args.stopLossPct, bufferPct: args.bufferPct, tps: args.tps,
+      createdAt: now, updatedAt: now,
     });
     await ctx.db.insert("trigger_orders", {
-      armId, role: "entry_lower", cloid, oid: undefined, triggerPx: args.triggerPx, size: args.size,
+      armId, role: "entry_lower", cloid: cloidLower, oid: undefined, triggerPx: args.triggerPx, size: args.size,
       reduceOnly: false, observedStatus: "pending", createdAt: now, updatedAt: now,
     });
-    return { armId, generation, cloid };
+    let cloidUpper: string | undefined;
+    if (twoEntries) {
+      cloidUpper = await armCloid(args.botId, generation, "entry_upper");
+      await ctx.db.insert("trigger_orders", {
+        armId, role: "entry_upper", cloid: cloidUpper, oid: undefined, triggerPx: args.upperEdge!, size: args.size,
+        reduceOnly: false, observedStatus: "pending", createdAt: now, updatedAt: now,
+      });
+    }
+    return { armId, generation, cloid: cloidLower, cloidUpper };
   },
 });
 
@@ -202,6 +227,76 @@ export const gateArmBeforeOrder = internalMutation({
     const pool = await ctx.db.get(arm.poolId);
     if (!pool || pool.closed) return { ok: false as const };
     await ctx.db.patch(armId, { reconcileLeaseUntil: Date.now() + ARM_RECONCILE_LEASE_MS, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
+// Reduce la reserva worst-case (2×) a 1× tras confirmar el OCO (la entrada hermana cancelada).
+// Solo baja (nunca sube). Libera colateral del margen compartido. Bajo claim.
+export const reduceArmReservation = internalMutation({
+  args: { armId: v.id("trigger_arms"), token: v.string(), reservedNotional: v.number(), marginReserved: v.number() },
+  handler: async (ctx, { armId, token, reservedNotional, marginReserved }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (isArmTerminal(arm.status)) return { ok: false as const };
+    if (arm.reservationReduced) return { ok: true as const };   // idempotente
+    const newRes = Math.min(arm.reservedNotional, reservedNotional);
+    const newMar = Math.min(arm.marginReserved, marginReserved);
+    await ctx.db.patch(armId, { reservedNotional: newRes, marginReserved: newMar, reservationReduced: true, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
+// --- TPs (role:"tp"): un trigger_order por tpIndex. Idempotencia por cloid …|tp:i:attempt. ---
+
+export const getArmTpOrder = internalQuery({
+  args: { armId: v.id("trigger_arms"), tpIndex: v.number() },
+  handler: async (ctx, { armId, tpIndex }) =>
+    ctx.db.query("trigger_orders").withIndex("by_arm_role_index", (q) => q.eq("armId", armId).eq("role", "tp").eq("tpIndex", tpIndex)).first(),
+});
+
+// Crea/rota el trigger_order de un TP concreto (bump attempt, cloid nuevo, observedStatus pending,
+// submittedAt limpio). Devuelve el cloid. Bajo claim. Persiste triggerPx/size del intento.
+export const prepareTpAttempt = internalMutation({
+  args: { armId: v.id("trigger_arms"), token: v.string(), tpIndex: v.number(), triggerPx: v.number(), size: v.number() },
+  handler: async (ctx, { armId, token, tpIndex, triggerPx, size }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (isArmTerminal(arm.status)) return { ok: false as const };
+    const existing = await ctx.db.query("trigger_orders").withIndex("by_arm_role_index", (q) => q.eq("armId", armId).eq("role", "tp").eq("tpIndex", tpIndex)).first();
+    const attempt = (existing?.attempt ?? 0) + 1;
+    const cloid = await armCloid(arm.botId, arm.generation, `tp:${tpIndex}:${attempt}`);
+    const now = Date.now();
+    if (existing) {
+      await ctx.db.patch(existing._id, { cloid, oid: undefined, observedStatus: "pending", attempt, submittedAt: undefined, triggerPx, size, updatedAt: now });
+    } else {
+      await ctx.db.insert("trigger_orders", {
+        armId, role: "tp", tpIndex, cloid, oid: undefined, triggerPx, size, reduceOnly: true,
+        attempt, observedStatus: "pending", createdAt: now, updatedAt: now,
+      });
+    }
+    return { ok: true as const, cloid };
+  },
+});
+
+// Marca/limpia campos observados de un TP (observedStatus/oid/submittedAt) bajo claim.
+export const setTpObserved = internalMutation({
+  args: {
+    armId: v.id("trigger_arms"), token: v.string(), tpIndex: v.number(),
+    observedStatus: v.union(
+      v.literal("pending"), v.literal("open"), v.literal("triggered"), v.literal("filled"),
+      v.literal("canceled"), v.literal("rejected"), v.literal("unknown")),
+    oid: v.optional(v.string()), markSubmitted: v.optional(v.boolean()),
+  },
+  handler: async (ctx, { armId, token, tpIndex, observedStatus, oid, markSubmitted }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    const order = await ctx.db.query("trigger_orders").withIndex("by_arm_role_index", (q) => q.eq("armId", armId).eq("role", "tp").eq("tpIndex", tpIndex)).first();
+    if (!order) return { ok: false as const };
+    const patch: Record<string, unknown> = { observedStatus, updatedAt: Date.now() };
+    if (oid !== undefined) patch.oid = oid;
+    if (markSubmitted) patch.submittedAt = Date.now();
+    await ctx.db.patch(order._id, patch);
     return { ok: true as const };
   },
 });
@@ -349,7 +444,7 @@ export const getArmInternal = internalQuery({
   handler: async (ctx, { armId }) => ctx.db.get(armId),
 });
 
-const ARM_ROLE = v.union(v.literal("entry_lower"), v.literal("sl_upper"));
+const ARM_ROLE = v.union(v.literal("entry_lower"), v.literal("entry_upper"), v.literal("sl_upper"));
 
 export const getArmOrderByRole = internalQuery({
   args: { armId: v.id("trigger_arms"), role: ARM_ROLE },

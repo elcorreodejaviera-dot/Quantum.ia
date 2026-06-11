@@ -290,7 +290,12 @@ export default defineSchema({
     reservedNotional: v.number(),
     marginReserved: v.number(),
     lowerEdge: v.number(),               // minRange del pool al armar
+    upperEdge: v.optional(v.number()),   // maxRange normalizado (entry_upper, si allowReentryFromAbove)
+    allowReentryFromAbove: v.optional(v.boolean()),  // 2ª entrada (borde superior) + OCO
+    reservationReduced: v.optional(v.boolean()),     // la reserva 2×→1× ya se aplicó (tras OCO confirmado)
     stopLossPct: v.number(),             // snapshot del SL del bot (para armar el SL post-fill)
+    bufferPct: v.optional(v.number()),   // snapshot del búfer (% del pool) — TPs solo sobre el búfer
+    tps: v.optional(v.array(v.object({ gainPct: v.number(), closePct: v.number() }))),  // snapshot config TPs
     // SL post-fill
     slAttempts: v.optional(v.number()),  // nº de intentos de colocar el SL (cloid …|sl|attempt)
     slSubmittedAt: v.optional(v.number()),  // SL enviado (resting/pending): grace+prueba negativa antes de rotar cloid (anti-doble-SL)
@@ -318,19 +323,22 @@ export default defineSchema({
   // Cada orden trigger nativa de un arm. CLOID = identidad primaria determinista.
   trigger_orders: defineTable({
     armId: v.id("trigger_arms"),
-    role: v.union(v.literal("entry_lower"), v.literal("sl_upper")),  // entrada inferior + SL superior
-    cloid: v.string(),                    // determinista botId|generation|role
+    role: v.union(v.literal("entry_lower"), v.literal("entry_upper"), v.literal("sl_upper"), v.literal("tp")),  // entradas (2) + SL + TPs
+    tpIndex: v.optional(v.number()),      // solo role:"tp" (0..N-1) — unicidad por (armId, "tp", tpIndex)
+    cloid: v.string(),                    // determinista botId|generation|role[:tpIndex]:attempt
     oid: v.optional(v.string()),          // de HL; OPCIONAL (waitingForTrigger/timeout sin oid)
     triggerPx: v.number(),
     size: v.number(),
-    reduceOnly: v.boolean(),              // false (abre posición)
+    reduceOnly: v.boolean(),
+    attempt: v.optional(v.number()),      // nº de intento (rota el cloid …:attempt) — TPs
     observedStatus: v.union(
       v.literal("pending"), v.literal("open"), v.literal("triggered"), v.literal("filled"),
       v.literal("canceled"), v.literal("rejected"), v.literal("unknown")),
-    submittedAt: v.optional(v.number()),
+    submittedAt: v.optional(v.number()),  // por orden: confirmar-antes-de-rotar (anti-doble) por TP/SL
     createdAt: v.number(),
     updatedAt: v.number(),
   })
-    .index("by_arm_role", ["armId", "role"])  // unicidad: un entry_lower por arm
+    .index("by_arm_role", ["armId", "role"])
+    .index("by_arm_role_index", ["armId", "role", "tpIndex"])  // lookup/unicidad por TP individual
     .index("by_cloid", ["cloid"]),
 });

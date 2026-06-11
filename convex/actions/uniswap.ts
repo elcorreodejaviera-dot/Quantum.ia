@@ -73,7 +73,8 @@ async function fetchDailyData(endpoint: string, poolAddress: string) {
 
 export const fetchUniswapSubgraphData = internalAction({
   args: {},
-  handler: async (ctx) => {
+  // Promise<any>: corta el ciclo de inferencia de tipos (TS2589) del grafo de funciones internas.
+  handler: async (ctx): Promise<any> => {
     const pools: Array<{
       _id: Id<"pools">;
       network: string;

@@ -388,7 +388,8 @@ export const fetchPositionLiquidity = action({
 // cierra en Uniswap/Revert y el portal no se entera por otra vía).
 export const checkAllPoolClosures = internalAction({
   args: {},
-  handler: async (ctx) => {
+  // Promise<any>: corta el ciclo de inferencia de tipos (TS2589) del grafo de funciones internas.
+  handler: async (ctx): Promise<any> => {
     const pools = await ctx.runQuery(internal.pools.listPoolsInternal);
     let closed = 0, reopened = 0, unavailable = 0, skipped = 0, errored = 0;
 

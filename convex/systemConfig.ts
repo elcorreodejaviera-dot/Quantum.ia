@@ -18,9 +18,11 @@ export const getExecutionLimits = query({
 export const logAdminAction = mutation({
   args: { action: v.string(), meta: v.optional(v.any()) },
   handler: async (ctx, { action, meta }) => {
-    const identity = await requireAdmin(ctx);
+    const admin = await requireAdmin(ctx);
     await ctx.db.insert("admin_logs", {
-      userId: identity.subject,
+      // requireAdmin devuelve el user doc (no un Clerk identity): `subject` no existe → userId quedaba
+      // undefined. El identificador correcto del admin es su clerkId (string). (Bug cazado por el type-check.)
+      userId: admin.clerkId,
       action,
       timestamp: Date.now(),
       meta,

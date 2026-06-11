@@ -103,9 +103,7 @@ export const armBotInternal = internalAction({
     if (!bot.hlAccountId) throw new Error("[blocked_config] Bot sin cuenta HL");
     if (!bot.poolId) throw new Error("[blocked_config] Bot sin pool");
     if (!bot.baseAsset) throw new Error("[blocked_config] Bot sin baseAsset");
-    if (bot.hedgeNotionalUsd === undefined || !Number.isFinite(bot.hedgeNotionalUsd) || bot.hedgeNotionalUsd <= 0) {
-      throw new Error("[blocked_config] Bot sin hedgeNotionalUsd válido (> 0)");
-    }
+    // (G3) hedgeNotionalUsd YA NO viene del cliente: se DERIVA on-chain abajo, tras leer markPx.
     if (bot.stopLossPct === undefined || !Number.isFinite(bot.stopLossPct) || bot.stopLossPct <= 0 || bot.stopLossPct >= 100) {
       throw new Error("[blocked_config] Bot sin stopLossPct válido (0–100) — necesario para el SL post-fill");
     }
@@ -114,6 +112,7 @@ export const armBotInternal = internalAction({
     if (!pool) throw new Error("[cancel] Pool no encontrado");
     if (pool.closed) throw new Error("[cancel] Pool cerrado");
     if (!Number.isFinite(pool.minRange) || pool.minRange <= 0) throw new Error("[blocked_config] minRange inválido");
+    if (pool.tokenId === undefined || pool.tokenId === null) throw new Error("[blocked_config] Pool sin tokenId (no se puede leer el LP para dimensionar)");
 
     const credential = await ctx.runQuery(internal.hlCredentials.getAccountByIdInternal, { id: bot.hlAccountId });
     if (!credential) throw new Error("[blocked_config] Cuenta HL no encontrada");
@@ -174,7 +173,26 @@ export const armBotInternal = internalAction({
       const sumClose = tps.reduce((s, t) => s + t.closePct, 0);
       if (sumClose > 100) throw new Error("[blocked_config] Σ closePct de los TPs no puede superar 100 (% del búfer).");
     }
-    const totalNotional = bot.hedgeNotionalUsd * (1 + bufferPct / 100);
+    // (G3) Tamaño AUTORITATIVO: el backend lee el nocional REAL del LP on-chain (NO el cliente).
+    // Helper estricto (fail-closed): metadata fiable con fallback entre RPCs; null ante cualquier
+    // duda. Precio = markPx de HL (pares */USDC). hedgeNotionalUsd = liquidez del LP EN CRUDO; el
+    // buffer se aplica UNA vez abajo en totalNotional.
+    const notionalRead = await ctx.runAction(internal.actions.poolScanner.fetchPositionNotionalStrict, {
+      tokenId: pool.tokenId, network: pool.network, priceUsd: markPx, poolAddress: pool.poolAddress ?? undefined,
+    });
+    // (CodeRabbit #4) Distinguir fallo TRANSITORIO (reintentar) de DETERMINISTA (bloquear, no reintentar
+    // para siempre): un LP vacío o un par no soportado NO se resuelven reintentando.
+    if (notionalRead.reason === "transient") {
+      throw new Error("[retry_incompatible] Lectura on-chain del nocional del LP no disponible (RPC): reintento.");
+    }
+    if (notionalRead.reason === "empty") {
+      throw new Error("[blocked_config] El LP no tiene liquidez: nada que cubrir (fondea la posición LP).");
+    }
+    if (notionalRead.reason !== "ok" || !Number.isFinite(notionalRead.liquidityUsd) || notionalRead.liquidityUsd <= 0) {
+      throw new Error("[blocked_config] No se puede dimensionar la cobertura de este LP (par/metadata no soportados).");
+    }
+    const hedgeNotionalUsd = notionalRead.liquidityUsd;
+    const totalNotional = hedgeNotionalUsd * (1 + bufferPct / 100);
     const notionalCapPx = ceilHlPrice(triggerPxNorm * (1 + ENTRY_TRIGGER_SLIPPAGE), szDecimals);
     const size = floorToDecimals(totalNotional / notionalCapPx, szDecimals);
     if (size <= 0) throw new Error("[blocked_config] Size redondea a cero");

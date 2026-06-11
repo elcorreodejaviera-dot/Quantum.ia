@@ -280,6 +280,11 @@ export default defineSchema({
     entryPrice: v.optional(v.number()),
     error: v.optional(v.string()),
     historyRecorded: v.optional(v.boolean()),
+    // (G5) cuándo se OBSERVÓ por primera vez la posición flat (szi==0) con el SL ya no resting.
+    // Se confirma el cierre solo si sigue flat tras un grace (lecturas separadas en el tiempo entre
+    // ciclos del cron) → defensa contra un lag consistente de clearinghouseState. Se limpia si la
+    // posición vuelve a verse viva.
+    flatSince: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })

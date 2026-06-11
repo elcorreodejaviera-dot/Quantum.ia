@@ -193,10 +193,10 @@ function PoolCard({ pool, canManage, canTradeLive }) {
   const allBots = useQuery(api.bots.listBots);
   const savePoolBot = useMutation(api.bots.getOrCreatePoolBot);
   const deletePoolBotMutation = useMutation(api.bots.deletePoolBot);
+  const closeBotPositionAction = useAction(api.hyperliquid.closeBotPosition);
   const ilBot = (allBots ?? []).find((b) => b.poolId === pool.id && b.kind === 'il') ?? null;
   const tradingBot = (allBots ?? []).find((b) => b.poolId === pool.id && b.kind === 'trading') ?? null;
   const [botModal, setBotModal] = React.useState(null);   // 'il' | 'trading' | null
-  const [testBot, setTestBot] = React.useState(null);     // bot a probar (ejecución real)
   const [botBusy, setBotBusy] = React.useState(false);
 
   async function togglePoolBot(bot) {
@@ -211,18 +211,27 @@ function PoolCard({ pool, canManage, canTradeLive }) {
     }
   }
 
-  // D: elimina el bot del pool deteniéndolo de forma segura. Si tiene cobertura activa, el backend
-  // pide el desarmado (cron cancela en HL) y devuelve stopping → se avisa al usuario para reintentar.
+  // Elimina el bot deteniéndolo de forma segura. Si está bloqueado por una posición/ejecución viva
+  // en HL, ofrece CERRARLA desde el portal (G4: cancela SL + cierra a mercado reduceOnly) y reintenta
+  // el borrado — el usuario nunca queda atascado sin poder quitar el bot.
   async function deletePoolBotHandler(bot, label) {
     if (!bot || botBusy) return;
-    if (!window.confirm(`¿Eliminar el bot "${label}" de este pool?\nSe detendrá de forma segura: el borrado esperará hasta que no existan órdenes ni posiciones abiertas en Hyperliquid.`)) return;
+    if (!window.confirm(`¿Eliminar el bot "${label}" de este pool?\nSe detendrá de forma segura antes de borrarlo.`)) return;
     setBotBusy(true);
     try {
-      const r = await deletePoolBotMutation({ botId: bot._id });
+      let r = await deletePoolBotMutation({ botId: bot._id });
       if (r?.blockedByExecution) {
-        window.alert('El bot tiene una ejecución abierta en Hyperliquid (posición con SL activo). NO se puede cancelar a mano: hay que esperar a que su Stop Loss la cierre. Cuando la ejecución termine, vuelve a pulsar "Eliminar".');
-      } else if (r?.stopping) {
-        window.alert('El bot tiene cobertura automática activa: se está deteniendo y cancelando sus órdenes en Hyperliquid. Vuelve a pulsar "Eliminar" en unos segundos para borrarlo del todo.');
+        const doClose = window.confirm('Este bot tiene una POSICIÓN ABIERTA en Hyperliquid (con su Stop Loss).\n\n¿Cerrarla ahora desde el portal (cierre a mercado reduceOnly + cancelar SL) y eliminar el bot?\n\nEs capital real: se cerrará la posición.');
+        if (!doClose) return;
+        const res = await closeBotPositionAction({ botId: bot._id });
+        if (res?.sziAfter !== 0 || res?.ordersRemaining !== 0) {
+          window.alert('No se pudo dejar la posición y sus órdenes (SL) totalmente cerradas en Hyperliquid. El bot se mantiene intacto y protegido. Revisa en Hyperliquid y reintenta en unos segundos.');
+          return;
+        }
+        r = await deletePoolBotMutation({ botId: bot._id });
+      }
+      if (r?.stopping && !r?.deleted) {
+        window.alert('El bot se está deteniendo (cancelando su cobertura automática). Vuelve a pulsar "Eliminar" en unos segundos.');
       }
     } catch (e) {
       window.alert(e?.message ?? 'No se pudo eliminar el bot.');
@@ -392,6 +401,9 @@ function PoolCard({ pool, canManage, canTradeLive }) {
             ? <><span>Posición LP</span><strong className="positive">{formatUsdCompact(pool.liquidity)}</strong></>
             : <span className="range-chart-no-pos">Posición LP no disponible</span>
           }
+          {pool.feesUncollectedUsd != null && (
+            <><span title="Comisiones de TU posición pendientes de cobrar (en vivo desde Uniswap). Distinto de 'Fees 24h' (del pool entero)." style={{ cursor: 'help' }}>Fees</span><strong className="positive">{formatUsdCompact(pool.feesUncollectedUsd)}</strong></>
+          )}
           {hasPrice && (
             <span className="range-chart-pct">
               {Math.round(pos)}% del rango
@@ -405,11 +417,6 @@ function PoolCard({ pool, canManage, canTradeLive }) {
         <Metric label="Vol. 24h" value={pool.volume1d != null ? formatUsdCompact(pool.volume1d) : '—'} />
         <Metric label="Vol. 7d" value={pool.volume7d != null ? formatUsdCompact(pool.volume7d) : '—'} />
         <Metric label="Fees 24h" value={formatUsdCompact(pool.fees24h)} />
-        <Metric
-          label="Fees sin cobrar"
-          value={pool.feesUncollectedUsd == null ? '—' : formatUsdCompact(pool.feesUncollectedUsd)}
-          title="Comisiones ganadas por TU posición pendientes de cobrar (en vivo desde Uniswap). Distinto de 'Fees 24h', que es del pool entero."
-        />
         <Metric label={apyLabel} value={`${parts.annual.toFixed(1)}%`} />
         <Metric label="Funding" value={pool.funding != null ? `${(pool.funding * 100).toFixed(4)}%` : '—'} />
       </div>
@@ -466,11 +473,11 @@ function PoolCard({ pool, canManage, canTradeLive }) {
 
       {canManage && (
         <div className="pool-bot-actions" style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-          <BotActionButton label="Proteger" bot={ilBot} busy={botBusy} canTradeLive={canTradeLive}
-            onConfig={() => setBotModal('il')} onToggle={() => togglePoolBot(ilBot)} onTest={() => setTestBot(ilBot)}
+          <BotActionButton label="Proteger" bot={ilBot} busy={botBusy}
+            onConfig={() => setBotModal('il')} onToggle={() => togglePoolBot(ilBot)}
             onDelete={() => deletePoolBotHandler(ilBot, 'Proteger')} />
-          <BotActionButton label="Trading" bot={tradingBot} busy={botBusy} canTradeLive={canTradeLive}
-            onConfig={() => setBotModal('trading')} onToggle={() => togglePoolBot(tradingBot)} onTest={() => setTestBot(tradingBot)}
+          <BotActionButton label="Trading" bot={tradingBot} busy={botBusy}
+            onConfig={() => setBotModal('trading')} onToggle={() => togglePoolBot(tradingBot)}
             onDelete={() => deletePoolBotHandler(tradingBot, 'Trading')} />
         </div>
       )}
@@ -478,7 +485,6 @@ function PoolCard({ pool, canManage, canTradeLive }) {
     </article>
     {botModal === 'il' && <ProtectionBotModal pool={pool} bot={ilBot} canTradeLive={canTradeLive} onClose={() => setBotModal(null)} />}
     {botModal === 'trading' && <TradingBotModal pool={pool} bot={tradingBot} canTradeLive={canTradeLive} onClose={() => setBotModal(null)} />}
-    {testBot && <TestExecModal bot={testBot} onClose={() => setTestBot(null)} />}
     </>
   );
 }
@@ -1985,7 +1991,7 @@ function serializePoolBotConfig(bot, overrides = {}) {
 }
 
 // Botón de acción de un pool-bot en la PoolCard: estado + configurar/reconfigurar + pausar/activar.
-function BotActionButton({ label, bot, busy, canTradeLive, onConfig, onToggle, onTest, onDelete }) {
+function BotActionButton({ label, bot, busy, onConfig, onToggle, onDelete }) {
   return (
     <div className="pool-bot-action" style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -2003,11 +2009,6 @@ function BotActionButton({ label, bot, busy, canTradeLive, onConfig, onToggle, o
         {bot && (
           <button className="mini-btn" onClick={onToggle} disabled={busy}>
             {bot.active ? 'Pausar' : 'Activar'}
-          </button>
-        )}
-        {bot && bot.active && !bot.simulationMode && canTradeLive && (
-          <button className="mini-btn" onClick={onTest} style={{ color: 'var(--red)', borderColor: 'var(--red)' }}>
-            Probar
           </button>
         )}
         {/* D: eliminar el bot del pool (parada segura + borrado). Deshabilitado mientras se desarma. */}
@@ -2420,68 +2421,6 @@ function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
   );
 }
 
-// Disparador de prueba (admin) de ejecución real — JAV-37. Nocional pequeño, idempotency key.
-function TestExecModal({ bot, onClose }) {
-  const exec = useAction(api.hyperliquid.executePerpMarketOrder);
-  const network = import.meta.env.VITE_HL_NETWORK;   // obligatoria: sin fallback a mainnet
-  const fixedSide = bot.direction === 'short' ? 'Short' : bot.direction === 'long' ? 'Long' : null;
-  const [side, setSide] = React.useState(fixedSide ?? 'Long');
-  const [amount, setAmount] = React.useState(10);
-  const [busy, setBusy] = React.useState(false);
-  const [result, setResult] = React.useState(null);
-  const [error, setError] = React.useState('');
-
-  async function run() {
-    if (!network) { setError('VITE_HL_NETWORK no configurada — ejecución deshabilitada.'); return; }
-    setError(''); setResult(null); setBusy(true);
-    try {
-      const r = await exec({
-        botId: bot._id, side, tradeAmount: Number(amount),
-        idempotencyKey: crypto.randomUUID(),
-        expectedNetwork: network,
-        confirmLive: true,
-      });
-      setResult(r);
-    } catch (e) {
-      setError(e?.message ?? 'Error ejecutando la orden.');
-    } finally { setBusy(false); }
-  }
-
-  return (
-    <div className="modal-overlay" onClick={busy ? undefined : onClose}>
-      <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
-        <div className="section-head">
-          <h2>Probar ejecución</h2>
-          <span className={`pill ${network ? 'red' : 'amber'}`}>{network ?? 'sin red'}</span>
-        </div>
-        {!network && <p style={{ color: 'var(--red)', fontSize: 12 }}>VITE_HL_NETWORK no configurada — ejecución deshabilitada.</p>}
-        <p className="network" style={{ fontSize: 12 }}>
-          {bot.baseAsset} · {bot.name}. Orden real con precio del servidor y SL automático. Usa nocional pequeño.
-        </p>
-        {!fixedSide && (
-          <label className="config-field" style={{ marginTop: 8 }}>
-            <span>Lado</span>
-            <select value={side} onChange={(e) => setSide(e.target.value)}>
-              <option>Long</option><option>Short</option>
-            </select>
-          </label>
-        )}
-        <label className="config-field" style={{ marginTop: 8 }}>
-          <span>Nocional (USDC)</span>
-          <input type="number" min="1" step="1" value={amount} onChange={(e) => setAmount(e.target.value)} />
-        </label>
-        {error && <p style={{ color: 'var(--red)', fontSize: 12 }}>{error}</p>}
-        {result && <p style={{ color: 'var(--green)', fontSize: 12 }}>Estado: {result.status ?? (result.deduped ? 'deduped' : 'ok')}</p>}
-        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-          <button className="ghost-btn" onClick={onClose} disabled={busy} style={{ flex: 1 }}>Cerrar</button>
-          <button className="primary-btn" onClick={run} disabled={busy || !network || !(Number(amount) > 0)} style={{ flex: 1 }}>
-            {busy ? 'Ejecutando…' : 'Ejecutar orden real'}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // Fila de una cuenta HL conectada (balance + revocar).
 function HLAccountRow({ account, onRevoke }) {

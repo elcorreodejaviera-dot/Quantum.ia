@@ -655,7 +655,8 @@ button {
 .range-chart-footer {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 4px 8px;
   padding-top: 6px;
   border-top: 1px solid var(--line);
   font-size: 12px;

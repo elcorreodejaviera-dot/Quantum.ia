@@ -373,6 +373,44 @@ export const settleExecution = internalMutation({
   handler: async (ctx, args) => { await applyTransition(ctx, args); },
 });
 
+// (G5) Marca/limpia flatSince bajo fencing (token del claim de reconciliación). value=null limpia.
+export const setExecutionFlatSince = internalMutation({
+  args: { requestId: v.id("execution_requests"), token: v.string(), value: v.union(v.number(), v.null()) },
+  handler: async (ctx, { requestId, token, value }) => {
+    const req = await ctx.db.get(requestId);
+    if (!req) return { ok: false as const };
+    if (req.reconcileLeaseToken !== token || (req.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    await ctx.db.patch(requestId, { flatSince: value === null ? undefined : value, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
+// (G4) Cierre en DB de TODAS las ejecuciones JAV-37 abiertas de un bot, tras confirmar la posición
+// flat en HL (lo llama closeBotPosition). Sin token: aplica la transición a `closed` (libera margen +
+// registra historial) saltando el fencing — operación deliberada del DUEÑO al cerrar+borrar el bot.
+export const closeOpenExecutionsForBotInternal = internalMutation({
+  args: { botId: v.id("bots") },
+  handler: async (ctx, { botId }) => {
+    const rows = await ctx.db.query("execution_requests").withIndex("by_bot", (q) => q.eq("botId", botId)).collect();
+    let closed = 0, failed = 0;
+    for (const r of rows) {
+      if (["closed", "failed"].includes(r.status)) continue;
+      // (CodeRabbit #2) Solo es un CIERRE real si hubo posición (filledSize>0). Una ejecución sin
+      // fill (pending/submitting/unknown sin datos) nunca abrió posición → terminarla como `failed`,
+      // no como `closed` (que falsearía un cierre y ensuciaría el historial). Ambos son terminales →
+      // ninguno bloquea el borrado del bot.
+      if ((r.filledSize ?? 0) > 0) {
+        await applyTransition(ctx, { requestId: r._id, status: "closed", filledSize: r.filledSize, entryPrice: r.entryPrice });
+        closed++;
+      } else {
+        await applyTransition(ctx, { requestId: r._id, status: "failed", error: "sin fill al cerrar el bot" });
+        failed++;
+      }
+    }
+    return { closed, failed };
+  },
+});
+
 /**
  * Marca `slSubmittedAt` SIN cambiar de estado (caso waitingForTrigger/waitingForFill/timeout: SL
  * aceptado o incierto pero aún sin oid). Deja el estado en `entry_filled` para que el cron lo

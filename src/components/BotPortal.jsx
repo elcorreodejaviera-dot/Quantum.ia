@@ -405,6 +405,11 @@ function PoolCard({ pool, canManage, canTradeLive }) {
         <Metric label="Vol. 24h" value={pool.volume1d != null ? formatUsdCompact(pool.volume1d) : '—'} />
         <Metric label="Vol. 7d" value={pool.volume7d != null ? formatUsdCompact(pool.volume7d) : '—'} />
         <Metric label="Fees 24h" value={formatUsdCompact(pool.fees24h)} />
+        <Metric
+          label="Fees sin cobrar"
+          value={pool.feesUncollectedUsd == null ? '—' : formatUsdCompact(pool.feesUncollectedUsd)}
+          title="Comisiones ganadas por TU posición pendientes de cobrar (en vivo desde Uniswap). Distinto de 'Fees 24h', que es del pool entero."
+        />
         <Metric label={apyLabel} value={`${parts.annual.toFixed(1)}%`} />
         <Metric label="Funding" value={pool.funding != null ? `${(pool.funding * 100).toFixed(4)}%` : '—'} />
       </div>
@@ -478,9 +483,9 @@ function PoolCard({ pool, canManage, canTradeLive }) {
   );
 }
 
-function Metric({ label, value }) {
+function Metric({ label, value, title }) {
   return (
-    <div className="metric">
+    <div className="metric" title={title} style={title ? { cursor: 'help' } : undefined}>
       <span className="label">{label}</span>
       <strong>{value}</strong>
     </div>
@@ -3387,6 +3392,7 @@ function Dashboard({ user, onLogout, userId }) {
           liquidity: pd.liquidityUsd,
           liquidityReal: true,          // lectura on-chain real (vs mock estimado)
           exposure: pd.exposure,
+          feesUncollectedUsd: pd.feesUncollectedUsd ?? null,   // F1: fees sin cobrar (null = sin dato)
           ...(pd.borrowHealth > 0 ? {
             borrowHealth: pd.borrowHealth,
             leverageRevert: pd.leverageRevert ?? 0,

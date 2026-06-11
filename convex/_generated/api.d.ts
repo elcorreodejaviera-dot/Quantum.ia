@@ -30,6 +30,7 @@ import type * as systemConfig from "../systemConfig.js";
 import type * as tradesHistory from "../tradesHistory.js";
 import type * as triggerArms from "../triggerArms.js";
 import type * as triggerEngine from "../triggerEngine.js";
+import type * as triggerRearm from "../triggerRearm.js";
 import type * as users from "../users.js";
 import type * as wallets from "../wallets.js";
 
@@ -62,6 +63,7 @@ declare const fullApi: ApiFromModules<{
   tradesHistory: typeof tradesHistory;
   triggerArms: typeof triggerArms;
   triggerEngine: typeof triggerEngine;
+  triggerRearm: typeof triggerRearm;
   users: typeof users;
   wallets: typeof wallets;
 }>;

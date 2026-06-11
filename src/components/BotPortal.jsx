@@ -1959,6 +1959,21 @@ function BotActionButton({ label, bot, busy, canTradeLive, onConfig, onToggle, o
           </button>
         )}
       </div>
+      {/* JAV-44 (Codex #5/#6): estado del auto-rearm — estado, error, TIPO de error, intentos y próximo
+          intento, tanto en pending como en blocked. Se limpia el prefijo [kind] del mensaje crudo. */}
+      {bot && bot.rearmStatus && (() => {
+        const errMsg = bot.lastRearmError ? String(bot.lastRearmError).replace(/^\[[a-z_]+\]\s*/, '') : '';
+        const kind = bot.lastRearmErrorKind ? ` (${bot.lastRearmErrorKind})` : '';
+        const blocked = bot.rearmStatus === 'blocked';
+        return (
+          <div style={{ fontSize: 10, lineHeight: 1.35, color: blocked ? 'var(--red,#f44)' : 'var(--muted,#999)' }}>
+            {blocked ? '⚠️ Re-armado bloqueado' : '↻ Re-armando cobertura'}
+            {bot.rearmAttempts ? ` · intento ${bot.rearmAttempts}` : ''}
+            {bot.nextRearmAt ? ` · próx. ${new Date(bot.nextRearmAt).toLocaleTimeString()}` : ''}
+            {errMsg ? ` · ${blocked ? '' : 'último error'}${kind}: ${errMsg}` : ''}
+          </div>
+        );
+      })()}
     </div>
   );
 }

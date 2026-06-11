@@ -103,6 +103,22 @@ export default defineSchema({
     // JAV-44: pausa segura — bloquea nuevos arms mientras se cancela un trigger vivo, manteniendo
     // active=true hasta confirmar la cancelación en HL (requestDisarmAndDeactivate).
     disarmPending: v.optional(v.boolean()),
+    // JAV-44 auto-rearm durable (Codex GO): estado persistente del re-armado tras un cierre por SL.
+    // El cron lo reclama con lease, revalida gates y reabre la cobertura. "Nunca desprotegido" =
+    // ningún fallo TÉCNICO abandona el rearm (reintento indefinido cada 5 min); pausa/kill/pool cerrado
+    // sí lo cancelan; margen/config/incompatible → blocked/pending reevaluable con alerta.
+    rearmStatus: v.optional(v.union(v.literal("pending"), v.literal("running"), v.literal("blocked"))),
+    nextRearmAt: v.optional(v.number()),          // no rearmar antes de este instante (cooldown 5 min / backoff)
+    rearmAttempts: v.optional(v.number()),
+    lastRearmError: v.optional(v.string()),
+    lastRearmErrorKind: v.optional(v.union(
+      v.literal("transient"), v.literal("blocked_margin"),
+      v.literal("blocked_config"), v.literal("retry_incompatible"))),
+    rearmLeaseToken: v.optional(v.string()),
+    rearmLeaseUntil: v.optional(v.number()),
+    consecutiveStops: v.optional(v.number()),     // SL consecutivos → alerta de whipsaw a los 5
+    stopAlertSentAt: v.optional(v.number()),      // último envío de alerta de stops
+    lastStopAlertLevel: v.optional(v.number()),   // nivel de stops ya alertado (solo se sube tras Resend OK)
     // Órdenes trigger/límit colocadas en HL (Fase 3). oids para modificar/cancelar.
     // Opcional/vacío hasta que la colocación real exista (bloqueado por JAV-37).
     liveOrders: v.optional(v.object({
@@ -117,7 +133,9 @@ export default defineSchema({
     // Unicidad/atomicidad: máx 1 bot por (usuario, pool, tipo) — getOrCreatePoolBot.
     .index("by_user_pool_kind", ["userId", "poolId", "kind"])
     // Exclusividad: una cuenta HL solo puede estar asignada a un bot (1 cuenta = 1 bot).
-    .index("by_user_account", ["userId", "hlAccountId"]),
+    .index("by_user_account", ["userId", "hlAccountId"])
+    // JAV-44 auto-rearm: el cron busca bots con re-armado pendiente/blocked listos (nextRearmAt).
+    .index("by_rearm_status", ["rearmStatus", "nextRearmAt"]),
 
   wallets: defineTable({
     label: v.string(),
@@ -293,6 +311,10 @@ export default defineSchema({
     upperEdge: v.optional(v.number()),   // maxRange normalizado (entry_upper, si allowReentryFromAbove)
     allowReentryFromAbove: v.optional(v.boolean()),  // 2ª entrada (borde superior) + OCO
     reservationReduced: v.optional(v.boolean()),     // la reserva 2×→1× ya se aplicó (tras OCO confirmado)
+    // (Codex #1 auto-rearm) Este arm nació de un auto-rearm: si termina `failed` SIN entrada viva/fill
+    // (prueba negativa confirmada), settleArm/recoverAbandonedArming REPROGRAMA otro rearm atómicamente
+    // (el consumo transfirió la responsabilidad al arm; al fallar sin cobertura, devuelve el trabajo).
+    fromRearm: v.optional(v.boolean()),
     stopLossPct: v.number(),             // snapshot del SL del bot (para armar el SL post-fill)
     bufferPct: v.optional(v.number()),   // snapshot del búfer (% del pool) — TPs solo sobre el búfer
     tps: v.optional(v.array(v.object({ gainPct: v.number(), closePct: v.number() }))),  // snapshot config TPs
@@ -308,6 +330,10 @@ export default defineSchema({
     // ciclo de vida / fencing
     submittedAt: v.optional(v.number()), // se fija SOLO en el CAS markArmSubmitting (cuarentena N5/N6)
     error: v.optional(v.string()),
+    // auto-rearm (JAV-44): MOTIVO del cierre (Codex #1). El re-arm SOLO dispara con closeReason="sl".
+    // emergencyClosing se fija ANTES del market close para distinguir emergency/disarm de un SL/cierre externo.
+    closeReason: v.optional(v.union(v.literal("sl"), v.literal("manual"), v.literal("emergency"), v.literal("disarm"))),
+    emergencyClosing: v.optional(v.union(v.literal("emergency"), v.literal("disarm"))),
     reconcileLeaseUntil: v.optional(v.number()),
     reconcileLeaseToken: v.optional(v.string()),
     createdAt: v.number(),

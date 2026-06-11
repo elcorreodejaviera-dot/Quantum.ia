@@ -5,6 +5,27 @@ import type { Id } from "./_generated/dataModel";
 import { getLimit } from "./executionLimits";
 import { committedMarginForAccount, dailyNotionalUsed, assertLiveAdmissible } from "./executions";
 import { hlNetwork } from "./hlNetwork";
+import { REARM_COOLDOWN_MS } from "./triggerRearm";
+
+// (Codex #1) Reprograma un auto-rearm en el BOT atómicamente (dentro de la mutation que lo invoca).
+// Solo si la config sigue siendo válida: activo, autoRearm, sin pausa, pool abierto y SIN otro rearm en
+// curso. No pisa un rearm existente. Devuelve si reprogramó. Pensado para cuando un arm `fromRearm`
+// termina `failed` sin cobertura → el trabajo durable vuelve, nunca queda el bot activo sin nada.
+async function rescheduleRearmIfEligible(ctx: MutationCtx, botId: Id<"bots">): Promise<boolean> {
+  const bot = await ctx.db.get(botId);
+  if (!bot) return false;
+  if (bot.active !== true || bot.autoRearm !== true || bot.disarmPending === true) return false;
+  if (bot.rearmStatus != null) return false;   // ya hay un rearm en curso → no duplicar
+  if (!bot.poolId) return false;               // (Codex) exigir pool: sin pool no hay cobertura que rearmar
+  const pool = await ctx.db.get(bot.poolId);
+  if (!pool || pool.closed) return false;
+  await ctx.db.patch(botId, {
+    rearmStatus: "pending", nextRearmAt: Date.now() + REARM_COOLDOWN_MS, rearmAttempts: 0,
+    lastRearmError: undefined, lastRearmErrorKind: undefined,
+    rearmLeaseToken: undefined, rearmLeaseUntil: undefined,
+  });
+  return true;
+}
 
 // --- JAV-44 Etapa 1: máquina de estados del trigger_arm (lease/fencing como reconcileExecution) ---
 
@@ -60,16 +81,22 @@ export async function hasNonTerminalArmForAccount(ctx: MutationCtx, hlAccountId:
 export async function requestDisarmAndDeactivateImpl(ctx: MutationCtx, botId: Id<"bots">): Promise<{ deactivated: boolean }> {
   const bot = await ctx.db.get(botId);
   if (!bot) return { deactivated: false };
+  // (Codex #4) La pausa CANCELA cualquier auto-rearm pendiente/blocked en la MISMA mutation: limpiar
+  // estado, lease y próximo intento (si no, el rearm quedaría visible hasta el siguiente ciclo del cron).
+  const clearRearm = {
+    rearmStatus: undefined, nextRearmAt: undefined,
+    rearmLeaseToken: undefined, rearmLeaseUntil: undefined,
+  } as const;
   const arms = await ctx.db.query("trigger_arms").withIndex("by_bot_generation", (q) => q.eq("botId", botId)).collect();
   const live = arms.filter((a) => !isArmTerminal(a.status));
   if (live.length === 0) {
-    await ctx.db.patch(botId, { active: false, disarmPending: false });
+    await ctx.db.patch(botId, { active: false, disarmPending: false, ...clearRearm });
     return { deactivated: true };
   }
   for (const a of live) {
     if (a.desiredState !== "disarmed") await ctx.db.patch(a._id, { desiredState: "disarmed", updatedAt: Date.now() });
   }
-  await ctx.db.patch(botId, { disarmPending: true });
+  await ctx.db.patch(botId, { disarmPending: true, ...clearRearm });
   return { deactivated: false };
 }
 
@@ -98,19 +125,25 @@ export const reserveArm = internalMutation({
     bufferPct: v.optional(v.number()),
     tps: v.optional(v.array(v.object({ gainPct: v.number(), closePct: v.number() }))),
     availableCollateral: v.number(),
+    // (Codex #2) Auto-rearm: si viene, la inserción de la generación CONSUME el trabajo de rearm
+    // atómicamente (valida token+lease+running y limpia rearmStatus en la misma transacción). Opcional:
+    // el armado MANUAL no lo pasa.
+    rearmToken: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    if (args.network !== "testnet" && args.network !== "mainnet") throw new Error("network inválida.");
+    // throws con prefijo [kind] (auto-rearm): el cron los mapea a la política de Codex. Config inválida
+    // → [blocked_config]; falta de margen/volumen → [blocked_margin]; colisión de generación → [transient].
+    if (args.network !== "testnet" && args.network !== "mainnet") throw new Error("[blocked_config] network inválida.");
     if (!(args.reservedNotional > 0) || !(args.marginReserved > 0) || !(args.size > 0)) {
-      throw new Error("reservedNotional/marginReserved/size deben ser > 0");
+      throw new Error("[blocked_config] reservedNotional/marginReserved/size deben ser > 0");
     }
-    if (!(args.availableCollateral >= 0)) throw new Error("availableCollateral inválido");
+    if (!(args.availableCollateral >= 0)) throw new Error("[blocked_config] availableCollateral inválido");
     // (CodeRabbit) Validar el snapshot inmutable en la frontera de persistencia: un triggerPx/
     // leverage/lowerEdge inválido dejaría un arm corrupto consumiendo margen hasta fallar más tarde.
     if (!(args.triggerPx > 0) || !(args.appliedLeverage > 0) || !(args.lowerEdge > 0)) {
-      throw new Error("triggerPx/appliedLeverage/lowerEdge deben ser > 0");
+      throw new Error("[blocked_config] triggerPx/appliedLeverage/lowerEdge deben ser > 0");
     }
-    if (!(args.stopLossPct > 0 && args.stopLossPct < 100)) throw new Error("stopLossPct inválido");
+    if (!(args.stopLossPct > 0 && args.stopLossPct < 100)) throw new Error("[blocked_config] stopLossPct inválido");
 
     // (1) Unicidad: una sola generación NO terminal por bot.
     const arms = await ctx.db
@@ -119,7 +152,7 @@ export const reserveArm = internalMutation({
       .collect();
     const liveArm = arms.find((a) => !isArmTerminal(a.status));
     if (liveArm) {
-      throw new Error("Ya existe un armado activo para este bot (una generación no terminal).");
+      throw new Error("[transient] Ya existe un armado activo para este bot (una generación no terminal).");
     }
     // (2) generation = max+1 (backend).
     const generation = arms.reduce((m, a) => Math.max(m, a.generation), 0) + 1;
@@ -129,18 +162,33 @@ export const reserveArm = internalMutation({
     const maxDaily = await getLimit(ctx, "maxNotionalPerUserDaily");
     // Límite POR ORDEN sobre el nocional de UNA entrada (cada trigger es una orden de ese tamaño).
     if (args.orderNotional > maxPerOrder) {
-      throw new Error(`Nocional ${args.orderNotional} supera el máximo por orden (${maxPerOrder}).`);
+      throw new Error(`[blocked_config] Nocional ${args.orderNotional} supera el máximo por orden (${maxPerOrder}).`);
     }
     const dailyUsed = await dailyNotionalUsed(ctx, args.userId, Date.now() - DAY_MS);
     if (dailyUsed + args.reservedNotional > maxDaily) {
-      throw new Error(`Volumen diario excedido: ${dailyUsed} + ${args.reservedNotional} > ${maxDaily}.`);
+      throw new Error(`[blocked_margin] Volumen diario excedido: ${dailyUsed} + ${args.reservedNotional} > ${maxDaily}.`);
     }
     const marginCommitted = await committedMarginForAccount(ctx, args.hlAccountId);
     if ((marginCommitted + args.marginReserved) > args.availableCollateral * (1 - MARGIN_SAFETY_BUFFER)) {
       throw new Error(
-        `Margen insuficiente: comprometido ${marginCommitted.toFixed(2)} + requerido ` +
+        `[blocked_margin] Margen insuficiente: comprometido ${marginCommitted.toFixed(2)} + requerido ` +
         `${args.marginReserved.toFixed(2)} > colateral ${args.availableCollateral.toFixed(2)}.`);
     }
+
+    // Leer el bot ANTES de consumir su estado de rearm. (Codex #2) Re-armado: validar el lease (token +
+    // vigente + running). (Codex crítico) `inheritsRearm` = viene de un auto-rearm O reemplaza un rearm
+    // pendiente (armado MANUAL durante el cooldown): en ambos casos el arm hereda la responsabilidad de
+    // rearm (fromRearm=true) → si falla antes del envío, devuelve el trabajo durable. Se decide AQUÍ,
+    // antes de limpiar rearmStatus.
+    const botPre = await ctx.db.get(args.botId);
+    if (args.rearmToken !== undefined) {
+      if (!botPre || botPre.rearmStatus !== "running"
+        || botPre.rearmLeaseToken !== args.rearmToken
+        || (botPre.rearmLeaseUntil ?? 0) <= Date.now()) {
+        throw new Error("[transient] Lease de rearm inválido/expirado al reservar (reintentar).");
+      }
+    }
+    const inheritsRearm = args.rearmToken !== undefined || (botPre?.rearmStatus != null);
 
     // (4) Insertar arm (arming) + trigger_order(s) (pending, SIN submittedAt — se fija en el CAS).
     const now = Date.now();
@@ -154,8 +202,21 @@ export const reserveArm = internalMutation({
       upperEdge: twoEntries ? args.upperEdge : undefined,
       allowReentryFromAbove: twoEntries ? true : undefined,
       stopLossPct: args.stopLossPct, bufferPct: args.bufferPct, tps: args.tps,
+      // (Codex crítico) hereda la responsabilidad de rearm si viene de un auto-rearm O reemplaza uno
+      // pendiente → si falla antes del envío, settleArm/recover devuelven el trabajo (no se pierde).
+      fromRearm: inheritsRearm ? true : undefined,
       createdAt: now, updatedAt: now,
     });
+    // (Codex #2/#3) CONSUMIR/cancelar el trabajo de rearm en la MISMA transacción que crea la
+    // generación: el re-armado (token ya validado) O un armado MANUAL que gana sobre un rearm pendiente.
+    // Atómico → no quedan dos caminos abriendo. Limpia estado, lease, error e intentos.
+    if (botPre && botPre.rearmStatus != null) {
+      await ctx.db.patch(args.botId, {
+        rearmStatus: undefined, nextRearmAt: undefined,
+        rearmLeaseToken: undefined, rearmLeaseUntil: undefined,
+        rearmAttempts: 0, lastRearmError: undefined, lastRearmErrorKind: undefined,
+      });
+    }
     await ctx.db.insert("trigger_orders", {
       armId, role: "entry_lower", cloid: cloidLower, oid: undefined, triggerPx: args.triggerPx, size: args.size,
       reduceOnly: false, observedStatus: "pending", createdAt: now, updatedAt: now,
@@ -320,6 +381,20 @@ export const setArmCloseConfirm = internalMutation({
   },
 });
 
+// (auto-rearm) Marca el ORIGEN del cierre de emergencia ANTES de mandar el market close, para que al
+// alcanzar `closed` se distinga emergency/disarm de un SL llenado o un cierre externo (Codex #1).
+// Idempotente: solo fija si no estaba puesto. Bajo claim.
+export const markEmergencyClosing = internalMutation({
+  args: { armId: v.id("trigger_arms"), token: v.string(), reason: v.union(v.literal("emergency"), v.literal("disarm")) },
+  handler: async (ctx, { armId, token, reason }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (isArmTerminal(arm.status)) return { ok: false as const };
+    if (arm.emergencyClosing == null) await ctx.db.patch(armId, { emergencyClosing: reason, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
 // --- Transición genérica con fencing + cuarentena N6 + finalización de pausa N2 ---
 export const settleArm = internalMutation({
   args: {
@@ -332,6 +407,8 @@ export const settleArm = internalMutation({
     filledSize: v.optional(v.number()),
     entryPrice: v.optional(v.number()),
     error: v.optional(v.string()),
+    // (auto-rearm) motivo del cierre — solo se persiste al pasar a "closed". "sl" habilita el re-arm.
+    closeReason: v.optional(v.union(v.literal("sl"), v.literal("manual"), v.literal("emergency"), v.literal("disarm"))),
   },
   handler: async (ctx, args) => {
     const arm = await ctx.db.get(args.armId);
@@ -344,6 +421,8 @@ export const settleArm = internalMutation({
     if (isArmTerminal(arm.status)) return { ok: false as const };
     const allowed = ALLOWED_ARM[arm.status];
     if (!allowed || !allowed.has(args.status)) return { ok: false as const };
+    // (Codex #6) Cerrar EXIGE un motivo (gobierna el auto-rearm). Protege el contrato ante call sites futuros.
+    if (args.status === "closed" && args.closeReason === undefined) return { ok: false as const };
 
     // (N6) Cuarentena: toda terminalización de un arm que YA alcanzó submitting (tiene submittedAt)
     // se subordina a la cuarentena. Antes del plazo, una petición tardía aún podría aparecer.
@@ -357,6 +436,8 @@ export const settleArm = internalMutation({
     for (const k of ["filledSize", "entryPrice", "error"] as const) {
       if (args[k] !== undefined) patch[k] = args[k];
     }
+    // (auto-rearm) persistir el motivo solo al cerrar (gobierna si el cron rearma una nueva generación).
+    if (args.status === "closed" && args.closeReason !== undefined) patch.closeReason = args.closeReason;
     // filledAt: marca la PRIMERA confirmación de fill (grace anti-closed-prematuro por lag de APIs).
     if (args.status === "filled" && arm.filledAt == null) patch.filledAt = now;
     await ctx.db.patch(args.armId, patch);
@@ -368,7 +449,72 @@ export const settleArm = internalMutation({
         await ctx.db.patch(arm.botId, { active: false, disarmPending: false });
       }
     }
+    // (Codex #1) Un arm de auto-rearm que termina `failed` AQUÍ ya pasó la cuarentena N6 y la prueba
+    // negativa del motor (sin entrada viva ni fill) → DEVOLVER el trabajo: reprogramar otro rearm
+    // atómicamente (si sigue elegible). Nunca queda el bot activo sin cobertura ni trabajo pendiente.
+    // (Una pausa desactivó el bot arriba → rescheduleRearmIfEligible lo rechaza: no reprograma.)
+    if (args.status === "failed" && arm.fromRearm === true) {
+      await rescheduleRearmIfEligible(ctx, arm.botId);
+    }
     return { ok: true as const };
+  },
+});
+
+// (Codex #1) Cierre + programación de rearm ATÓMICOS: cerrar el arm y actualizar el bot en UNA sola
+// transacción (evita la ventana donde la action muere entre cerrar y programar → cerrado sin rearm).
+// Conserva fencing, transición permitida y cuarentena de settleArm. Programa rearm SOLO si
+// closeReason="sl" Y config válida (autoRearm, activo, sin pausa, sin rearm en curso). Cuenta el stop.
+export const closeArmAndScheduleRearm = internalMutation({
+  args: {
+    armId: v.id("trigger_arms"),
+    token: v.string(),
+    closeReason: v.union(v.literal("sl"), v.literal("emergency"), v.literal("disarm"), v.literal("manual")),
+    nextRearmAt: v.number(),   // cuándo podrá rearmar el cron si aplica (closedAt + cooldown)
+  },
+  handler: async (ctx, { armId, token, closeReason, nextRearmAt }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm) return { ok: false as const };
+    // Fencing + transición permitida + cuarentena N6 (idéntico a settleArm).
+    if (arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (isArmTerminal(arm.status)) return { ok: false as const };
+    const allowed = ALLOWED_ARM[arm.status];
+    if (!allowed || !allowed.has("closed")) return { ok: false as const };
+    if (arm.submittedAt != null && Date.now() - arm.submittedAt <= ARM_SUBMIT_QUARANTINE_MS) {
+      return { ok: false as const, quarantined: true as const };
+    }
+    const now = Date.now();
+    await ctx.db.patch(armId, { status: "closed", closeReason, updatedAt: now });
+
+    const bot = await ctx.db.get(arm.botId);
+    // (Codex #3) Reiniciar la secuencia de whipsaw limpia los TRES campos (consecutiveStops,
+    // lastStopAlertLevel, stopAlertSentAt): si no, tras alertar en 5 y reiniciar, una nueva secuencia
+    // de 5 daría 5−5=0 y no alertaría.
+    const resetAlert = { consecutiveStops: 0, lastStopAlertLevel: 0, stopAlertSentAt: undefined } as const;
+    // N2: finalizar pausa si estaba pendiente (la pausa gana; no rearmar).
+    if (bot?.disarmPending) {
+      await ctx.db.patch(arm.botId, { active: false, disarmPending: false, ...resetAlert });
+      return { ok: true as const, rearmScheduled: false as const, consecutiveStops: 0 };
+    }
+    if (closeReason !== "sl") {
+      if (bot) await ctx.db.patch(arm.botId, resetAlert);
+      return { ok: true as const, rearmScheduled: false as const, consecutiveStops: 0 };
+    }
+    // Cierre por SL: contar el stop y, si la config es válida, programar el rearm (no pisar uno en curso).
+    const count = (bot?.consecutiveStops ?? 0) + 1;
+    const patch: Record<string, unknown> = { consecutiveStops: count };
+    let rearmScheduled = false;
+    if (bot && bot.autoRearm === true && bot.active === true && bot.disarmPending !== true && bot.rearmStatus == null) {
+      patch.rearmStatus = "pending";
+      patch.nextRearmAt = nextRearmAt;
+      patch.rearmAttempts = 0;
+      patch.lastRearmError = undefined;
+      patch.lastRearmErrorKind = undefined;
+      patch.rearmLeaseToken = undefined;
+      patch.rearmLeaseUntil = undefined;
+      rearmScheduled = true;
+    }
+    if (bot) await ctx.db.patch(arm.botId, patch);
+    return { ok: true as const, rearmScheduled, consecutiveStops: count };
   },
 });
 
@@ -430,6 +576,9 @@ export const recoverAbandonedArming = internalMutation({
     await ctx.db.patch(armId, { status: "failed", error: "arming abandonado pre-CAS (nunca envió)", updatedAt: Date.now() });
     const bot = await ctx.db.get(arm.botId);
     if (bot?.disarmPending) await ctx.db.patch(arm.botId, { active: false, disarmPending: false });
+    // (Codex #1) Abandonado pre-CAS = NUNCA envió a HL (submittedAt==null) → sin orden posible. Si era
+    // auto-rearm, devolver el trabajo (reprogramar) para no dejar el bot activo sin cobertura.
+    if (arm.fromRearm === true) await rescheduleRearmIfEligible(ctx, arm.botId);
     return { ok: true as const };
   },
 });

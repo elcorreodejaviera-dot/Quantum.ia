@@ -724,6 +724,9 @@ export const sendStopAlert = internalAction({
     try {
       const resp = await fetch("https://api.resend.com/emails", {
         method: "POST",
+        // (CodeRabbit) Timeout: sin él, un fetch colgado mantiene viva la action y, como el cron la
+        // reencola cada minuto mientras el nivel siga pendiente, apilaría duplicados y quemaría scheduler.
+        signal: AbortSignal.timeout(10_000),
         headers: {
           Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json",
           // (Codex #4) Dedup estable por (botId, nivel): aunque dos actions coincidan, Resend manda 1 email.

@@ -136,7 +136,9 @@ export const listRearmReadyBots = internalQuery({
     const now = Date.now();
     const max = limit ?? 25;
     const out: Id<"bots">[] = [];
-    for (const status of ["pending", "blocked", "running"] as const) {
+    // (CodeRabbit) `running` PRIMERO: un worker muerto (running con lease expirado) tiene prioridad de
+    // recuperación; si no, quedaría starved detrás de colas pending/blocked que llenan `max`.
+    for (const status of ["running", "pending", "blocked"] as const) {
       for await (const b of ctx.db
         .query("bots")
         .withIndex("by_rearm_status", (q) => q.eq("rearmStatus", status).lte("nextRearmAt", now))

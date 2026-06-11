@@ -11,7 +11,7 @@
     "moduleResolution": "Bundler",
     "module": "ESNext",
     "target": "ESNext",
-    "lib": ["ES2021", "dom", "dom.iterable"],
+    "lib": ["ES2021"],
     "jsx": "react-jsx",
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,

@@ -143,6 +143,10 @@ export const reserveArm = internalMutation({
     if (!(args.triggerPx > 0) || !(args.appliedLeverage > 0) || !(args.lowerEdge > 0)) {
       throw new Error("[blocked_config] triggerPx/appliedLeverage/lowerEdge deben ser > 0");
     }
+    // (CodeRabbit #22) Validación defensiva: el límite por orden asume orderNotional > 0.
+    if (!(args.orderNotional > 0)) {
+      throw new Error("[blocked_config] orderNotional debe ser > 0");
+    }
     if (!(args.stopLossPct > 0 && args.stopLossPct < 100)) throw new Error("[blocked_config] stopLossPct inválido");
 
     // (1) Unicidad: una sola generación NO terminal por bot.

@@ -50,11 +50,12 @@ La fundación expone `getArmOrderInternal` hardcodeado a `entry_lower`. Para el 
 
 ## Cálculo del SL
 - Lado: cerrar un SHORT = **BUY**, `reduceOnly:true`, stop-market que dispara al **subir**.
-- `slTriggerPx`: el precio al que se corta la pérdida si el mercado se recupera. Opciones (decidir
-  con Codex/usuario): (a) **borde superior del rango** `maxRange` (reentrada al rango = SL, como la
-  cuenta de referencia), o (b) `entryPrice*(1+stopLossPct/100)` (SL relativo del bot). Propuesta:
-  **min(maxRange_normalizado, entryPrice*(1+stopLossPct))** para no arriesgar más que el SL del bot
-  ni dejar pasar la reentrada al rango. Normalizar al tick (ceil para un BUY → se llena seguro).
+- `slTriggerPx` (IMPLEMENTADO): `entryPrice*(1+stopLossPct/100)` — SL relativo del bot, vía la
+  REUTILIZACIÓN directa de `placeStopLoss` de JAV-43 (que ya hace exactamente esto para un Short:
+  trigger = entry*(1+stopLossPct), BUY reduceOnly stop-market, banda 1%). **NO** se aplica el cap por
+  `maxRange`: se descartó para reutilizar `placeStopLoss` sin modificarlo (auditado). El cap por
+  `maxRange` (cortar antes si reentra al rango) queda como REFINAMIENTO futuro (requeriría un
+  `placeStopLoss` parametrizado por triggerPx).
 - Banda 1% (reutiliza `SL_MARKET_SLIPPAGE_FRACTION` de JAV-43): `p = aggressiveHlPriceStr(triggerPx*(1+1%), isBuy=true)` (ceil).
 - Tamaño: el **total** del fill (`arm.filledSize`), reduceOnly (cierra toda la posición). En esta
   pieza el SL cubre el 100% (los TPs parciales son la pieza siguiente).

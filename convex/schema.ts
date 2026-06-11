@@ -279,8 +279,8 @@ export default defineSchema({
     generation: v.number(),              // sube en cada re-arm; generation = max+1 (backend)
     status: v.union(
       v.literal("arming"), v.literal("submitting"), v.literal("armed"), v.literal("disarming"),
-      v.literal("disarmed"), v.literal("filled"), v.literal("closed"), v.literal("failed"),
-      v.literal("unknown")),
+      v.literal("disarmed"), v.literal("filled"), v.literal("protecting"), v.literal("protected"),
+      v.literal("closed"), v.literal("failed"), v.literal("unknown")),
     desiredState: v.union(v.literal("armed"), v.literal("disarmed")),
     // snapshot de config (inmutable durante la vida del arm)
     side: v.literal("Short"),
@@ -290,6 +290,11 @@ export default defineSchema({
     reservedNotional: v.number(),
     marginReserved: v.number(),
     lowerEdge: v.number(),               // minRange del pool al armar
+    stopLossPct: v.number(),             // snapshot del SL del bot (para armar el SL post-fill)
+    // SL post-fill
+    slAttempts: v.optional(v.number()),  // nº de intentos de colocar el SL (cloid …|sl|attempt)
+    slSubmittedAt: v.optional(v.number()),  // SL enviado (resting/pending): grace+prueba negativa antes de rotar cloid (anti-doble-SL)
+    protectDeadline: v.optional(v.number()),  // filledAt + SL_PROTECT_DEADLINE_MS → escala a cierre de emergencia
     // fill
     filledSize: v.optional(v.number()),
     entryPrice: v.optional(v.number()),
@@ -313,7 +318,7 @@ export default defineSchema({
   // Cada orden trigger nativa de un arm. CLOID = identidad primaria determinista.
   trigger_orders: defineTable({
     armId: v.id("trigger_arms"),
-    role: v.literal("entry_lower"),       // Etapa 1: solo el trigger inferior de entrada
+    role: v.union(v.literal("entry_lower"), v.literal("sl_upper")),  // entrada inferior + SL superior
     cloid: v.string(),                    // determinista botId|generation|role
     oid: v.optional(v.string()),          // de HL; OPCIONAL (waitingForTrigger/timeout sin oid)
     triggerPx: v.number(),

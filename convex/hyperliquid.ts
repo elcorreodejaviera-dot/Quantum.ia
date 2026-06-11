@@ -176,7 +176,7 @@ type SlPlaceResult =
 
 // Coloca el SL stop-MARKET reduceOnly (banda fija SL_MARKET_SLIPPAGE_FRACTION). Devuelve el
 // resultado discriminado o lanza si HL rechaza.
-async function placeStopLoss(
+export async function placeStopLoss(
   exchange: ExchangeClient, assetId: number, szDecimals: number,
   side: "Long" | "Short", filledSize: number, entryPx: number,
   stopLossPct: number, slCloidVal: `0x${string}`,

@@ -4,11 +4,12 @@ import { action, internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { v } from "convex/values";
 import { decryptPrivateKey } from "./hlCredentialActions";
-import { hlNetwork, hlIsTestnet } from "./hlNetwork";
+import { hlNetwork, hlIsTestnet, assertExpectedNetwork } from "./hlNetwork";
 import {
   makeClients, getAssetMeta, ceilHlPrice, roundHlPrice, aggressiveHlPriceStr,
-  floorToDecimals, formatHlPrice, fillsByCloid, abortAfter,
+  floorToDecimals, formatHlPrice, fillsByCloid, abortAfter, placeStopLoss,
 } from "./hyperliquid";
+import { armCloid } from "./triggerArms";
 import { TransportError } from "@nktkas/hyperliquid";
 
 // --- JAV-44 Etapa 1: actions del motor (trigger nativo de entrada inferior, TESTNET) ---
@@ -20,6 +21,13 @@ const ENTRY_TRIGGER_SLIPPAGE = 0.02;
 // transitoriamente por lag aunque la posición exista. Esperar este margen desde filledAt evita un
 // closed prematuro que liberaría margen/credencial con la posición aún abierta.
 const CLOSE_CONFIRM_GRACE_MS = 2 * 60_000;
+// Política de fallo del SL (Codex #3): si el short queda sin SL `protected`, reintentar hasta estos
+// límites; superados → CIERRE DE EMERGENCIA (reduceOnly market) para no dejar la posición desnuda.
+const SL_MAX_ATTEMPTS = 3;
+const SL_PROTECT_DEADLINE_MS = 4 * 60_000;
+// Grace tras enviar el SL: antes de rotar el cloid (nuevo intento), confirmar por CLOID que el
+// anterior NO está vivo (igual que JAV-43). Evita doble SL / SL huérfano.
+const SL_SUBMIT_GRACE_MS = 60_000;
 
 // ¿Hay una orden VIVA con este cloid en el book? (parte de la prueba negativa R3 — no liberar a ciegas).
 async function openByCloid(info: any, user: `0x${string}`, cloid: string): Promise<boolean> {
@@ -27,13 +35,31 @@ async function openByCloid(info: any, user: `0x${string}`, cloid: string): Promi
   return oo.some((o) => typeof o?.cloid === "string" && o.cloid.toLowerCase() === cloid.toLowerCase());
 }
 
+// (Codex #2) Cancela cualquier trigger_order del arm que SIGA VIVO en el book y devuelve si TODOS
+// están muertos (prueba negativa por CLOID). Se llama una vez en frontendOpenOrders y cancela los
+// que sigan abiertos. Garantiza que un arm no alcance `closed` con una orden viva (anti-huérfano).
+async function ensureOrdersDead(
+  info: any, exchange: any, user: `0x${string}`, assetId: number, cloids: string[],
+): Promise<boolean> {
+  const oo: any[] = await info.frontendOpenOrders({ user });
+  const liveSet = new Set(oo.map((o) => (typeof o?.cloid === "string" ? o.cloid.toLowerCase() : "")));
+  let allDead = true;
+  for (const c of cloids) {
+    if (liveSet.has(c.toLowerCase())) {
+      allDead = false;
+      try { await exchange.cancelByCloid({ cancels: [{ asset: assetId, cloid: c as `0x${string}` }] }); } catch { /* reintenta */ }
+    }
+  }
+  return allDead;
+}
+
 // Coloca/observa órdenes trigger por CLOID. Política de COLOCACIÓN: todos los gates + hard-gate testnet.
 export const armPoolBotEntry = action({
   args: { botId: v.id("bots"), expectedNetwork: v.string(), confirm: v.boolean() },
   handler: async (ctx, args) => {
-    // Hard-gate de red para COLOCAR (la cancelación defensiva NO usa esto — ver reconcileArm).
-    if (hlNetwork() !== "testnet") throw new Error("Etapa 1: solo testnet (HL_NETWORK).");
-    if (args.expectedNetwork !== "testnet") throw new Error("expectedNetwork debe ser testnet.");
+    // Red: el backend es la fuente de verdad. Mainnet habilitado ahora que hay SL post-fill que
+    // protege la posición (cierre de emergencia garantiza que nunca quede un short desnudo).
+    assertExpectedNetwork(args.expectedNetwork);
     if (!args.confirm) throw new Error("Armado requiere confirmación explícita.");
 
     const user = await ctx.runQuery(internal.users.getCurrentUserInternal, {});
@@ -58,6 +84,9 @@ export const armPoolBotEntry = action({
     if (!bot.baseAsset) throw new Error("Bot sin baseAsset");
     if (bot.hedgeNotionalUsd === undefined || !Number.isFinite(bot.hedgeNotionalUsd) || bot.hedgeNotionalUsd <= 0) {
       throw new Error("Bot sin hedgeNotionalUsd válido (> 0)");
+    }
+    if (bot.stopLossPct === undefined || !Number.isFinite(bot.stopLossPct) || bot.stopLossPct <= 0 || bot.stopLossPct >= 100) {
+      throw new Error("Bot sin stopLossPct válido (0–100) — necesario para el SL post-fill");
     }
 
     const pool = await ctx.runQuery(internal.pools.getPoolByIdInternal, { id: bot.poolId });
@@ -127,7 +156,8 @@ export const armPoolBotEntry = action({
     const reservation = await ctx.runMutation(internal.triggerArms.reserveArm, {
       botId: bot._id, userId: user._id, hlAccountId: bot.hlAccountId, poolId: bot.poolId,
       asset, network: hlNetwork(), triggerPx: triggerPxNorm, size, appliedLeverage,
-      reservedNotional, marginReserved: marginRequired, lowerEdge: pool.minRange, availableCollateral,
+      reservedNotional, marginReserved: marginRequired, lowerEdge: pool.minRange,
+      stopLossPct: bot.stopLossPct, availableCollateral,
     });
     const { armId, cloid } = reservation;
 
@@ -254,47 +284,11 @@ export const reconcileArm = internalAction({
       const user = credential.tradingAccountAddress as `0x${string}`;
       const { info, exchange } = makeClients(decryptPrivateKey(credential), arm.network === "testnet");
       const assetMeta = await getAssetMeta(info, arm.asset.toUpperCase());
-      const assetId = assetMeta.assetId;
+      const { assetId, szDecimals } = assetMeta;   // (CodeRabbit) szDecimals se usa en SL/emergencia/TPs
 
-      // (R2) filled → closed solo tras confirmar szi==0 (cierre manual en Etapa 1). Libera margen/
-      // generación/credencial. Mientras la posición siga abierta, queda en filled (alerta operativa).
-      if (arm.status === "filled") {
-        // (Fix #2a) Exigir filledSize POSITIVO confirmado antes de poder cerrar. Si no lo tenemos
-        // (p.ej. fill inmediato sin datos), reconciliar la entrada por fills primero; nunca cerrar
-        // sin saber que la posición se abrió.
-        if (!(arm.filledSize && arm.filledSize > 0)) {
-          const f = await fillsByCloid(info, user, order.cloid);
-          if (f.size > 0 && f.avgPx > 0) {
-            await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "filled", filledSize: f.size, entryPrice: f.avgPx });
-          }
-          return { skipped: "filled_awaiting_fill_data" };
-        }
-        // (Fix #2b) Grace desde filledAt — fallback a createdAt, NO updatedAt (el claim lo bumpea cada
-        // ciclo y reiniciaría el grace para siempre).
-        if (Date.now() - (arm.filledAt ?? arm.createdAt) <= CLOSE_CONFIRM_GRACE_MS) {
-          return { skipped: "close_confirm_grace" };
-        }
-        const ch: any = await info.clearinghouseState({ user });
-        const p = (ch.assetPositions ?? []).find((x: any) => x.position?.coin === arm.asset.toUpperCase());
-        const flat = !p || Math.abs(Number(p.position?.szi ?? 0)) === 0;
-        if (!flat) {
-          if (arm.closeConfirmSince != null) await ctx.runMutation(internal.triggerArms.setArmCloseConfirm, { armId, token, value: null });
-          return { skipped: "filled_position_open" };
-        }
-        // (Fix #2c) Doble lectura anti single-transient: exigir DOS lecturas szi==0 en ciclos
-        // distintos antes de declarar closed (una lectura transitoria por lag no basta).
-        if (arm.closeConfirmSince == null) {
-          await ctx.runMutation(internal.triggerArms.setArmCloseConfirm, { armId, token, value: Date.now() });
-          return { skipped: "close_first_flat" };
-        }
-        await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "closed" });
-        return { result: "closed" };
-      }
-
-      // Kill switch / pausa (Fix #4): cualquier condición de apagado convierte el arm a desarmado y
-      // fuerza la cancelación del trigger vivo. Incluye: switches globales, simulación, pool cerrado,
-      // HL_NETWORK ya NO testnet (N4: el global se movió a mainnet), bot desactivado/en simulación,
-      // cambio de cuenta o pool bajo el arm, y revocación de canTradeLive.
+      // Kill switch / pausa (Fix #4 + N4 mainnet): cualquier condición de apagado convierte el arm a
+      // desarmado. La red AUTORITATIVA es la del arm (arm.network), no el HL_NETWORK actual: si el
+      // deploy cambió de red bajo un arm, hay que desarmar.
       const [tradingConfig, simConfig] = await Promise.all([
         ctx.runQuery(internal.systemConfig.getConfigInternal, { key: "tradingEnabled" }),
         ctx.runQuery(internal.systemConfig.getConfigInternal, { key: "simulationMode" }),
@@ -304,7 +298,7 @@ export const reconcileArm = internalAction({
       const canLive = await ctx.runQuery(internal.users.hasTradeLiveForUserInternal, { userId: arm.userId });
       const killed =
         tradingConfig?.value !== true || simConfig?.value === true ||
-        pool?.closed === true || hlNetwork() !== "testnet" ||
+        pool?.closed === true || hlNetwork() !== arm.network ||
         !bot || !bot.active || bot.simulationMode === true ||
         bot.hlAccountId !== arm.hlAccountId || bot.poolId !== arm.poolId || !canLive;
       if (killed && arm.desiredState !== "disarmed") {
@@ -312,6 +306,129 @@ export const reconcileArm = internalAction({
       }
       const wantDisarm = killed || arm.desiredState === "disarmed";
 
+      // ===== FASE DE POSICIÓN (la entrada ya se llenó): gestionar SL post-fill + cierre =====
+      if (arm.status === "filled" || arm.status === "protecting" || arm.status === "protected") {
+        // (Fix #2a) Exigir filledSize positivo confirmado antes de tocar SL/cierre.
+        if (!(arm.filledSize && arm.filledSize > 0 && arm.entryPrice && arm.entryPrice > 0)) {
+          const f = await fillsByCloid(info, user, order.cloid);
+          if (f.size > 0 && f.avgPx > 0) {
+            await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "filled", filledSize: f.size, entryPrice: f.avgPx });
+          }
+          return { skipped: "filled_awaiting_fill_data" };
+        }
+        const filledSize = arm.filledSize, entryPrice = arm.entryPrice;
+        const slOrder = await ctx.runQuery(internal.triggerArms.getArmOrderByRole, { armId, role: "sl_upper" });
+        const allOrders = await ctx.runQuery(internal.triggerArms.getArmOrdersInternal, { armId });
+        const allCloids = allOrders.map((o) => o.cloid);
+
+        // (1) Detección de CIERRE (posición flat) — grace + doble lectura (Fix #2). Además (Codex #2)
+        // NO declarar `closed` mientras quede una orden VIVA en el book (cancelarla primero): un
+        // trigger resido podría dispararse sobre un arm ya cerrado (huérfano).
+        const ch: any = await info.clearinghouseState({ user });
+        const p = (ch.assetPositions ?? []).find((x: any) => x.position?.coin === arm.asset.toUpperCase());
+        const szi = p ? Number(p.position?.szi ?? 0) : 0;
+        const flat = Math.abs(szi) === 0;
+        if (flat) {
+          if (Date.now() - (arm.filledAt ?? arm.createdAt) <= CLOSE_CONFIRM_GRACE_MS) return { skipped: "close_confirm_grace" };
+          const renewC = await ctx.runMutation(internal.triggerArms.renewArmReconcile, { armId, token });
+          if (!renewC.ok) return { skipped: "lease_lost" };
+          if (!(await ensureOrdersDead(info, exchange, user, assetId, allCloids))) {
+            return { skipped: "closing_cancel_live_orders" };   // había una orden viva → cancelada; reintentar
+          }
+          if (arm.closeConfirmSince == null) {
+            await ctx.runMutation(internal.triggerArms.setArmCloseConfirm, { armId, token, value: Date.now() });
+            return { skipped: "close_first_flat" };
+          }
+          await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "closed" });
+          return { result: "closed" };
+        }
+        if (arm.closeConfirmSince != null) await ctx.runMutation(internal.triggerArms.setArmCloseConfirm, { armId, token, value: null });
+
+        // (2) ¿Hay que CERRAR DE EMERGENCIA? (Codex #3) disarm/kill con posición abierta, o el SL no
+        // logró protegerla a tiempo (deadline o demasiados intentos sin `protected`).
+        const deadlinePassed = arm.protectDeadline != null && Date.now() > arm.protectDeadline;
+        const tooManyAttempts = (arm.slAttempts ?? 0) >= SL_MAX_ATTEMPTS;
+        const mustEmergencyClose = wantDisarm || ((deadlinePassed || tooManyAttempts) && arm.status !== "protected");
+        if (mustEmergencyClose) {
+          const renew = await ctx.runMutation(internal.triggerArms.renewArmReconcile, { armId, token });
+          if (!renew.ok) return { skipped: "lease_lost" };
+          // (Codex #2) Cancelar TODO trigger_order vivo y CONFIRMAR por CLOID que murieron antes de
+          // dar por cerrado (el `closed` se gatea en (1) con ensureOrdersDead). Aquí cancelamos.
+          await ensureOrdersDead(info, exchange, user, assetId, allCloids);
+          // Cierre reduceOnly MARKET (IOC agresivo, comprar para cerrar el short). cloid determinista
+          // por generación → idempotente; reduceOnly impide sobre-cerrar aunque se repita.
+          const closeCloid = await armCloid(arm.botId, arm.generation, "close");
+          const closeLimitPx = aggressiveHlPriceStr(assetMeta.markPx * (1 + 0.02), szDecimals, true);
+          const ac2 = abortAfter(HL_ORDER_TIMEOUT_MS);
+          try {
+            await exchange.order({
+              orders: [{ a: assetId, b: true, p: closeLimitPx, s: String(floorToDecimals(Math.abs(szi), szDecimals)), r: true, t: { limit: { tif: "Ioc" } }, c: closeCloid as `0x${string}` }],
+              grouping: "na",
+            }, { signal: ac2.signal, expiresAfter: Date.now() + HL_ORDER_TIMEOUT_MS });
+          } catch { /* el siguiente ciclo reintenta; szi==0 + órdenes muertas → closed */ } finally { ac2.clear(); }
+          return { result: "emergency_close_sent" };
+        }
+
+        // (3) ARMADO dentro del deadline: CONFIRMAR el SL existente (sin rotar) o colocar uno nuevo.
+        // (Codex #1) Si el SL ya se observó vivo O se envió (slSubmittedAt), confirmar por CLOID y NO
+        // rotar el cloid hasta probar que el anterior murió (grace + prueba negativa) → anti-doble-SL.
+        if (slOrder && (slOrder.observedStatus !== "pending" || arm.slSubmittedAt != null)) {
+          const slStatus: any = await info.orderStatus({ user, oid: slOrder.cloid as `0x${string}` });
+          const slState = slStatus?.status === "order" ? slStatus.order?.status : undefined;
+          const slOpen = await openByCloid(info, user, slOrder.cloid);
+          const slFill = await fillsByCloid(info, user, slOrder.cloid);
+          if (slState === "filled" || slFill.size > 0) {
+            await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "filled" });
+            return { skipped: "sl_fired_awaiting_flat" };   // szi==0 en el próximo ciclo → closed
+          }
+          if (slState === "open" || slOpen) {
+            await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "open", oid: slOrder.oid });
+            if (arm.status !== "protected") await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "protected" });
+            return { result: "protected" };
+          }
+          if (slState === "triggered") {
+            await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "triggered" });
+            return { skipped: "sl_triggered_pending" };
+          }
+          // No vivo, sin fills, no triggered: si está dentro del grace desde el envío → esperar (lag).
+          if (arm.slSubmittedAt && Date.now() - arm.slSubmittedAt < SL_SUBMIT_GRACE_MS) {
+            return { skipped: "sl_submit_grace" };
+          }
+          // Grace vencido + prueba negativa (no en book, sin fills) → el intento murió → rotar (abajo).
+          await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "canceled" });
+        }
+        // Colocar un NUEVO intento de SL (no hay order, nunca enviado, o el anterior se confirmó muerto).
+        if ((arm.slAttempts ?? 0) >= SL_MAX_ATTEMPTS) return { skipped: "sl_max_attempts" };   // (2) escala a emergencia
+        if (arm.status === "filled") await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "protecting" });
+        const prep = await ctx.runMutation(internal.triggerArms.prepareSlAttempt, { armId, token, protectDeadlineMs: SL_PROTECT_DEADLINE_MS });
+        if (!prep.ok) return { skipped: "sl_prep_race" };
+        const renew = await ctx.runMutation(internal.triggerArms.renewArmReconcile, { armId, token });
+        if (!renew.ok) return { skipped: "lease_lost" };
+        try {
+          const sl = await placeStopLoss(exchange, assetId, szDecimals, "Short", filledSize, entryPrice, arm.stopLossPct, prep.cloid as `0x${string}`);
+          if (sl.state === "resting") {
+            await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "open", oid: sl.oid });
+            await ctx.runMutation(internal.triggerArms.markArmSlSubmitted, { armId, token });
+            await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "protected" });
+            return { result: "protected_placed" };
+          }
+          if (sl.state === "filled") {
+            await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "filled", oid: sl.oid });
+            await ctx.runMutation(internal.triggerArms.markArmSlSubmitted, { armId, token });
+            return { skipped: "sl_fired_immediately" };
+          }
+          // pending/timeout: marcar slSubmittedAt → el próximo ciclo CONFIRMA por CLOID, NO rota (anti-doble-SL).
+          await ctx.runMutation(internal.triggerArms.markArmSlSubmitted, { armId, token });
+          return { skipped: "sl_pending" };
+        } catch {
+          // Rechazo DEFINITIVO (no TransportError): el SL no se colocó. NO marcar slSubmittedAt → el
+          // siguiente ciclo puede rotar (prueba negativa inmediata). slAttempts ya subió; deadline/max
+          // escala a cierre de emergencia.
+          return { skipped: "sl_place_error" };
+        }
+      }
+
+      // ===== FASE PRE-FILL (la entrada aún no se llenó): gestionar el trigger de entrada =====
       const statusByCloid: any = await info.orderStatus({ user, oid: order.cloid as `0x${string}` });
       const orderState: string | undefined = statusByCloid?.status === "order" ? statusByCloid.order?.status : undefined;
       const isUnknownOid = statusByCloid?.status === "unknownOid";

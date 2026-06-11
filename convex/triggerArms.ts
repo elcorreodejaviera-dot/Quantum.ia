@@ -4,6 +4,7 @@ import type { MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { getLimit } from "./executionLimits";
 import { committedMarginForAccount, dailyNotionalUsed, assertLiveAdmissible } from "./executions";
+import { hlNetwork } from "./hlNetwork";
 
 // --- JAV-44 Etapa 1: máquina de estados del trigger_arm (lease/fencing como reconcileExecution) ---
 
@@ -27,9 +28,13 @@ const ALLOWED_ARM: Record<string, Set<string>> = {
   arming: new Set(["failed", "disarmed"]),
   submitting: new Set(["armed", "filled", "unknown", "failed", "disarmed"]),
   armed: new Set(["filled", "disarming", "unknown", "disarmed", "failed"]),
-  disarming: new Set(["disarmed", "filled", "unknown", "failed"]),
-  filled: new Set(["closed"]),
-  unknown: new Set(["armed", "filled", "disarmed", "failed", "closed"]),
+  // post-fill: filled→protecting (colocar SL); protecting→protected (SL puesto) | closed (cierre de
+  // emergencia o SL llenado); protected→closed (SL/cierre). disarming desde cualquier estado abierto.
+  filled: new Set(["protecting", "closed", "disarming", "unknown"]),
+  protecting: new Set(["protected", "closed", "disarming", "unknown"]),
+  protected: new Set(["closed", "disarming"]),
+  disarming: new Set(["disarmed", "filled", "protecting", "protected", "closed", "unknown", "failed"]),
+  unknown: new Set(["armed", "filled", "protecting", "protected", "disarmed", "failed", "closed"]),
 };
 
 function isArmTerminal(status: string): boolean {
@@ -84,10 +89,10 @@ export const reserveArm = internalMutation({
     poolId: v.id("pools"), asset: v.string(), network: v.string(),
     triggerPx: v.number(), size: v.number(), appliedLeverage: v.number(),
     reservedNotional: v.number(), marginReserved: v.number(), lowerEdge: v.number(),
-    availableCollateral: v.number(),
+    stopLossPct: v.number(), availableCollateral: v.number(),
   },
   handler: async (ctx, args) => {
-    if (args.network !== "testnet") throw new Error("Etapa 1: solo testnet.");
+    if (args.network !== "testnet" && args.network !== "mainnet") throw new Error("network inválida.");
     if (!(args.reservedNotional > 0) || !(args.marginReserved > 0) || !(args.size > 0)) {
       throw new Error("reservedNotional/marginReserved/size deben ser > 0");
     }
@@ -97,6 +102,7 @@ export const reserveArm = internalMutation({
     if (!(args.triggerPx > 0) || !(args.appliedLeverage > 0) || !(args.lowerEdge > 0)) {
       throw new Error("triggerPx/appliedLeverage/lowerEdge deben ser > 0");
     }
+    if (!(args.stopLossPct > 0 && args.stopLossPct < 100)) throw new Error("stopLossPct inválido");
 
     // (1) Unicidad: una sola generación NO terminal por bot.
     const arms = await ctx.db
@@ -135,7 +141,7 @@ export const reserveArm = internalMutation({
       asset: args.asset, network: args.network, generation, status: "arming", desiredState: "armed",
       side: "Short", triggerPx: args.triggerPx, size: args.size, appliedLeverage: args.appliedLeverage,
       reservedNotional: args.reservedNotional, marginReserved: args.marginReserved, lowerEdge: args.lowerEdge,
-      createdAt: now, updatedAt: now,
+      stopLossPct: args.stopLossPct, createdAt: now, updatedAt: now,
     });
     await ctx.db.insert("trigger_orders", {
       armId, role: "entry_lower", cloid, oid: undefined, triggerPx: args.triggerPx, size: args.size,
@@ -165,7 +171,7 @@ export const markArmSubmitting = internalMutation({
     if (bot.poolId !== arm.poolId) return { ok: false as const, reason: "blocked" as const };
     const pool = await ctx.db.get(arm.poolId);
     if (!pool || pool.closed) return { ok: false as const, reason: "blocked" as const };
-    if (arm.network !== "testnet") return { ok: false as const, reason: "blocked" as const };
+    if (arm.network !== hlNetwork()) return { ok: false as const, reason: "blocked" as const };  // deploy cambió de red
     const now = Date.now();
     const token = crypto.randomUUID();
     await ctx.db.patch(armId, {
@@ -187,7 +193,7 @@ export const gateArmBeforeOrder = internalMutation({
     if (!arm) return { ok: false as const };
     if (arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
     if (arm.status !== "submitting" || arm.desiredState !== "armed") return { ok: false as const };
-    if (arm.network !== "testnet") return { ok: false as const };
+    if (arm.network !== hlNetwork()) return { ok: false as const };  // deploy cambió de red bajo el arm
     const bot = await ctx.db.get(arm.botId);
     if (!bot || !bot.active || bot.disarmPending || bot.kind !== "il" || bot.direction !== "short" || bot.poolId !== arm.poolId) {
       return { ok: false as const };
@@ -196,6 +202,18 @@ export const gateArmBeforeOrder = internalMutation({
     const pool = await ctx.db.get(arm.poolId);
     if (!pool || pool.closed) return { ok: false as const };
     await ctx.db.patch(armId, { reconcileLeaseUntil: Date.now() + ARM_RECONCILE_LEASE_MS, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
+// Marca slSubmittedAt del SL (intento enviado/aceptado): grace anti-doble-SL antes de rotar cloid.
+export const markArmSlSubmitted = internalMutation({
+  args: { armId: v.id("trigger_arms"), token: v.string() },
+  handler: async (ctx, { armId, token }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (isArmTerminal(arm.status)) return { ok: false as const };
+    await ctx.db.patch(armId, { slSubmittedAt: Date.now(), updatedAt: Date.now() });
     return { ok: true as const };
   },
 });
@@ -217,7 +235,8 @@ export const settleArm = internalMutation({
     armId: v.id("trigger_arms"),
     status: v.union(
       v.literal("armed"), v.literal("disarming"), v.literal("disarmed"),
-      v.literal("filled"), v.literal("closed"), v.literal("unknown"), v.literal("failed")),
+      v.literal("filled"), v.literal("protecting"), v.literal("protected"),
+      v.literal("closed"), v.literal("unknown"), v.literal("failed")),
     token: v.optional(v.string()),
     filledSize: v.optional(v.number()),
     entryPrice: v.optional(v.number()),
@@ -330,10 +349,26 @@ export const getArmInternal = internalQuery({
   handler: async (ctx, { armId }) => ctx.db.get(armId),
 });
 
+const ARM_ROLE = v.union(v.literal("entry_lower"), v.literal("sl_upper"));
+
+export const getArmOrderByRole = internalQuery({
+  args: { armId: v.id("trigger_arms"), role: ARM_ROLE },
+  handler: async (ctx, { armId, role }) =>
+    ctx.db.query("trigger_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", role)).first(),
+});
+
+// Wrapper de compat (entrada inferior).
 export const getArmOrderInternal = internalQuery({
   args: { armId: v.id("trigger_arms") },
   handler: async (ctx, { armId }) =>
     ctx.db.query("trigger_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", "entry_lower")).first(),
+});
+
+// Todos los trigger_orders de un arm (para cancelar TODOS los roles vivos en el camino defensivo).
+export const getArmOrdersInternal = internalQuery({
+  args: { armId: v.id("trigger_arms") },
+  handler: async (ctx, { armId }) =>
+    ctx.db.query("trigger_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId)).collect(),
 });
 
 export const listReconcilableArmsInternal = internalQuery({
@@ -353,20 +388,54 @@ export const listReconcilableArmsInternal = internalQuery({
 export const setArmOrderObserved = internalMutation({
   args: {
     armId: v.id("trigger_arms"), token: v.string(),
+    role: v.optional(ARM_ROLE),   // por defecto entry_lower (compat)
     observedStatus: v.union(
       v.literal("pending"), v.literal("open"), v.literal("triggered"), v.literal("filled"),
       v.literal("canceled"), v.literal("rejected"), v.literal("unknown")),
     oid: v.optional(v.string()),
   },
-  handler: async (ctx, { armId, token, observedStatus, oid }) => {
+  handler: async (ctx, { armId, token, role, observedStatus, oid }) => {
     const arm = await ctx.db.get(armId);
     if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
     const order = await ctx.db
-      .query("trigger_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", "entry_lower")).first();
+      .query("trigger_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", role ?? "entry_lower")).first();
     if (!order) return { ok: false as const };
     const patch: Record<string, unknown> = { observedStatus, updatedAt: Date.now() };
     if (oid !== undefined) patch.oid = oid;
     await ctx.db.patch(order._id, patch);
     return { ok: true as const };
+  },
+});
+
+// Crea/rota el trigger_order del SL (sl_upper) para un nuevo intento: bump slAttempts, fija
+// protectDeadline si falta, y crea el trigger_order(pending) con cloid …|sl|<attempt>. Devuelve el
+// cloid del intento. Bajo claim. Idempotente por (armId, attempt).
+export const prepareSlAttempt = internalMutation({
+  args: { armId: v.id("trigger_arms"), token: v.string(), protectDeadlineMs: v.number() },
+  handler: async (ctx, { armId, token, protectDeadlineMs }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (isArmTerminal(arm.status)) return { ok: false as const };
+    const attempt = (arm.slAttempts ?? 0) + 1;
+    const cloid = await armCloid(arm.botId, arm.generation, `sl:${attempt}`);
+    const now = Date.now();
+    // Sustituir el trigger_order sl_upper (un único role sl_upper por arm; se rota su cloid).
+    const existing = await ctx.db
+      .query("trigger_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", "sl_upper")).first();
+    if (existing) {
+      await ctx.db.patch(existing._id, { cloid, oid: undefined, observedStatus: "pending", updatedAt: now });
+    } else {
+      await ctx.db.insert("trigger_orders", {
+        armId, role: "sl_upper", cloid, oid: undefined, triggerPx: 0, size: arm.size,
+        reduceOnly: true, observedStatus: "pending", createdAt: now, updatedAt: now,
+      });
+    }
+    await ctx.db.patch(armId, {
+      slAttempts: attempt,
+      slSubmittedAt: undefined,   // nuevo intento aún NO enviado (se marca al aceptarse en HL)
+      protectDeadline: arm.protectDeadline ?? (arm.filledAt ?? now) + protectDeadlineMs,
+      updatedAt: now,
+    });
+    return { ok: true as const, cloid, attempt };
   },
 });

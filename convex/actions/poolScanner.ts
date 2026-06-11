@@ -42,14 +42,16 @@ const RPC_TIMEOUT_MS = 8_000;
 // una respuesta determinista de la cadena, no una indisponibilidad del RPC.
 class RpcRevertError extends Error {}
 
-async function rpcCall(url: string, to: string, data: string): Promise<string> {
+async function rpcCall(url: string, to: string, data: string, from?: string): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
   try {
+    // `from` opcional: necesario para simular collect() (guard isAuthorizedForToken con msg.sender).
+    const callObj = from ? { to, data, from } : { to, data };
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", method: "eth_call", params: [{ to, data }, "latest"], id: 1 }),
+      body: JSON.stringify({ jsonrpc: "2.0", method: "eth_call", params: [callObj, "latest"], id: 1 }),
       signal: controller.signal,
     });
     if (!res.ok) throw new Error(`RPC ${url} respondió ${res.status} ${res.statusText}`);
@@ -72,11 +74,11 @@ async function rpcCall(url: string, to: string, data: string): Promise<string> {
   }
 }
 
-async function rpcCallWithFallback(urls: string[], to: string, data: string): Promise<string> {
+async function rpcCallWithFallback(urls: string[], to: string, data: string, from?: string): Promise<string> {
   let lastErr: unknown;
   let revertErr: RpcRevertError | undefined;
   for (const url of urls) {
-    try { return await rpcCall(url, to, data); }
+    try { return await rpcCall(url, to, data, from); }
     catch (e) {
       lastErr = e;
       // Un revert es determinista (todos los endpoints darían lo mismo); tiene
@@ -150,13 +152,19 @@ function hexToUtf8(hexData: string, offset: number): string {
   return new TextDecoder().decode(bytes).replace(/\0/g, "").trim();
 }
 
-async function tokenInfo(rpc: string, addr: string): Promise<{ symbol: string; decimals: number }> {
+// `ok` = símbolo Y decimals leídos de forma fiable (no el default silencioso "???"/18). Los
+// callers de liquidez ignoran `ok` (comportamiento intacto); el cálculo de fees lo exige true
+// para no convertir a USD con metadata inventada (Codex: sin defaults silenciosos).
+async function tokenInfo(rpc: string, addr: string): Promise<{ symbol: string; decimals: number; ok: boolean }> {
   let symbol = "???";
   let decimals = 18;
+  let symbolOk = false;
+  let decimalsOk = false;
   try {
     const raw = (await rpcCall(rpc, addr, "0x95d89b41")).slice(2);
     if (raw.length >= 128) {
-      symbol = hexToUtf8(raw, 0) || symbol;
+      const s = hexToUtf8(raw, 0);
+      if (s) { symbol = s; symbolOk = true; }
     } else if (raw.length === 64) {
       // bytes32 fallback for old tokens
       const bytes: number[] = [];
@@ -165,14 +173,15 @@ async function tokenInfo(rpc: string, addr: string): Promise<{ symbol: string; d
         if (b === 0) break;
         bytes.push(b);
       }
-      symbol = new TextDecoder().decode(new Uint8Array(bytes)).trim();
+      const s = new TextDecoder().decode(new Uint8Array(bytes)).trim();
+      if (s) { symbol = s; symbolOk = true; }
     }
   } catch {}
   try {
     const d = parseInt((await rpcCall(rpc, addr, "0x313ce567")).slice(2), 16);
-    if (Number.isFinite(d) && d >= 0 && d <= 36) decimals = d;
+    if (Number.isInteger(d) && d >= 0 && d <= 36) { decimals = d; decimalsOk = true; }
   } catch {}
-  return { symbol, decimals };
+  return { symbol, decimals, ok: symbolOk && decimalsOk };
 }
 
 function tickPrice(tick: number, dec0: number, dec1: number): number {
@@ -249,20 +258,76 @@ export const scanPoolByTokenId = action({
   },
 });
 
+// --- F1: fees acumulados SIN COBRAR de la posición (real-time) ---
+const MAX_U128 = (1n << 128n) - 1n;
+
+// Bloque INDEPENDIENTE (Codex): no depende del flujo/early-returns de la liquidez. Vía PRIMARIA =
+// collect() simulado por eth_call. collect() con liquidez hace pool.burn(...,0) interno (poke),
+// relee feeGrowthInside y suma el incremento → devuelve el cobrable ACTUAL (no un checkpoint viejo).
+// Simulación sin persistencia (eth_call con from=owner para el guard isAuthorizedForToken).
+// Devuelve USD o null (null = no leído con fiabilidad; NUNCA un número inventado).
+async function fetchUncollectedFeesUsd(
+  rpcs: string[], nft: string, tokenId: number,
+  t0: { symbol: string; decimals: number; ok: boolean },
+  t1: { symbol: string; decimals: number; ok: boolean },
+  priceUsd: number,
+): Promise<number | null> {
+  try {
+    if (!Number.isFinite(priceUsd) || priceUsd <= 0) return null;
+    // Metadata sin defaults silenciosos: decimals/símbolo deben ser fiables o no convertimos.
+    if (!t0.ok || !t1.ok) return null;
+    // invert ESTRICTO: exactamente UNO de los dos debe ser stablecoin conocido (si no, no se puede
+    // saber cuál es el activo base que cotiza priceUsd → null).
+    const stable0 = STABLES.has(t0.symbol);
+    const stable1 = STABLES.has(t1.symbol);
+    if (stable0 === stable1) return null;
+    const invert = stable0;
+
+    // owner (ownerOf) para el guard de collect; la simulación no transfiere nada.
+    const ownerRaw = (await rpcCallWithFallback(rpcs, nft, "0x6352211e" + pad(BigInt(tokenId)))).slice(2);
+    if (ownerRaw.length < 64) return null;
+    const owner = "0x" + ownerRaw.slice(24);
+
+    // collect((uint256 tokenId, address recipient, uint128 amount0Max, uint128 amount1Max)).
+    // Struct de campos estáticos → ABI inline. selector collect(...) = 0xfc6f7865.
+    const data = "0xfc6f7865"
+      + pad(BigInt(tokenId))
+      + owner.slice(2).padStart(64, "0")
+      + pad(MAX_U128)
+      + pad(MAX_U128);
+    const res = (await rpcCallWithFallback(rpcs, nft, data, owner)).slice(2);
+    if (res.length < 128) return null;
+    const amount0 = uintAt(res, 0);
+    const amount1 = uintAt(res, 1);
+    // Cota natural: los fees cobrables caben en uint128. Fuera de [0, 2^128) = dato corrupto.
+    if (amount0 > MAX_U128 || amount1 > MAX_U128) return null;
+
+    const fees0 = Number(amount0) / Math.pow(10, t0.decimals);
+    const fees1 = Number(amount1) / Math.pow(10, t1.decimals);
+    if (!Number.isFinite(fees0) || !Number.isFinite(fees1)) return null;
+    // USD con la MISMA lógica invert que liquidityUsd (token0 estable → base = token1).
+    const feesUsd = invert ? fees0 + fees1 * priceUsd : fees0 * priceUsd + fees1;
+    if (!Number.isFinite(feesUsd) || feesUsd < 0) return null;
+    return Math.round(feesUsd * 100) / 100;
+  } catch {
+    return null; // cualquier fallo de RPC/decodificación → sin dato (no 0)
+  }
+}
+
 export const fetchPositionLiquidity = action({
   args: { tokenId: v.number(), network: v.string(), priceUsd: v.number(), poolAddress: v.optional(v.string()) },
   handler: async (_ctx, { tokenId, network, priceUsd, poolAddress: knownPoolAddress }) => {
     const rpcs = RPC[network];
     const nft  = NFT_MANAGER[network];
     const factory = FACTORY[network];
-    if (!rpcs || !nft || !factory) return { liquidityUsd: 0, exposure: 0 };
-    if (!Number.isFinite(priceUsd) || priceUsd <= 0) return { liquidityUsd: 0, exposure: 0 };
+    if (!rpcs || !nft || !factory) return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd: null };
+    if (!Number.isFinite(priceUsd) || priceUsd <= 0) return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd: null };
 
     let posRaw: string;
     try {
       posRaw = (await rpcCallWithFallback(rpcs, nft, "0x99fbab88" + pad(BigInt(tokenId)))).slice(2);
-    } catch { return { liquidityUsd: 0, exposure: 0 }; }
-    if (posRaw.length < 64 * 12) return { liquidityUsd: 0, exposure: 0 };
+    } catch { return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd: null }; }
+    if (posRaw.length < 64 * 12) return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd: null };
 
     const token0addr = addrAt(posRaw, 2);
     const token1addr = addrAt(posRaw, 3);
@@ -271,13 +336,20 @@ export const fetchPositionLiquidity = action({
     const tickUpper  = Number(intAt(posRaw, 6));
     const liqRaw     = uintAt(posRaw, 7);
 
-    if (liqRaw === 0n) return { liquidityUsd: 0, exposure: 0 };
-
-    let t0: { symbol: string; decimals: number };
-    let t1: { symbol: string; decimals: number };
+    // Metadata (compartida por liquidez y fees). tokenInfo nunca lanza (captura internamente);
+    // el try/catch es defensa. Se hace ANTES del early-return de liquidez-cero para que el
+    // bloque de fees pueda ejecutarse igual (una posición con liquidez 0 puede tener fees).
+    let t0: { symbol: string; decimals: number; ok: boolean };
+    let t1: { symbol: string; decimals: number; ok: boolean };
     try {
       [t0, t1] = await Promise.all([tokenInfo(rpcs[0], token0addr), tokenInfo(rpcs[0], token1addr)]);
-    } catch { return { liquidityUsd: 0, exposure: 0 }; }
+    } catch { return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd: null }; }
+
+    // Bloque INDEPENDIENTE de fees: no depende del flujo/early-returns de la liquidez ni del
+    // orden de su cálculo. Su propio try/catch interno → null si algo falla (no degrada liquidez).
+    const feesUncollectedUsd = await fetchUncollectedFeesUsd(rpcs, nft, tokenId, t0, t1, priceUsd);
+
+    if (liqRaw === 0n) return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd };
 
     // Usar poolAddress ya conocido para evitar la llamada al factory (ahorra 1 RPC)
     let sp: number;
@@ -291,17 +363,17 @@ export const fetchPositionLiquidity = action({
         const poolRaw = (await rpcCallWithFallback(rpcs, factory, getPoolData)).slice(2);
         poolAddr = ("0x" + poolRaw.slice(24)).toLowerCase();
       }
-      if (poolAddr === "0x0000000000000000000000000000000000000000") return { liquidityUsd: 0, exposure: 0 };
+      if (poolAddr === "0x0000000000000000000000000000000000000000") return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd };
       const s0 = (await rpcCallWithFallback(rpcs, poolAddr, "0x3850c7bd")).slice(2);
       sp = Number(uintAt(s0, 0)) / 2 ** 96;
-    } catch { return { liquidityUsd: 0, exposure: 0 }; }
+    } catch { return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd }; }
 
-    if (!Number.isFinite(sp) || sp <= 0) return { liquidityUsd: 0, exposure: 0 };
+    if (!Number.isFinite(sp) || sp <= 0) return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd };
 
     // Sqrt prices at tick bounds (raw, not decimal-adjusted — same units as sp)
     const sa = Math.sqrt(Math.pow(1.0001, tickLower));
     const sb = Math.sqrt(Math.pow(1.0001, tickUpper));
-    if (sa >= sb) return { liquidityUsd: 0, exposure: 0 };
+    if (sa >= sb) return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd };
 
     const L = Number(liqRaw);
 
@@ -325,7 +397,7 @@ export const fetchPositionLiquidity = action({
       ? amount0 + amount1 * priceUsd
       : amount0 * priceUsd + amount1;
 
-    if (!Number.isFinite(liquidityUsd) || liquidityUsd <= 0) return { liquidityUsd: 0, exposure: 0 };
+    if (!Number.isFinite(liquidityUsd) || liquidityUsd <= 0) return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd };
 
     const baseValue = invert ? amount1 * priceUsd : amount0 * priceUsd;
     const exposure = Math.min(1, Math.max(0, baseValue / liquidityUsd));
@@ -372,6 +444,7 @@ export const fetchPositionLiquidity = action({
     return {
       liquidityUsd: Math.round(liquidityUsd * 100) / 100,
       exposure: Math.round(exposure * 1000) / 1000,
+      feesUncollectedUsd,
       borrowHealth,
       leverageRevert,
       healthFactor,

@@ -398,19 +398,14 @@ button {
 }
 
 /* A: SOLO el filtro de cadenas (no los .segmented de los modales: Buffer/Dirección/Capital).
-   En pantallas estrechas la fila se desliza en horizontal (una sola fila) en vez de recortar
-   "Optimism". Barra de scroll oculta; los botones no se estiran. */
+   En pantallas estrechas las cadenas se REPARTEN en varias filas (wrap) en vez de recortar
+   "Optimism" o deslizarse en horizontal (que ocultaba cadenas al mover). Todas visibles siempre. */
 .network-segmented {
-  flex-wrap: nowrap;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: none;
+  flex-wrap: wrap;
 }
 
-.network-segmented::-webkit-scrollbar { display: none; }
-
 .network-segmented button {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
   white-space: nowrap;
 }
 
@@ -2252,12 +2247,6 @@ details[open] > .pool-pnl-toggle::before {
   .toolbar select,
   .ghost-btn {
     flex: 1;
-  }
-
-  /* A: SOLO el filtro de cadenas no se estira (desliza en horizontal); el resto de
-     controles .segmented (modales) conserva flex:1. */
-  .network-segmented button {
-    flex: 0 0 auto;
   }
 
   .summary-grid,

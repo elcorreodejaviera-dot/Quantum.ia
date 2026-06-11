@@ -180,8 +180,16 @@ export const armBotInternal = internalAction({
     const notionalRead = await ctx.runAction(internal.actions.poolScanner.fetchPositionNotionalStrict, {
       tokenId: pool.tokenId, network: pool.network, priceUsd: markPx, poolAddress: pool.poolAddress ?? undefined,
     });
-    if (!notionalRead || !Number.isFinite(notionalRead.liquidityUsd) || notionalRead.liquidityUsd <= 0) {
-      throw new Error("[retry_incompatible] No se pudo leer el nocional real del LP (lectura on-chain dudosa/0): no se arma con tamaño incierto.");
+    // (CodeRabbit #4) Distinguir fallo TRANSITORIO (reintentar) de DETERMINISTA (bloquear, no reintentar
+    // para siempre): un LP vacío o un par no soportado NO se resuelven reintentando.
+    if (notionalRead.reason === "transient") {
+      throw new Error("[retry_incompatible] Lectura on-chain del nocional del LP no disponible (RPC): reintento.");
+    }
+    if (notionalRead.reason === "empty") {
+      throw new Error("[blocked_config] El LP no tiene liquidez: nada que cubrir (fondea la posición LP).");
+    }
+    if (notionalRead.reason !== "ok" || !Number.isFinite(notionalRead.liquidityUsd) || notionalRead.liquidityUsd <= 0) {
+      throw new Error("[blocked_config] No se puede dimensionar la cobertura de este LP (par/metadata no soportados).");
     }
     const hedgeNotionalUsd = notionalRead.liquidityUsd;
     const totalNotional = hedgeNotionalUsd * (1 + bufferPct / 100);

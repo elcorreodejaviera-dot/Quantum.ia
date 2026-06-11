@@ -161,8 +161,10 @@ szi==0 confirmado; fencing/lease para no competir con el cron de reconciliación
 ## Prerequisitos que el bot DEBE cumplir para que arme de verdad (verificar)
 Aunque cablee el auto-arm, NO armará si falta algo. CRÍTICO confirmar que el modal de configuración
 del bot envía/deriva:
-- `hedgeNotionalUsd > 0` (tamaño de la cobertura). **Si la UI no lo manda, armBotInternal lanza
-  `[blocked_config] sin hedgeNotionalUsd válido` y el bot nunca arma.** ← revisar el modal IL.
+- **Tamaño de la cobertura:** lo DERIVA el BACKEND on-chain (ver G3: `fetchPositionNotionalStrict` ×
+  buffer). El cliente NO envía `hedgeNotionalUsd`; `armBotInternal` no bloquea por falta de ese
+  campo. Requiere `pool.tokenId` y un LP con liquidez (si está vacío/no soportado → bloqueado, no
+  reintenta para siempre).
 - `stopLossPct` en (0,100), `direction='short'`, `kind='il'`, `hlAccountId` (cuenta unified),
   `canTradeLive` concedido al usuario.
 - Posición HL FLAT del activo (sin posición previa abierta en ETH, etc.).

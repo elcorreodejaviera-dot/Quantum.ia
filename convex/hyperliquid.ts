@@ -334,6 +334,10 @@ export const closeBotPosition = action({
     if (!bot.hlAccountId) throw new Error("El bot no tiene cuenta HL vinculada.");
     if (!bot.baseAsset) throw new Error("El bot no tiene activo base.");
 
+    // (CodeRabbit #3) closePositionEmergency aplana TODA la posición del activo de la cuenta. Es
+    // seguro porque rige la INVARIANTE 1 cuenta = 1 bot: getOrCreatePoolBot rechaza vincular una
+    // cuenta HL ya asignada a otro bot ("Esa cuenta ya está asignada a otro bot") → la posición de
+    // ese activo en esa cuenta pertenece EXCLUSIVAMENTE a este bot. No hay otro consumidor que cerrar.
     // Aplanar la posición del activo + cancelar sus órdenes (reduceOnly: solo reduce, nunca abre).
     const closeRes = await ctx.runAction(internal.hyperliquid.closePositionEmergency, {
       hlAccountId: bot.hlAccountId, asset: bot.baseAsset,

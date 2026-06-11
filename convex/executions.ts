@@ -392,14 +392,22 @@ export const closeOpenExecutionsForBotInternal = internalMutation({
   args: { botId: v.id("bots") },
   handler: async (ctx, { botId }) => {
     const rows = await ctx.db.query("execution_requests").withIndex("by_bot", (q) => q.eq("botId", botId)).collect();
-    let closed = 0;
+    let closed = 0, failed = 0;
     for (const r of rows) {
-      if (!["closed", "failed"].includes(r.status)) {
+      if (["closed", "failed"].includes(r.status)) continue;
+      // (CodeRabbit #2) Solo es un CIERRE real si hubo posición (filledSize>0). Una ejecución sin
+      // fill (pending/submitting/unknown sin datos) nunca abrió posición → terminarla como `failed`,
+      // no como `closed` (que falsearía un cierre y ensuciaría el historial). Ambos son terminales →
+      // ninguno bloquea el borrado del bot.
+      if ((r.filledSize ?? 0) > 0) {
         await applyTransition(ctx, { requestId: r._id, status: "closed", filledSize: r.filledSize, entryPrice: r.entryPrice });
         closed++;
+      } else {
+        await applyTransition(ctx, { requestId: r._id, status: "failed", error: "sin fill al cerrar el bot" });
+        failed++;
       }
     }
-    return { closed };
+    return { closed, failed };
   },
 });
 

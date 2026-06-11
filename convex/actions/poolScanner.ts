@@ -314,6 +314,106 @@ async function fetchUncollectedFeesUsd(
   }
 }
 
+// --- G3 (sizing de CAPITAL REAL): metadata ESTRICTA y lectura que FALLA CERRADO ---
+// Lee symbol+decimals con FALLBACK real entre RPCs y devuelve null si NO se obtienen AMBOS de forma
+// fiable (sin defaults silenciosos 18/"???"). Para dimensionar capital real un decimals errado daría
+// un nocional 10^N veces mal; mejor no armar que armar con un tamaño dudoso.
+async function tokenMetaStrict(rpcs: string[], addr: string): Promise<{ symbol: string; decimals: number } | null> {
+  let symbol: string | null = null;
+  try {
+    const raw = (await rpcCallWithFallback(rpcs, addr, "0x95d89b41")).slice(2);
+    if (raw.length >= 128) {
+      const s = hexToUtf8(raw, 0);
+      if (s) symbol = s;
+    } else if (raw.length === 64) {
+      const bytes: number[] = [];
+      for (let i = 0; i < 32; i++) {
+        const b = parseInt(raw.slice(i * 2, i * 2 + 2), 16);
+        if (b === 0) break;
+        bytes.push(b);
+      }
+      const s = new TextDecoder().decode(new Uint8Array(bytes)).trim();
+      if (s) symbol = s;
+    }
+  } catch { return null; }
+  if (!symbol) return null;
+  let decimals: number | null = null;
+  try {
+    const d = parseInt((await rpcCallWithFallback(rpcs, addr, "0x313ce567")).slice(2), 16);
+    if (Number.isInteger(d) && d >= 0 && d <= 36) decimals = d;
+  } catch { return null; }
+  if (decimals === null) return null;
+  return { symbol, decimals };
+}
+
+// Nocional USD AUTORITATIVO de la posición LP para dimensionar la cobertura. FALLA CERRADO: cualquier
+// fallo de lectura / metadata dudosa / invert ambiguo → null (el llamador NO arma). Reutiliza la
+// misma matemática V3 que fetchPositionLiquidity pero con metadata estricta y fallback entre RPCs.
+export const fetchPositionNotionalStrict = internalAction({
+  args: { tokenId: v.number(), network: v.string(), priceUsd: v.number(), poolAddress: v.optional(v.string()) },
+  handler: async (_ctx, { tokenId, network, priceUsd, poolAddress: knownPoolAddress }): Promise<{ liquidityUsd: number } | null> => {
+    const rpcs = RPC[network];
+    const nft  = NFT_MANAGER[network];
+    const factory = FACTORY[network];
+    if (!rpcs || !nft || !factory) return null;
+    if (!Number.isFinite(priceUsd) || priceUsd <= 0) return null;
+
+    let posRaw: string;
+    try {
+      posRaw = (await rpcCallWithFallback(rpcs, nft, "0x99fbab88" + pad(BigInt(tokenId)))).slice(2);
+    } catch { return null; }
+    if (posRaw.length < 64 * 12) return null;
+
+    const token0addr = addrAt(posRaw, 2);
+    const token1addr = addrAt(posRaw, 3);
+    const fee        = Number(uintAt(posRaw, 4));
+    const tickLower  = Number(intAt(posRaw, 5));
+    const tickUpper  = Number(intAt(posRaw, 6));
+    const liqRaw     = uintAt(posRaw, 7);
+    if (liqRaw === 0n) return { liquidityUsd: 0 };   // sin liquidez = sin cobertura que dimensionar
+
+    // Metadata ESTRICTA (fail-closed) de ambos tokens.
+    const [m0, m1] = await Promise.all([tokenMetaStrict(rpcs, token0addr), tokenMetaStrict(rpcs, token1addr)]);
+    if (!m0 || !m1) return null;
+    // invert ESTRICTO: exactamente UN token es stable (si no, no se puede saber el activo base).
+    const stable0 = STABLES.has(m0.symbol);
+    const stable1 = STABLES.has(m1.symbol);
+    if (stable0 === stable1) return null;
+    const invert = stable0;
+
+    let sp: number;
+    try {
+      let poolAddr = knownPoolAddress?.toLowerCase();
+      if (!poolAddr) {
+        const getPoolData = "0x1698ee82" +
+          token0addr.slice(2).padStart(64, "0") + token1addr.slice(2).padStart(64, "0") + pad(BigInt(fee));
+        const poolRaw = (await rpcCallWithFallback(rpcs, factory, getPoolData)).slice(2);
+        poolAddr = ("0x" + poolRaw.slice(24)).toLowerCase();
+      }
+      if (poolAddr === "0x0000000000000000000000000000000000000000") return null;
+      const s0 = (await rpcCallWithFallback(rpcs, poolAddr, "0x3850c7bd")).slice(2);
+      sp = Number(uintAt(s0, 0)) / 2 ** 96;
+    } catch { return null; }
+    if (!Number.isFinite(sp) || sp <= 0) return null;
+
+    const sa = Math.sqrt(Math.pow(1.0001, tickLower));
+    const sb = Math.sqrt(Math.pow(1.0001, tickUpper));
+    if (sa >= sb) return null;
+    const L = Number(liqRaw);
+
+    let amount0_raw = 0, amount1_raw = 0;
+    if (sp <= sa) { amount0_raw = L * (sb - sa) / (sa * sb); }
+    else if (sp >= sb) { amount1_raw = L * (sb - sa); }
+    else { amount0_raw = L * (sb - sp) / (sp * sb); amount1_raw = L * (sp - sa); }
+
+    const amount0 = amount0_raw / Math.pow(10, m0.decimals);
+    const amount1 = amount1_raw / Math.pow(10, m1.decimals);
+    const liquidityUsd = invert ? amount0 + amount1 * priceUsd : amount0 * priceUsd + amount1;
+    if (!Number.isFinite(liquidityUsd) || liquidityUsd < 0) return null;
+    return { liquidityUsd: Math.round(liquidityUsd * 100) / 100 };
+  },
+});
+
 export const fetchPositionLiquidity = action({
   args: { tokenId: v.number(), network: v.string(), priceUsd: v.number(), poolAddress: v.optional(v.string()) },
   handler: async (_ctx, { tokenId, network, priceUsd, poolAddress: knownPoolAddress }) => {

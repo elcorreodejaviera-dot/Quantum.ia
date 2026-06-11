@@ -10,6 +10,10 @@ import { decryptPrivateKey } from "./hlCredentialActions";
 import { hlNetwork, hlIsTestnet, assertExpectedNetwork } from "./hlNetwork";
 // Timeout del envío de órdenes a HL (entrada y SL). Menor que RECONCILE_LEASE_MS (60s) para el SL.
 const HL_ORDER_TIMEOUT_MS = 30_000;
+// (G5) Grace para CONFIRMAR el cierre externo de una posición: szi==0 debe mantenerse al menos este
+// tiempo (≥1 ciclo extra del cron de 1 min) entre lecturas separadas en el tiempo → defensa contra
+// un lag consistente de clearinghouseState que podría dar 0 sobre una posición aún viva.
+const FLAT_CONFIRM_GRACE_MS = 90_000;
 // Entrada "market": IOC con precio agresivo para cruzar el book (la IOC se llena al MEJOR precio
 // disponible, no al límite — el slippage solo amplía el rango aceptable, no empeora el fill).
 const ENTRY_IOC_SLIPPAGE = 0.02;
@@ -232,6 +236,13 @@ export async function placeStopLoss(
   throw new Error(`Respuesta de SL ambigua: ${JSON.stringify(st ?? null).slice(0, 120)}`);
 }
 
+// szi (tamaño firmado) de la posición del activo; 0 si no hay posición. Para detectar cierre.
+async function positionSzi(info: InfoClient, user: string, asset: string): Promise<number> {
+  const ch = await info.clearinghouseState({ user: user as `0x${string}` });
+  const pos = (ch.assetPositions ?? []).find((p: any) => p.position?.coin === asset);
+  return pos ? Number(pos.position?.szi ?? 0) : 0;
+}
+
 export function makeClients(privKey: `0x${string}`, isTestnet: boolean) {
   const wallet = privateKeyToAccount(privKey);
   const transport = new HttpTransport({ isTestnet });
@@ -241,6 +252,102 @@ export function makeClients(privKey: `0x${string}`, isTestnet: boolean) {
     exchange: new ExchangeClient({ transport, wallet }),
   };
 }
+
+// --- Cierre de emergencia (one-off, capital real reduceOnly): aplana la posición del activo y
+// cancela sus órdenes vivas (SL). reduceOnly = SOLO reduce, nunca abre/invierte. Lo invoca el
+// USUARIO vía CLI para desbloquear el borrado del bot (la reconciliación marca las ejecuciones
+// closed al ver szi==0). NO marca DB aquí: deja que el cron de reconcileExecution lo cierre. ---
+export const closePositionEmergency = internalAction({
+  args: { hlAccountId: v.id("hl_api_credentials"), asset: v.string() },
+  handler: async (ctx, { hlAccountId, asset }): Promise<any> => {
+    const credential = await ctx.runQuery(internal.hlCredentials.getAccountByIdInternal, { id: hlAccountId });
+    if (!credential) throw new Error("Cuenta HL no encontrada");
+    const a = asset.toUpperCase();
+    const { info, exchange } = makeClients(decryptPrivateKey(credential), hlIsTestnet());
+    const { assetId, szDecimals, markPx } = await getAssetMeta(info, a);
+    const tradingAccount = credential.tradingAccountAddress as `0x${string}`;
+
+    // 1) Posición actual del activo.
+    const chState = await info.clearinghouseState({ user: tradingAccount });
+    const pos = (chState.assetPositions ?? []).find((p: any) => p.position?.coin === a);
+    const szi = pos ? Number(pos.position?.szi ?? 0) : 0;
+
+    // 2) Aplanar PRIMERO (reduceOnly IOC market agresivo) — nunca deja la posición sin SL antes de cerrar.
+    let closeResult: any = "no_position";
+    if (Math.abs(szi) > 0) {
+      const isBuy = szi < 0;                            // short → BUY para cerrar
+      const size = floorToDecimals(Math.abs(szi), szDecimals);
+      const limitPx = isBuy ? markPx * (1 + ENTRY_IOC_SLIPPAGE) : markPx * (1 - ENTRY_IOC_SLIPPAGE);
+      const ac = abortAfter(HL_ORDER_TIMEOUT_MS);
+      try {
+        const resp = await exchange.order({
+          orders: [{ a: assetId, b: isBuy, p: aggressiveHlPriceStr(limitPx, szDecimals, isBuy), s: String(size), r: true, t: { limit: { tif: "Ioc" } } }],
+          grouping: "na",
+        }, { signal: ac.signal, expiresAfter: Date.now() + HL_ORDER_TIMEOUT_MS });
+        closeResult = (resp as any)?.response?.data?.statuses?.[0] ?? resp;
+      } finally { ac.clear(); }
+    }
+
+    // 3) Confirmar FLAT antes de tocar los SL (Codex ALTO): si el IOC se llenó PARCIAL o falló,
+    // queda posición residual y NO se deben cancelar sus SL (dejaría capital real sin protección).
+    const after = await info.clearinghouseState({ user: tradingAccount });
+    const posAfter = (after.assetPositions ?? []).find((p: any) => p.position?.coin === a);
+    const sziAfter = posAfter ? Number(posAfter.position?.szi ?? 0) : 0;
+
+    // 4) SOLO si está flat: cancelar las órdenes vivas del activo (SL ya inútiles). Si NO está flat,
+    // se dejan los SL intactos (protección) y se devuelve sziAfter != 0 → el llamador NO borra/desarma.
+    // (Codex ALTO) FAIL-CLOSED: tras cancelar, RE-LEER y exigir que NO quede ninguna orden del activo.
+    // `ordersRemaining = null` = no se intentó (posición no flat); 0 = limpio; >0 = quedó alguna viva.
+    // El llamador solo cierra/desarma/borra si sziAfter===0 Y ordersRemaining===0 (sin SL huérfano).
+    const canceled: string[] = [];
+    let ordersRemaining: number | null = null;
+    if (sziAfter === 0) {
+      const open: any[] = await info.frontendOpenOrders({ user: tradingAccount });
+      const assetOrders = open.filter((o: any) => o?.coin === a);
+      for (const o of assetOrders) {
+        try {
+          if (o.cloid) await exchange.cancelByCloid({ cancels: [{ asset: assetId, cloid: o.cloid as `0x${string}` }] });
+          else await exchange.cancel({ cancels: [{ a: assetId, o: Number(o.oid) }] });
+          canceled.push(String(o.oid));
+        } catch { /* re-lectura de abajo decide el resultado, no este catch */ }
+      }
+      // Confirmación dura: cualquier orden del activo que siga viva = NO limpio → el llamador aborta.
+      const openAfter: any[] = await info.frontendOpenOrders({ user: tradingAccount });
+      ordersRemaining = openAfter.filter((o: any) => o?.coin === a).length;
+    }
+    return { sziBefore: szi, closeResult, canceledOrders: canceled, sziAfter, ordersRemaining };
+  },
+});
+
+// (G4) Acción PÚBLICA: cerrar la posición de un bot desde el portal (al quitarlo, sin quedar
+// bloqueado). Auth canTradeLive + ownership → aplana la posición del activo + cancela sus órdenes
+// (reduceOnly, vía closePositionEmergency) y, si queda flat, cierra en DB las ejecuciones abiertas y
+// pide el desarmado de cualquier trigger_arm. Tras esto deletePoolBot ya no se bloquea.
+export const closeBotPosition = action({
+  args: { botId: v.id("bots") },
+  handler: async (ctx, { botId }): Promise<any> => {
+    const user = await ctx.runQuery(internal.users.getCurrentUserInternal, {});
+    await ctx.runQuery(internal.users.assertTradeLiveInternal, {});
+    const bot = await ctx.runQuery(internal.bots.getBotByIdInternal, { id: botId });
+    if (!bot) throw new Error("Bot no encontrado");
+    if (bot.userId !== user._id) throw new Error("Ese bot no te pertenece.");
+    if (!bot.hlAccountId) throw new Error("El bot no tiene cuenta HL vinculada.");
+    if (!bot.baseAsset) throw new Error("El bot no tiene activo base.");
+
+    // Aplanar la posición del activo + cancelar sus órdenes (reduceOnly: solo reduce, nunca abre).
+    const closeRes = await ctx.runAction(internal.hyperliquid.closePositionEmergency, {
+      hlAccountId: bot.hlAccountId, asset: bot.baseAsset,
+    });
+    // Solo si HL confirma flat Y sin órdenes vivas del activo (sin SL huérfano): cerrar en DB las
+    // ejecuciones JAV-37 abiertas y desarmar arms JAV-44. Si no, NO se toca nada → el bot queda
+    // intacto y protegido para reintentar (Codex: fail-closed, nunca borrar dejando un SL vivo).
+    if (closeRes?.sziAfter === 0 && closeRes?.ordersRemaining === 0) {
+      await ctx.runMutation(internal.executions.closeOpenExecutionsForBotInternal, { botId });
+      await ctx.runMutation(internal.triggerArms.requestDisarmAndDeactivate, { botId });
+    }
+    return closeRes;
+  },
+});
 
 // --- Ejecución segura (JAV-37) ---
 
@@ -535,7 +642,31 @@ export const reconcileExecution = internalAction({
           // closed: salida pendiente, reconciliable en el siguiente ciclo. Observabilidad explícita.
           return { skipped: "sl_triggered_pending" };
         }
-        // canceled/rejected/… → el cloid actual está consumido: recolocar con uno NUEVO (CAS + fencing).
+        // (G5) El SL ya NO está resting (canceled/rejected). ANTES de recolocar, comprobar si la
+        // POSICIÓN está cerrada: si se cerró por fuera (cierre manual del portal, SL ejecutado por
+        // otra vía, cierre en HL), HL cancela el SL reduceOnly y, sin esto, el reconcile entra en
+        // BUCLE recolocando un SL sobre una posición inexistente y la ejecución queda `protected`
+        // para siempre (bloquea el borrado del bot). Confirmación DIFERIDA (Codex MEDIO): szi==0 debe
+        // mantenerse a lo largo de FLAT_CONFIRM_GRACE_MS entre ciclos del cron (lecturas separadas en
+        // el tiempo), no dos lecturas seguidas de la misma fuente que un lag consistente engañaría.
+        const flat = await positionSzi(info, user, asset);
+        if (flat === 0) {
+          if (req.flatSince === undefined) {
+            // Primera observación flat → registrar y ESPERAR a confirmar en un ciclo posterior.
+            await ctx.runMutation(internal.executions.setExecutionFlatSince, { requestId, token, value: Date.now() });
+            return { skipped: "flat_observed_pending_confirm" };
+          }
+          if (Date.now() - req.flatSince >= FLAT_CONFIRM_GRACE_MS) {
+            await ctx.runMutation(internal.executions.settleExecution, { requestId, token, status: "closed", filledSize, entryPrice });
+            return { result: "closed_position_flat" };
+          }
+          return { skipped: "flat_grace" };
+        }
+        // Posición VIVA: limpiar una marca flatSince previa (falsa alarma por lag) antes de recolocar.
+        if (req.flatSince !== undefined) {
+          await ctx.runMutation(internal.executions.setExecutionFlatSince, { requestId, token, value: null });
+        }
+        // canceled/rejected/… con posición VIVA → recolocar con uno NUEVO (CAS + fencing).
         const attempt = (req.slAttempt ?? 0) + 1;
         const next = cloid(req.idempotencyKey, `:sl:${attempt}`);
         const prep = await ctx.runMutation(internal.executions.prepareSlRetry, { requestId, token, newSlCloid: next, attempt });

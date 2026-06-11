@@ -2,6 +2,7 @@ import { internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
+import { internal } from "./_generated/api";
 import { requireUser, requireBotManager, deriveBaseAsset, hasPermission } from "./helpers";
 import { hasNonTerminalArmForBot, requestDisarmAndDeactivateImpl } from "./triggerArms";
 import { hasOpenExecutionForBot } from "./executions";
@@ -346,10 +347,23 @@ export const getOrCreatePoolBot = mutation({
       } else if (willBeActive && existingBot.disarmPending) {
         await ctx.db.patch(existingBot._id, { disarmPending: false });
       }
+      // (G1) Auto-arm: un bot IL que queda ACTIVO en modo REAL entra en el motor de rearm DURABLE
+      // (rearmStatus="pending") → el cron processRearms lo arma con reintento/backoff y deja el
+      // estado visible ("Armando"/"bloqueado: motivo"). Se llega aquí solo SIN arm vivo (línea de
+      // arriba lanza si hay arm y willBeActive). No tocar si ya está "running" (claim del cron en curso).
+      if (kind === "il" && willBeActive && resultMode === false && !pausingActive && existingBot.rearmStatus !== "running") {
+        await ctx.db.patch(existingBot._id, {
+          rearmStatus: "pending", nextRearmAt: Date.now(), rearmAttempts: 0,
+          lastRearmError: undefined, lastRearmErrorKind: undefined,
+        });
+        await ctx.scheduler.runAfter(0, internal.triggerEngine.processRearms, {});
+      }
       return existingBot._id;
     }
     const name = `${kind === "il" ? "IL" : "Trading"} ${baseAsset} ${pool.network}`;
-    return await ctx.db.insert("bots", {
+    // (G1) Bot IL NUEVO activo en real → encolar el armado durable desde el alta.
+    const armNow = kind === "il" && willBeActive && resultMode === false;
+    const newBotId = await ctx.db.insert("bots", {
       name,
       userId: user._id,
       poolId,
@@ -359,7 +373,10 @@ export const getOrCreatePoolBot = mutation({
       simulationMode: resultMode,
       active: willBeActive,
       ...config,
+      ...(armNow ? { rearmStatus: "pending", nextRearmAt: Date.now(), rearmAttempts: 0 } : {}),
     });
+    if (armNow) await ctx.scheduler.runAfter(0, internal.triggerEngine.processRearms, {});
+    return newBotId;
   },
 });
 

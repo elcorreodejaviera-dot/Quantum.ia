@@ -5,8 +5,9 @@ Las dos entradas son triggers nativos independientes → en un spike ambas puede
 OCO → exposición real 2x el total. Política que lo ELIMINA: **cuando se arman DOS entradas
 (`allowReentryFromAbove`), `reserveArm` reserva el PEOR CASO = 2× (`reservedNotional` y
 `marginReserved` = 2× el del total pool+búfer).** Así el colateral siempre cubre un doble-fill, NO
-solo el buffer de seguridad. Con UNA sola entrada, reserva 1×. Tras el OCO (una entrada cancelada
-confirmada) o el fill, `reconcileArm` puede **reducir la reserva a 1×** (mutation que baja
+solo el buffer de seguridad. Con UNA sola entrada, reserva 1×. Tras confirmar el OCO (entrada
+hermana cancelada vía CLOID + verificación de tamaño de posición `|szi| ≤ size*1.5`, ambos en la
+fase de posición), `reconcileArm` puede **reducir la reserva a 1×** (mutation que baja
 `marginReserved`/`reservedNotional` del arm) liberando colateral. El margen compartido suma el valor
 reservado del arm (2× mientras ambas vivan, 1× tras OCO). Esto garantiza margen para el doble-fill en
 mainnet (no es una amortiguación).

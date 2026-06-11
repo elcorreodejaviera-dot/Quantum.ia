@@ -4,6 +4,7 @@ import type { Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import { requireUser, requireBotManager, deriveBaseAsset, hasPermission } from "./helpers";
 import { hasNonTerminalArmForBot, requestDisarmAndDeactivateImpl } from "./triggerArms";
+import { hasOpenExecutionForBot } from "./executions";
 
 function validateBotNumbers(fields: {
   capitalPerTrade?: number;
@@ -359,6 +360,38 @@ export const getOrCreatePoolBot = mutation({
       active: willBeActive,
       ...config,
     });
+  },
+});
+
+// D (JAV-UI): borra el bot de un pool DETENIÉNDOLO de forma segura primero. Nunca deja órdenes/
+// posición huérfanas en HL: si hay un trigger_arm vivo (motor JAV-44) o una ejecución JAV-37 (IOC
+// manual) abierta, pide desarmado (cron cancela en HL) y NO borra todavía — devuelve
+// { stopping: true } para que el usuario reintente cuando todo esté terminal.
+export const deletePoolBot = mutation({
+  args: { botId: v.id("bots") },
+  handler: async (ctx, { botId }) => {
+    const user = await requireBotManager(ctx);
+    const bot = await ctx.db.get(botId);
+    if (!bot) return { deleted: false, stopping: false }; // idempotente: ya no existe
+    if (bot.userId !== user._id && user.role !== "admin") {
+      throw new Error("Ese bot no te pertenece.");
+    }
+    // Parada segura PRIMERO: cancela arm/órdenes vivas vía cron y desactiva (o marca disarmPending).
+    const { deactivated } = await requestDisarmAndDeactivateImpl(ctx, botId);
+    // (Codex #1 ALTO) Borrado seguro: solo si NO queda NINGUNA orden/posición viva en HL.
+    // Dos bloqueadores con SEMÁNTICA DISTINTA (Codex 2ª ronda #1):
+    //  - armLive: trigger_arm JAV-44 no terminal → requestDisarm lo CANCELA vía cron en segundos.
+    //  - execOpen: ejecución IOC manual JAV-37 abierta (p. ej. `protected`, SL resting) → NO se
+    //    cancela aquí; sigue viva hasta que su propio SL/cron la cierre. El borrado espera a eso.
+    const armLive = !deactivated || await hasNonTerminalArmForBot(ctx, botId);
+    const execOpen = await hasOpenExecutionForBot(ctx, botId);
+    if (armLive || execOpen) {
+      // blockedByExecution diferencia el mensaje en la UI: "deteniendo…" (arm) vs
+      // "esperando al cierre de la ejecución" (JAV-37, que no se cancela).
+      return { deleted: false, stopping: true, blockedByExecution: execOpen };
+    }
+    await ctx.db.delete(botId);
+    return { deleted: true, stopping: false, blockedByExecution: false };
   },
 });
 

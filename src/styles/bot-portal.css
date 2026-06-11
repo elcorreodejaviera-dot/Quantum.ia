@@ -397,6 +397,23 @@ button {
   background: var(--panel-2);
 }
 
+/* A: SOLO el filtro de cadenas (no los .segmented de los modales: Buffer/Dirección/Capital).
+   En pantallas estrechas la fila se desliza en horizontal (una sola fila) en vez de recortar
+   "Optimism". Barra de scroll oculta; los botones no se estiran. */
+.network-segmented {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.network-segmented::-webkit-scrollbar { display: none; }
+
+.network-segmented button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .segmented button {
   min-width: 82px;
   border: 1px solid transparent;
@@ -554,10 +571,14 @@ button {
   padding: 0 10px;
   transform: translateY(50%);
   pointer-events: none;
+  z-index: 2;
 }
 
+/* B: la línea conectora va DESPUÉS del texto (order: 2) para que la etiqueta
+   "Precio $X" quede a la IZQUIERDA, igual que las etiquetas min/max. */
 .range-chart-price-line::before {
   content: '';
+  order: 2;
   flex: 1;
   height: 1px;
   background: var(--green);
@@ -568,6 +589,9 @@ button {
   color: var(--muted);
   font-size: 10px;
   white-space: nowrap;
+  background: color-mix(in srgb, var(--panel) 75%, transparent);
+  border-radius: 3px;
+  padding: 0 2px;
 }
 
 .range-chart-price-line strong {
@@ -575,6 +599,62 @@ button {
   font-size: 13px;
   color: var(--text);
   white-space: nowrap;
+  background: color-mix(in srgb, var(--panel) 75%, transparent);
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
+/* C: línea de "Entrada $X" — precio al que se abrió el LP (ámbar), misma mecánica
+   de posición que la línea de precio pero con pool.entryPrice. */
+.range-chart-entry-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  transform: translateY(50%);
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* B/C (Codex #3): la etiqueta "Entrada" va a la DERECHA (línea conectora primero, sin order)
+   y "Precio" a la izquierda — así al coincidir ambos precios (p. ej. recién registrado) las
+   etiquetas no se solapan ni se tapan entre sí. */
+.range-chart-entry-line::before {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--amber, #f0b429);
+  opacity: 0.7;
+}
+
+.range-chart-entry-line span {
+  color: var(--amber, #f0b429);
+  font-size: 10px;
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--panel) 75%, transparent);
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
+.range-chart-entry-line strong {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--amber, #f0b429);
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--panel) 75%, transparent);
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
+/* Codex 2ª ronda #3: el contenedor tiene pointer-events:none (no interferir con el gráfico),
+   así que el title no aparecía. Se rehabilitan SOLO las etiquetas para que el tooltip funcione. */
+.range-chart-entry-line span,
+.range-chart-entry-line strong {
+  pointer-events: auto;
+  cursor: help;
 }
 
 .range-chart-footer {
@@ -2174,6 +2254,12 @@ details[open] > .pool-pnl-toggle::before {
     flex: 1;
   }
 
+  /* A: SOLO el filtro de cadenas no se estira (desliza en horizontal); el resto de
+     controles .segmented (modales) conserva flex:1. */
+  .network-segmented button {
+    flex: 0 0 auto;
+  }
+
   .summary-grid,
   .futures-grid,
   .spot-form,
@@ -2389,6 +2475,9 @@ details[open] > .pool-pnl-toggle::before {
   right: 0;
   top: 0;
   z-index: 1000;
+  /* E: en móvil un modal alto (configuración del bot) no debe pegarse a los bordes;
+     deja margen para que se vea que hay contenido por encima/debajo. */
+  padding: 16px;
 }
 
 .modal-panel {
@@ -2398,6 +2487,12 @@ details[open] > .pool-pnl-toggle::before {
   max-width: 420px;
   padding: 20px;
   width: 90%;
+  /* E: limita la altura al viewport y permite scroll vertical dentro del modal — antes el
+     contenido largo se recortaba arriba/abajo en pantallas pequeñas y no se podía desplazar. */
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .scan-modal {

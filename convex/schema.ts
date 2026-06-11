@@ -48,6 +48,10 @@ export default defineSchema({
     subgraphUpdatedAt: v.optional(v.number()),
     initialLiquidityUsd: v.optional(v.number()),
     initialLiquidityAt: v.optional(v.number()),
+    // C (JAV-UI): precio al que el portal vio por primera vez la posición LP (aprox. de entrada).
+    // Se captura una sola vez y NUNCA se sobreescribe. Uniswap V3 no almacena el precio de entrada.
+    entryPrice: v.optional(v.number()),
+    entryPriceAt: v.optional(v.number()),
     // Ciclo de vida de la posición LP (detección de cierre on-chain).
     // closed = la posición se vació/cerró en Uniswap/Revert. Reversible:
     // si la posición vuelve a recibir liquidez, el cron limpia el flag.
@@ -283,6 +287,7 @@ export default defineSchema({
     .index("by_user_created", ["userId", "createdAt"])
     .index("by_status_created", ["status", "createdAt"])
     .index("by_account", ["hlAccountId"])    // bloquear revocación con ejecuciones abiertas
+    .index("by_bot", ["botId"])              // bloquear borrado del bot con ejecuciones abiertas (D)
     .index("by_created", ["createdAt"]),     // observabilidad admin (listRecentExecutions)
 
   // --- JAV-44 Etapa 1: motor de cobertura automática (triggers nativos en HL) ---

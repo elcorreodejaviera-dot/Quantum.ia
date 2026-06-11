@@ -39,7 +39,7 @@ C) Línea de "Entrada $X" automática. Revisa CON LUPA:
    - BotPortal.jsx: efecto de backfill que recorre poolsFromDb y, por cada pool sin entryPrice con
      precio en vivo, llama setPoolEntryPriceIfMissing una vez (guardado por un useRef Set, con
      rollback del ref en catch). ¿Bucle de escrituras? ¿condición de carrera? ¿el ref se comporta
-     bien con el cierre del efecto y las re-renders? ¿normalizeAsset(p.pair.split('/')[0]) casa
+     bien con el cierre del efecto y las re-renders? ¿`normalizeAsset(p.pair.split('/')[0])` casa
      con la clave de `prices`?
    - Registro (ScanTokenIdModal): pasa entryPrice = result.currentPrice (slot0 al registrar).
    - Render: hasEntry exige entryPrice dentro de [min,max]; fórmula entryPos idéntica a la de

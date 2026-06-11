@@ -30,7 +30,7 @@ Alternativa descartada: `flex-wrap: wrap` (apila en 2 filas; el usuario prefiere
 entryPrice: v.optional(v.number()),
 entryPriceAt: v.optional(v.number()),
 ```
-**Backend:** en el cron/registro de `poolScanner` (donde ya se setea `initialLiquidityUsd`/`initialLiquidityAt`), setear `entryPrice` una sola vez (C1). Mutation interna `patchPoolEntryPrice` (idempotente: no pisa si ya existe).
+**Backend:** capturar `entryPrice` una sola vez (C1): en `createPool` desde el `slot0` del registro, y para pools ya existentes vía la mutation `setPoolEntryPriceIfMissing` (idempotente: NO pisa si ya existe; valida ownership).
 **UI (`BotPortal.jsx` range-chart):** nueva `.range-chart-entry-line` posicionada por `bottom: posEntry%` (misma fórmula que la línea de precio pero con `pool.entryPrice`), etiqueta "Entrada $X" a la izquierda, color distinto (p.ej. ámbar). Ocultar si `entryPrice == null` o fuera de [min,max].
 
 ## D — Botón "Eliminar bot" (borra el bot del pool y lo detiene)

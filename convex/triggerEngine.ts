@@ -10,6 +10,7 @@ import {
   floorToDecimals, formatHlPrice, fillsByCloid, abortAfter, placeStopLoss,
 } from "./hyperliquid";
 import { armCloid } from "./triggerArms";
+import { armErrorKind, REARM_COOLDOWN_MS, REARM_RETRY_MS, REARM_BLOCKED_RECHECK_MS, STOP_ALERT_THRESHOLD } from "./triggerRearm";
 import { TransportError } from "@nktkas/hyperliquid";
 
 // --- JAV-44 Etapa 1: actions del motor (trigger nativo de entrada inferior, TESTNET) ---
@@ -53,53 +54,73 @@ async function ensureOrdersDead(
   return allDead;
 }
 
-// Coloca/observa órdenes trigger por CLOID. Política de COLOCACIÓN: todos los gates + hard-gate testnet.
+// Acción PÚBLICA: auth + ownership → delega el armado al núcleo interno (compartido con el auto-rearm).
 export const armPoolBotEntry = action({
   args: { botId: v.id("bots"), expectedNetwork: v.string(), confirm: v.boolean() },
-  handler: async (ctx, args) => {
+  // Promise<any>: corta el ciclo de inferencia (TS2589) — estas actions se invocan entre sí en el mismo
+  // módulo (internal.triggerEngine.*). El cuerpo se sigue type-checkeando (caza referencias indefinidas).
+  handler: async (ctx, args): Promise<any> => {
     // Red: el backend es la fuente de verdad. Mainnet habilitado ahora que hay SL post-fill que
     // protege la posición (cierre de emergencia garantiza que nunca quede un short desnudo).
     assertExpectedNetwork(args.expectedNetwork);
     if (!args.confirm) throw new Error("Armado requiere confirmación explícita.");
-
     const user = await ctx.runQuery(internal.users.getCurrentUserInternal, {});
     await ctx.runQuery(internal.users.assertTradeLiveInternal, {});
+    const bot0 = await ctx.runQuery(internal.bots.getBotByIdInternal, { id: args.botId });
+    if (!bot0) throw new Error("Bot not found");
+    if (bot0.userId !== user._id) throw new Error("Bot does not belong to this user");
+    return await ctx.runAction(internal.triggerEngine.armBotInternal, { botId: args.botId, userId: user._id });
+  },
+});
+
+// Núcleo del armado SIN auth de usuario (lo invocan armPoolBotEntry y el auto-rearm del cron). Revalida
+// TODOS los gates contra userId (no la identidad): permiso live, switches, ownership, kind/dirección,
+// pool, cuenta, sizing, reserva OCC y colocación. Coloca el trigger inferior (+ superior si aplica).
+export const armBotInternal = internalAction({
+  args: { botId: v.id("bots"), userId: v.id("users"), rearmToken: v.optional(v.string()) },
+  handler: async (ctx, { botId, userId, rearmToken }): Promise<any> => {
+    // Los throws llevan prefijo [kind] (auto-rearm): el cron los mapea a la política de Codex —
+    // [cancel] aborta el rearm; [blocked_config]/[blocked_margin] → blocked reevaluable; [retry_incompatible]
+    // y sin-prefijo → transient (reintento indefinido). Ver REARM_ERROR_KINDS / armErrorKind.
+    // Permiso de trading live del DUEÑO del bot (sin identidad — válido para el auto-rearm del cron).
+    const canLive = await ctx.runQuery(internal.users.hasTradeLiveForUserInternal, { userId });
+    if (!canLive) throw new Error("[blocked_config] Usuario sin permiso de trading live");
     const [tradingConfig, simConfig] = await Promise.all([
       ctx.runQuery(internal.systemConfig.getConfigInternal, { key: "tradingEnabled" }),
       ctx.runQuery(internal.systemConfig.getConfigInternal, { key: "simulationMode" }),
     ]);
-    if (tradingConfig?.value !== true) throw new Error("Live trading is disabled");
-    if (simConfig?.value !== false) throw new Error("Simulation mode is active");
+    if (tradingConfig?.value !== true) throw new Error("[cancel] Live trading is disabled");
+    if (simConfig?.value !== false) throw new Error("[cancel] Simulation mode is active");
 
-    const bot = await ctx.runQuery(internal.bots.getBotByIdInternal, { id: args.botId });
-    if (!bot) throw new Error("Bot not found");
-    if (bot.userId !== user._id) throw new Error("Bot does not belong to this user");
-    if (bot.kind !== "il") throw new Error("Solo bots IL (cobertura) en Etapa 1");
-    if (bot.direction !== "short") throw new Error("El bot IL debe ser short");
-    if (!bot.active) throw new Error("Bot is not active");
-    if (bot.disarmPending) throw new Error("Bot pausándose (disarmPending): no se puede armar");
-    if (bot.simulationMode) throw new Error("Bot en simulación");
-    if (!bot.hlAccountId) throw new Error("Bot sin cuenta HL");
-    if (!bot.poolId) throw new Error("Bot sin pool");
-    if (!bot.baseAsset) throw new Error("Bot sin baseAsset");
+    const bot = await ctx.runQuery(internal.bots.getBotByIdInternal, { id: botId });
+    if (!bot) throw new Error("[cancel] Bot not found");
+    if (bot.userId !== userId) throw new Error("[cancel] Bot does not belong to this user");
+    if (bot.kind !== "il") throw new Error("[blocked_config] Solo bots IL (cobertura) en Etapa 1");
+    if (bot.direction !== "short") throw new Error("[blocked_config] El bot IL debe ser short");
+    if (!bot.active) throw new Error("[cancel] Bot is not active");
+    if (bot.disarmPending) throw new Error("[cancel] Bot pausándose (disarmPending): no se puede armar");
+    if (bot.simulationMode) throw new Error("[cancel] Bot en simulación");
+    if (!bot.hlAccountId) throw new Error("[blocked_config] Bot sin cuenta HL");
+    if (!bot.poolId) throw new Error("[blocked_config] Bot sin pool");
+    if (!bot.baseAsset) throw new Error("[blocked_config] Bot sin baseAsset");
     if (bot.hedgeNotionalUsd === undefined || !Number.isFinite(bot.hedgeNotionalUsd) || bot.hedgeNotionalUsd <= 0) {
-      throw new Error("Bot sin hedgeNotionalUsd válido (> 0)");
+      throw new Error("[blocked_config] Bot sin hedgeNotionalUsd válido (> 0)");
     }
     if (bot.stopLossPct === undefined || !Number.isFinite(bot.stopLossPct) || bot.stopLossPct <= 0 || bot.stopLossPct >= 100) {
-      throw new Error("Bot sin stopLossPct válido (0–100) — necesario para el SL post-fill");
+      throw new Error("[blocked_config] Bot sin stopLossPct válido (0–100) — necesario para el SL post-fill");
     }
 
     const pool = await ctx.runQuery(internal.pools.getPoolByIdInternal, { id: bot.poolId });
-    if (!pool) throw new Error("Pool no encontrado");
-    if (pool.closed) throw new Error("Pool cerrado");
-    if (!Number.isFinite(pool.minRange) || pool.minRange <= 0) throw new Error("minRange inválido");
+    if (!pool) throw new Error("[cancel] Pool no encontrado");
+    if (pool.closed) throw new Error("[cancel] Pool cerrado");
+    if (!Number.isFinite(pool.minRange) || pool.minRange <= 0) throw new Error("[blocked_config] minRange inválido");
 
     const credential = await ctx.runQuery(internal.hlCredentials.getAccountByIdInternal, { id: bot.hlAccountId });
-    if (!credential) throw new Error("Cuenta HL no encontrada");
-    if (credential.userId !== user._id) throw new Error("La cuenta no pertenece a este usuario");
+    if (!credential) throw new Error("[blocked_config] Cuenta HL no encontrada");
+    if (credential.userId !== userId) throw new Error("[blocked_config] La cuenta no pertenece a este usuario");
 
     const effLev = (!bot.autoLeverage && bot.leverage !== undefined) ? bot.leverage : 1;
-    if (!Number.isFinite(effLev) || effLev < 1 || effLev > 25) throw new Error("leverage inválido");
+    if (!Number.isFinite(effLev) || effLev < 1 || effLev > 25) throw new Error("[blocked_config] leverage inválido");
     const appliedLeverage = Math.round(effLev);
 
     const asset = bot.baseAsset.toUpperCase();
@@ -111,26 +132,28 @@ export const armPoolBotEntry = action({
     // reservar margen (el snapshot de colateral spot solo es válido en unified).
     const abstraction = await info.userAbstraction({ user: tradingAccount });
     if (abstraction !== "unifiedAccount") {
-      throw new Error("La cuenta HL no está en modo unified; armado bloqueado por seguridad.");
+      throw new Error("[blocked_config] La cuenta HL no está en modo unified; armado bloqueado por seguridad.");
     }
 
-    // (H4) Precondición flat: posición neta cero del activo.
+    // (H4) Precondición flat: posición neta cero del activo. [retry_incompatible]: estado externo/residual,
+    // reintentar + alertar (Codex #5) — puede ser una posición que se cerrará o un residuo a limpiar.
     const chState = await info.clearinghouseState({ user: tradingAccount });
     const pos = (chState.assetPositions ?? []).find((p: any) => p.position?.coin === asset);
     if (pos && Math.abs(Number(pos.position?.szi ?? 0)) > 0) {
-      throw new Error("Ya existe posición abierta en el activo: armado bloqueado (precondición flat).");
+      throw new Error("[retry_incompatible] Ya existe posición abierta en el activo: armado bloqueado (precondición flat).");
     }
     // (Fix #7 / H4) Sin órdenes abiertas incompatibles en el activo (un trigger/orden previo dejaría
     // la cobertura en un estado ambiguo). En Etapa 1, cualquier orden abierta del activo bloquea.
     const openOrders: any[] = await info.frontendOpenOrders({ user: tradingAccount });
     if (openOrders.some((o) => o?.coin === asset)) {
-      throw new Error("Hay órdenes abiertas en el activo: armado bloqueado (sin órdenes incompatibles).");
+      throw new Error("[retry_incompatible] Hay órdenes abiertas en el activo: armado bloqueado (sin órdenes incompatibles).");
     }
 
     // (R6) Trigger normalizado al tick (floor) y gate mark > triggerPxNormalized SOBRE el valor enviado.
+    // Sin prefijo → [transient]: el precio está en/bajo el rango; reintentar (se moverá fuera del borde).
     const triggerPxNorm = roundHlPrice(pool.minRange, szDecimals, "floor");
     if (!(markPx > triggerPxNorm)) {
-      throw new Error(`mark (${markPx}) ≤ triggerPx normalizado (${triggerPxNorm}): no se arma (precio ya en/bajo el rango).`);
+      throw new Error(`[transient] mark (${markPx}) ≤ triggerPx normalizado (${triggerPxNorm}): no se arma (precio ya en/bajo el rango).`);
     }
 
     // (H12 + Fix #4) Sizing desde hedgeNotionalUsd. AVISO: para una VENTA NO existe cota dura del
@@ -146,15 +169,15 @@ export const armPoolBotEntry = action({
     const tps = bufferPct > 0 ? (bot.tps ?? []) : [];
     if (tps.length > 0) {
       for (const t of tps) {
-        if (!(t.gainPct > 0) || !(t.closePct > 0)) throw new Error("TP inválido (gainPct/closePct > 0)");
+        if (!(t.gainPct > 0) || !(t.closePct > 0)) throw new Error("[blocked_config] TP inválido (gainPct/closePct > 0)");
       }
       const sumClose = tps.reduce((s, t) => s + t.closePct, 0);
-      if (sumClose > 100) throw new Error("Σ closePct de los TPs no puede superar 100 (% del búfer).");
+      if (sumClose > 100) throw new Error("[blocked_config] Σ closePct de los TPs no puede superar 100 (% del búfer).");
     }
     const totalNotional = bot.hedgeNotionalUsd * (1 + bufferPct / 100);
     const notionalCapPx = ceilHlPrice(triggerPxNorm * (1 + ENTRY_TRIGGER_SLIPPAGE), szDecimals);
     const size = floorToDecimals(totalNotional / notionalCapPx, szDecimals);
-    if (size <= 0) throw new Error("Size redondea a cero");
+    if (size <= 0) throw new Error("[blocked_config] Size redondea a cero");
     const orderNotional = size * notionalCapPx;          // nocional de UNA entrada (límite por orden)
     const orderMargin = orderNotional / appliedLeverage;
 
@@ -176,12 +199,13 @@ export const armPoolBotEntry = action({
 
     // Reserva OCC (generación, unicidad, margen/daily compartidos) — crea arm(arming)+order(pending).
     const reservation = await ctx.runMutation(internal.triggerArms.reserveArm, {
-      botId: bot._id, userId: user._id, hlAccountId: bot.hlAccountId, poolId: bot.poolId,
+      botId: bot._id, userId: userId, hlAccountId: bot.hlAccountId, poolId: bot.poolId,
       asset, network: hlNetwork(), triggerPx: triggerPxNorm, size, appliedLeverage,
       orderNotional, reservedNotional, marginReserved: marginRequired, lowerEdge: pool.minRange,
       upperEdge: twoEntries ? upperEdgeNorm : undefined,
       allowReentryFromAbove: twoEntries ? true : undefined,
       stopLossPct: bot.stopLossPct, bufferPct, tps, availableCollateral,
+      rearmToken,   // (Codex #2) si es un re-armado, la reserva consume el trabajo atómicamente
     });
     const { armId, cloid, cloidUpper } = reservation;
 
@@ -273,7 +297,7 @@ export const armPoolBotEntry = action({
 // Cron: reconcilia todos los arms no terminales (convergencia + kill switch + pausa + recuperación).
 export const reconcileStaleArms = internalAction({
   args: {},
-  handler: async (ctx) => {
+  handler: async (ctx): Promise<any> => {
     const ids = await ctx.runQuery(internal.triggerArms.listReconcilableArmsInternal, { limit: 50 });
     let reconciled = 0;
     for (const id of ids) {
@@ -288,7 +312,7 @@ export const reconcileStaleArms = internalAction({
 // gates de colocación; usa SIEMPRE arm.network (inmutable) para construir el cliente.
 export const reconcileArm = internalAction({
   args: { armId: v.id("trigger_arms") },
-  handler: async (ctx, { armId }) => {
+  handler: async (ctx, { armId }): Promise<any> => {
     const claim = await ctx.runMutation(internal.triggerArms.claimArmReconcile, { armId });
     if (!claim.claimed) return { skipped: claim.reason };
     const token = claim.token;
@@ -379,8 +403,29 @@ export const reconcileArm = internalAction({
             await ctx.runMutation(internal.triggerArms.setArmCloseConfirm, { armId, token, value: Date.now() });
             return { skipped: "close_first_flat" };
           }
-          await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "closed" });
-          return { result: "closed" };
+          // (Codex #1) Confirmar si el SL realmente llenó por API (orderStatus + fills), NO solo el
+          // observedStatus persistido: HL pudo llenarlo con Convex aún en open/triggered.
+          let slConfirmed = slOrder?.observedStatus === "filled";
+          if (!slConfirmed && slOrder) {
+            const ss: any = await info.orderStatus({ user, oid: slOrder.cloid as `0x${string}` });
+            const sState = ss?.status === "order" ? ss.order?.status : undefined;
+            const sFill = await fillsByCloid(info, user, slOrder.cloid);
+            if (sState === "filled" || sFill.size > 0) slConfirmed = true;
+          }
+          // (Codex #2) Prioridad SEGURA: emergencyClosing > SL confirmado > manual. NUNCA rearmar un
+          // ciclo cuyo mecanismo protector falló (cierre de emergencia) ni un cierre externo del usuario.
+          const closeReason: "sl" | "emergency" | "disarm" | "manual" =
+            arm.emergencyClosing ?? (slConfirmed ? "sl" : "manual");
+          // (Codex #1) Cerrar el arm + contar el stop + programar el rearm en UNA transacción atómica
+          // (sin ventana entre cerrar y programar). La mutation conserva fencing/transición/cuarentena
+          // y solo programa rearm si closeReason="sl" + config válida.
+          const cres = await ctx.runMutation(internal.triggerArms.closeArmAndScheduleRearm, {
+            armId, token, closeReason, nextRearmAt: Date.now() + REARM_COOLDOWN_MS,
+          });
+          if (!cres.ok) return { skipped: "close_failed" };
+          // (Codex #4) La alerta de whipsaw la dispara SOLO el cron (processRearms busca los niveles
+          // pendientes) → fuente única + Idempotency-Key, sin riesgo de email duplicado por dos actions.
+          return { result: cres.rearmScheduled ? "closed_rearm_scheduled" : "closed" };
         }
         if (arm.closeConfirmSince != null) await ctx.runMutation(internal.triggerArms.setArmCloseConfirm, { armId, token, value: null });
 
@@ -392,6 +437,11 @@ export const reconcileArm = internalAction({
         if (mustEmergencyClose) {
           const renew = await ctx.runMutation(internal.triggerArms.renewArmReconcile, { armId, token });
           if (!renew.ok) return { skipped: "lease_lost" };
+          // (auto-rearm + Codex #5) Marcar el ORIGEN del cierre ANTES del market close. Si la mutación
+          // falla (lease perdido / no persistió) ABORTAR: no cerrar sin haber fijado el origen, o el
+          // closeReason podría clasificarse como "sl" y rearmar tras un cierre de emergencia.
+          const meMark = await ctx.runMutation(internal.triggerArms.markEmergencyClosing, { armId, token, reason: wantDisarm ? "disarm" : "emergency" });
+          if (!meMark.ok) return { skipped: "emergency_mark_failed" };
           // (Codex #2) Cancelar TODO trigger_order vivo y CONFIRMAR por CLOID que murieron antes de
           // dar por cerrado (el `closed` se gatea en (1) con ensureOrdersDead). Aquí cancelamos.
           await ensureOrdersDead(info, exchange, user, assetId, allCloids);
@@ -592,6 +642,117 @@ export const reconcileArm = internalAction({
       return { result: rF.ok ? "failed_negative_proof" : "failed_quarantined" };
     } finally {
       await ctx.runMutation(internal.triggerArms.releaseArmReconcile, { armId, token });
+    }
+  },
+});
+
+// Cron: auto-rearm DURABLE (JAV-44). Procesa los bots con rearm pendiente/blocked/recuperable. Reclama
+// con lease, intenta reabrir la cobertura (armBotInternal) y aplica la política de errores de Codex:
+// transitorio → reintento forzado cada 5 min (nunca abandona); pausa/kill/pool cerrado → cancela;
+// margen/config → blocked reevaluable; posición/órdenes incompatibles → reintento.
+export const processRearms = internalAction({
+  args: {},
+  handler: async (ctx): Promise<any> => {
+    const ids = await ctx.runQuery(internal.triggerRearm.listRearmReadyBots, { limit: 25 });
+    let rearmed = 0;
+    for (const botId of ids) {
+      const claim = await ctx.runMutation(internal.triggerRearm.claimRearm, { botId });
+      if (!claim.ok) continue;
+      try {
+        // (Codex #2/#3) Pasa el lease token: reserveArm CONSUME el rearm al crear la generación. Tras
+        // eso, recordRearmOutcome es no-op (el token ya no coincide) → idempotente: no re-registra ni
+        // reintenta un arm ya creado; el cron de arms se encarga aunque la action muera después.
+        const r: any = await ctx.runAction(internal.triggerEngine.armBotInternal, { botId, userId: claim.userId, rearmToken: claim.token });
+        if (r?.ok) {
+          await ctx.runMutation(internal.triggerRearm.recordRearmOutcome, { botId, token: claim.token, outcome: "success" });
+          rearmed++;
+        } else {
+          // gated/aborted/rejected: un gate ATÓMICO o timing impidió colocar → reintento transitorio.
+          await ctx.runMutation(internal.triggerRearm.recordRearmOutcome, {
+            botId, token: claim.token, outcome: "transient", kind: "transient",
+            error: `arm no colocado (${r?.status ?? "desconocido"})`, nextRearmAt: Date.now() + REARM_RETRY_MS,
+          });
+        }
+      } catch (e) {
+        const msg = String((e as Error)?.message ?? e);
+        const kind = armErrorKind(msg);
+        if (kind === "cancel") {
+          // pausa/kill/pool cerrado → el bot no debe operar: cancelar definitivamente el rearm.
+          await ctx.runMutation(internal.triggerRearm.recordRearmOutcome, { botId, token: claim.token, outcome: "cancel", error: msg });
+        } else if (kind === "blocked_margin" || kind === "blocked_config") {
+          // bloqueo corregible (margen/config/credencial): blocked, reevaluable + alerta visible.
+          await ctx.runMutation(internal.triggerRearm.recordRearmOutcome, {
+            botId, token: claim.token, outcome: "blocked", kind, error: msg, nextRearmAt: Date.now() + REARM_BLOCKED_RECHECK_MS,
+          });
+        } else {
+          // transient | retry_incompatible → reintento FORZADO cada 5 min (nunca desprotegido por error).
+          await ctx.runMutation(internal.triggerRearm.recordRearmOutcome, {
+            botId, token: claim.token, outcome: "transient", kind, error: msg, nextRearmAt: Date.now() + REARM_RETRY_MS,
+          });
+        }
+      }
+    }
+    // (Codex #6) Reintento DURABLE de alertas de stop: buscar EXPLÍCITAMENTE los bots con
+    // consecutiveStops − lastStopAlertLevel ≥ THRESHOLD (una alerta fallida en Resend se reintenta aquí
+    // cada ciclo, sin esperar al siguiente SL). sendStopAlert revalida y solo sube el nivel si Resend OK.
+    const alertIds = await ctx.runQuery(internal.triggerRearm.listStopAlertPendingBots, { limit: 25 });
+    for (const botId of alertIds) {
+      await ctx.scheduler.runAfter(0, internal.triggerEngine.sendStopAlert, { botId });
+    }
+    return { processed: ids.length, rearmed, alertsTriggered: alertIds.length };
+  },
+});
+
+// Email de alerta de whipsaw (5 SL consecutivos). Resend vía HTTP. Sin RESEND_API_KEY → registra y no
+// rompe (el auto-rearm no depende de esto). El bot SIGUE operando; es solo aviso al usuario.
+export const sendStopAlert = internalAction({
+  args: { botId: v.id("bots") },
+  handler: async (ctx, { botId }): Promise<any> => {
+    const d = await ctx.runQuery(internal.triggerRearm.getStopAlertContext, { botId });
+    if (!d) return { sent: false, reason: "no_context" };
+    // (Codex #5) Alertar el SIGUIENTE múltiplo pendiente (lastStopAlertLevel + THRESHOLD), no el
+    // contador actual: si saltó de 0 a 12, alerta 5 y luego 10 sin saltarse niveles.
+    const pendingLevel = (d.lastStopAlertLevel ?? 0) + STOP_ALERT_THRESHOLD;
+    if (d.consecutiveStops < pendingLevel) return { sent: false, reason: "nothing_pending" };
+    if (!d.email) return { sent: false, reason: "no_email" };
+    const apiKey = process.env.RESEND_API_KEY;
+    const from = process.env.RESEND_FROM ?? "Quantum.ia <onboarding@resend.dev>";
+    if (!apiKey) {
+      console.warn(`[stop-alert] RESEND_API_KEY no configurada; no enviado (bot ${botId}, nivel ${pendingLevel})`);
+      return { sent: false, reason: "no_api_key" };
+    }
+    try {
+      const resp = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        // (CodeRabbit) Timeout: sin él, un fetch colgado mantiene viva la action y, como el cron la
+        // reencola cada minuto mientras el nivel siga pendiente, apilaría duplicados y quemaría scheduler.
+        signal: AbortSignal.timeout(10_000),
+        headers: {
+          Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json",
+          // (Codex #4) Dedup estable por (botId, nivel): aunque dos actions coincidan, Resend manda 1 email.
+          "Idempotency-Key": `stop-alert-${botId}-${pendingLevel}`,
+        },
+        body: JSON.stringify({
+          from, to: [d.email],
+          subject: `⚠️ ${pendingLevel} stops seguidos en ${d.pair}`,
+          text:
+            `Tu bot de cobertura "${d.botName}" en ${d.pair} (${d.network}) ha cerrado por Stop Loss ` +
+            `${pendingLevel} veces consecutivas.\n\n` +
+            `Esto suele indicar que el precio oscila en el borde del rango (whipsaw). El bot sigue ` +
+            `operando y reabriendo la cobertura automáticamente; revisa si conviene ajustar el rango, ` +
+            `el stop o pausar la cobertura.\n\n— Quantum.ia`,
+        }),
+      });
+      if (!resp.ok) {
+        console.error(`[stop-alert] Resend respondió ${resp.status}`);
+        return { sent: false, reason: `http_${resp.status}` };   // no sube el nivel → el cron reintenta
+      }
+      // (Codex #7) Subir el nivel SOLO tras respuesta OK de Resend, al nivel-múltiplo alertado.
+      await ctx.runMutation(internal.triggerRearm.markStopAlertSent, { botId, level: pendingLevel });
+      return { sent: true };
+    } catch (e) {
+      console.error("[stop-alert] error enviando", e);
+      return { sent: false, reason: "exception" };
     }
   },
 });

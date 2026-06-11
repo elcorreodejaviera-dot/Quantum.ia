@@ -23,7 +23,7 @@ async function gql(endpoint: string, query: string, variables: Record<string, un
     body: JSON.stringify({ query, variables }),
   });
   if (!res.ok) return null;
-  const json = await res.json();
+  const json = await res.json() as any;   // respuesta del subgraph (forma validada aguas abajo)
   return json?.data ?? null;
 }
 
@@ -73,7 +73,8 @@ async function fetchDailyData(endpoint: string, poolAddress: string) {
 
 export const fetchUniswapSubgraphData = internalAction({
   args: {},
-  handler: async (ctx) => {
+  // Promise<void>: corta el ciclo de inferencia (TS2589) sin perder type-safety — el handler no retorna.
+  handler: async (ctx): Promise<void> => {
     const pools: Array<{
       _id: Id<"pools">;
       network: string;

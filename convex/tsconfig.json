@@ -1,0 +1,24 @@
+{
+  /* Config estándar de Convex para el type-check de las funciones backend (convex/).
+     Habilita el chequeo real que el codegen omite (el bug de szDecimals se coló por su ausencia). */
+  "compilerOptions": {
+    "allowJs": true,
+    /* strict:false como punto de partida (el backend legacy no estaba tipado y usa `any` extensivo).
+       Aun así caza lo crítico: referencias indefinidas (TS2304, el bug de szDecimals), propiedades
+       inexistentes (TS2339) y tipos incompatibles. Se puede endurecer gradualmente. */
+    "strict": false,
+    "skipLibCheck": true,
+    "moduleResolution": "Bundler",
+    "module": "ESNext",
+    "target": "ESNext",
+    "lib": ["ES2021"],
+    "jsx": "react-jsx",
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "noEmit": true
+  },
+  "include": ["./**/*"],
+  "exclude": ["./_generated"]
+}

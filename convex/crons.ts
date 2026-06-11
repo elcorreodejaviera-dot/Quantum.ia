@@ -34,4 +34,12 @@ crons.interval(
   internal.triggerEngine.reconcileStaleArms,
 );
 
+// JAV-44 auto-rearm durable: reabre la cobertura tras un cierre por SL (reintento forzado, política de
+// errores de Codex). Procesa los bots con rearm pendiente/blocked/recuperable.
+crons.interval(
+  "process bot rearms",
+  { minutes: 1 },
+  internal.triggerEngine.processRearms,
+);
+
 export default crons;

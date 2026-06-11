@@ -35,7 +35,7 @@ export const fetchAndUpdateApys = internalAction({
     try {
       const res = await fetch(DEFILLAMA_URL);
       if (!res.ok) return;
-      data = await res.json();
+      data = await res.json() as { data: unknown[] };
     } catch {
       return;
     }

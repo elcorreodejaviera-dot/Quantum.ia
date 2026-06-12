@@ -2376,7 +2376,7 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
               <Metric label="Margen usado actual" value={formatUsd(marginUsed)} />
               <Metric label="Margen este bot" value={formatUsd(thisBotMargin)} />
               <Metric label="Withdrawable API" value={formatUsd(withdrawable)} />
-              <Metric label="Cobertura margen (perp+spot)" value={
+              <Metric label="Cobertura (perp+spot)" value={
                 <span className={marginCovered ? 'positive' : 'negative'}>
                   {marginCovered ? `✓ ${formatUsd(unifiedFree - thisBotMargin)}` : `falta ${formatUsd(thisBotMargin - unifiedFree)}`}
                 </span>

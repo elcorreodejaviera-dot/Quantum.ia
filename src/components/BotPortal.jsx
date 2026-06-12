@@ -169,7 +169,96 @@ function shortenAddress(addr) {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
-function PoolCard({ pool, canManage, canTradeLive }) {
+// (JAV-58 Fase B) Panel "Cobertura en vivo" en la tarjeta del pool. Consume el arm de
+// listMyActiveArms (resuelto a NIVEL PADRE y pasado como prop — refinamiento #1 de Codex: una sola
+// query, no N). Solo datos de backend (estado/triggers/distancias/capital/leverage/régimen/wallet/OIDs);
+// el saldo HL/PNL en vivo es Fase C. No maquilla estados: blocked/failed se muestran tal cual (Codex #5).
+const ARM_STATE_LABEL = {
+  arming: 'Armando', submitting: 'Armando', armed: 'Trigger armado', filled: 'Posición abierta',
+  protecting: 'Protegiendo', protected: 'Protegido', disarming: 'Deteniéndose', unknown: 'Verificando',
+  failed: 'Falló',
+};
+function CoberturaViva({ bot, arm, pool, accountById }) {
+  if (!bot) return null;
+  const price = pool?.price ?? null;
+
+  let estado, tone;
+  if (arm) {
+    estado = ARM_STATE_LABEL[arm.status] ?? arm.status;
+    tone = arm.status === 'failed' ? 'red'
+      : (arm.status === 'protected' || arm.status === 'filled' || arm.status === 'armed') ? 'green'
+      : arm.status === 'disarming' ? 'amber' : 'faint';
+  } else if (bot.disarmPending) {
+    estado = 'Deteniéndose'; tone = 'amber';
+  } else if (bot.rearmStatus === 'blocked') {
+    estado = `Bloqueado${bot.lastRearmErrorKind ? ': ' + bot.lastRearmErrorKind : ''}`; tone = 'red';
+  } else if (bot.rearmStatus === 'pending' || bot.rearmStatus === 'running') {
+    estado = 'Armando'; tone = 'amber';
+  } else { estado = bot.active ? 'Esperando' : 'Pausado'; tone = 'faint'; }
+
+  const dist = (t) => (price && t ? ((t - price) / price) * 100 : null);
+  const fmtDist = (d) => (d == null ? '—' : `${d > 0 ? '+' : ''}${d.toFixed(2)}%`);
+  const dentro = price != null && pool?.min != null && pool?.max != null && price >= pool.min && price <= pool.max;
+
+  // Capital por posición. (Codex #1) Tras el OCO el backend ya hizo reservedNotional/2 dejando upperEdge
+  // intacto → si reservationReduced, NO dividir de nuevo. allowReentryFromAbove marca el OCO de 2 entradas.
+  const twoEntries = arm?.allowReentryFromAbove === true;
+  const capital = arm
+    ? (arm.reservationReduced ? arm.reservedNotional : arm.reservedNotional / (twoEntries ? 2 : 1))
+    : null;
+  const lev = arm?.appliedLeverage ?? bot.leverage ?? null;
+
+  const acc = bot.hlAccountId ? accountById?.[bot.hlAccountId] : null;
+  const walletLabel = acc?.label
+    || (acc?.tradingAccountAddress ? `${acc.tradingAccountAddress.slice(0, 6)}…${acc.tradingAccountAddress.slice(-4)}` : '—');
+
+  return (
+    <div className="cobertura-viva">
+      <div className="cobertura-head">
+        <strong>Cobertura</strong>
+        <span className={`pill ${tone}`}>{estado}</span>
+        <span className={`pill ${dentro ? 'green' : 'faint'}`}>{dentro ? 'Dentro' : 'Fuera'}</span>
+      </div>
+      <div className="cobertura-tiles">
+        <div className="cv-tile">
+          <span className="cv-label">Trigger abajo</span>
+          <strong>${pool?.min != null ? formatPrice(pool.pair, pool.min) : '—'}</strong>
+          <span className="cv-dist">{fmtDist(dist(pool?.min))}</span>
+        </div>
+        <div className="cv-tile">
+          <span className="cv-label">Trigger arriba</span>
+          <strong>${pool?.max != null ? formatPrice(pool.pair, pool.max) : '—'}</strong>
+          <span className="cv-dist">{fmtDist(dist(pool?.max))}</span>
+        </div>
+        <div className="cv-tile">
+          <span className="cv-label">Capital</span>
+          <strong>{capital != null ? formatUsdCompact(capital) : '—'}</strong>
+          <span className="cv-dist">{lev != null ? `${lev}x` : ''}</span>
+        </div>
+        <div className="cv-tile">
+          <span className="cv-label">Wallet</span>
+          <strong className="cv-wallet" title={acc?.tradingAccountAddress ?? ''}>{walletLabel}</strong>
+        </div>
+      </div>
+      {arm?.orders?.length > 0 && (
+        <details className="cobertura-oids">
+          <summary>Órdenes en Hyperliquid ({arm.orders.length})</summary>
+          <ul>
+            {arm.orders.map((o) => (
+              <li key={o.cloid}>
+                <span className="cv-role">{o.role}</span>
+                <span className="cv-oid">{o.oid ? `oid ${o.oid}` : 'sin oid'}</span>
+                <span className={`pill ${o.observedStatus === 'open' ? 'green' : 'faint'}`}>{o.observedStatus}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById }) {
   const deletePoolMutation = useMutation(api.pools.deletePool);
   const allBots = useQuery(api.bots.listBots);
   const savePoolBot = useMutation(api.bots.getOrCreatePoolBot);
@@ -177,6 +266,8 @@ function PoolCard({ pool, canManage, canTradeLive }) {
   const closeBotPositionAction = useAction(api.hyperliquid.closeBotPosition);
   const ilBot = (allBots ?? []).find((b) => b.poolId === pool.id && b.kind === 'il') ?? null;
   const tradingBot = (allBots ?? []).find((b) => b.poolId === pool.id && b.kind === 'trading') ?? null;
+  // (JAV-58 Fase B) arm vivo del bot IL, resuelto a nivel padre (map botId → arm).
+  const ilArm = ilBot ? (armsByBot?.[ilBot._id] ?? null) : null;
   const [botModal, setBotModal] = React.useState(null);   // 'il' | 'trading' | null
   const [botBusy, setBotBusy] = React.useState(false);
 
@@ -392,6 +483,10 @@ function PoolCard({ pool, canManage, canTradeLive }) {
           )}
         </div>
       </div>
+
+      {(ilBot?.active || ilArm) && (
+        <CoberturaViva bot={ilBot} arm={ilArm} pool={pool} accountById={accountById} />
+      )}
 
       <div className="pool-meta">
         <Metric label="TVL" value={pool.tvl != null ? formatUsdCompact(pool.tvl) : formatUsdCompact(pool.liquidity)} />
@@ -3272,6 +3367,20 @@ function Dashboard({ user, onLogout, userId }) {
   const currentUser = useQuery(api.users.getUser, {});
   const userLoaded = currentUser !== undefined;
   const isAdmin = currentUser?.role === 'admin';
+  // (JAV-58 Fase B) Estado vivo de la cobertura + cuentas HL, resueltos UNA vez a nivel padre y
+  // pasados como map a cada PoolCard (Codex refinamiento #1: evitar N queries duplicadas).
+  const activeArms = useQuery(api.triggerArms.listMyActiveArms);
+  const hlAccounts = useQuery(api.hlCredentials.list);
+  const armsByBot = React.useMemo(() => {
+    const m = {};
+    for (const a of activeArms ?? []) m[a.botId] = a;
+    return m;
+  }, [activeArms]);
+  const accountById = React.useMemo(() => {
+    const m = {};
+    for (const a of hlAccounts ?? []) m[a.id] = a;
+    return m;
+  }, [hlAccounts]);
   const userPermissions = useQuery(api.users.getUserPermissions, {});
   // Gestionar bots: admins o usuarios con el permiso canManageBots vigente.
   const canManageBots = isAdmin || (userPermissions ?? []).some((p) => p.permission === 'canManageBots');
@@ -3673,7 +3782,7 @@ function Dashboard({ user, onLogout, userId }) {
                 </button>
               </div>
               <div className="pool-grid">
-                {filteredPools.map((pool) => <PoolCard key={pool.id} pool={pool} canManage={canManageBots} canTradeLive={canTradeLive} />)}
+                {filteredPools.map((pool) => <PoolCard key={pool.id} pool={pool} canManage={canManageBots} canTradeLive={canTradeLive} armsByBot={armsByBot} accountById={accountById} />)}
               </div>
             </section>
             {canTradeLive && <HLAccountsPanel />}

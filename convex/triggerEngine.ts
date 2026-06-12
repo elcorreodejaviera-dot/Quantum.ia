@@ -118,13 +118,11 @@ export const armBotInternal = internalAction({
     if (!credential) throw new Error("[blocked_config] Cuenta HL no encontrada");
     if (credential.userId !== userId) throw new Error("[blocked_config] La cuenta no pertenece a este usuario");
 
-    const effLev = (!bot.autoLeverage && bot.leverage !== undefined) ? bot.leverage : 1;
-    if (!Number.isFinite(effLev) || effLev < 1 || effLev > 25) throw new Error("[blocked_config] leverage inválido");
-    const appliedLeverage = Math.round(effLev);
-
+    // El leverage (auto/manual) lo resuelve reserveArm con el helper compartido, atómico con el
+    // margen comprometido de la cuenta. Aquí solo se transporta la config del bot.
     const asset = bot.baseAsset.toUpperCase();
     const { info, exchange } = makeClients(decryptPrivateKey(credential), hlIsTestnet());
-    const { assetId, szDecimals, markPx } = await getAssetMeta(info, asset);
+    const { assetId, szDecimals, markPx, maxLeverage } = await getAssetMeta(info, asset);
     const tradingAccount = credential.tradingAccountAddress as `0x${string}`;
 
     // (CodeRabbit) Paridad con executePerpMarketOrder: exigir cuenta en modo unified ANTES de
@@ -197,7 +195,6 @@ export const armBotInternal = internalAction({
     const size = floorToDecimals(totalNotional / notionalCapPx, szDecimals);
     if (size <= 0) throw new Error("[blocked_config] Size redondea a cero");
     const orderNotional = size * notionalCapPx;          // nocional de UNA entrada (límite por orden)
-    const orderMargin = orderNotional / appliedLeverage;
 
     // 2ª entrada (borde superior) si el bot lo permite Y el precio está por DEBAJO del borde superior
     // (el trigger debe dispararse al SUBIR). entry_upper = SELL trigger ABOVE maxRange, tpsl:"tp".
@@ -205,9 +202,9 @@ export const armBotInternal = internalAction({
     const twoEntries = bot.allowReentryFromAbove === true && Number.isFinite(pool.maxRange)
       && pool.maxRange > 0 && markPx < upperEdgeNorm;
     // (Codex #1) Con DOS entradas, reservar el PEOR CASO 2× (doble-fill); se reduce a 1× tras el OCO.
+    // El margen (y el leverage auto) se dimensionan sobre este worst-case dentro de reserveArm.
     const factor = twoEntries ? 2 : 1;
     const reservedNotional = orderNotional * factor;
-    const marginRequired = orderMargin * factor;
 
     // Colateral USDC spot libre (sin doble conteo; reserveArm descuenta el comprometido de ambos motores).
     const spotState = await info.spotClearinghouseState({ user: tradingAccount });
@@ -218,14 +215,16 @@ export const armBotInternal = internalAction({
     // Reserva OCC (generación, unicidad, margen/daily compartidos) — crea arm(arming)+order(pending).
     const reservation = await ctx.runMutation(internal.triggerArms.reserveArm, {
       botId: bot._id, userId: userId, hlAccountId: bot.hlAccountId, poolId: bot.poolId,
-      asset, network: hlNetwork(), triggerPx: triggerPxNorm, size, appliedLeverage,
-      orderNotional, reservedNotional, marginReserved: marginRequired, lowerEdge: pool.minRange,
+      asset, network: hlNetwork(), triggerPx: triggerPxNorm, size,
+      autoLeverage: bot.autoLeverage === true, manualLeverage: bot.leverage,
+      assetMaxLeverage: maxLeverage,
+      orderNotional, reservedNotional, lowerEdge: pool.minRange,
       upperEdge: twoEntries ? upperEdgeNorm : undefined,
       allowReentryFromAbove: twoEntries ? true : undefined,
       stopLossPct: bot.stopLossPct, bufferPct, tps, availableCollateral,
       rearmToken,   // (Codex #2) si es un re-armado, la reserva consume el trabajo atómicamente
     });
-    const { armId, cloid, cloidUpper } = reservation;
+    const { armId, cloid, cloidUpper, appliedLeverage } = reservation;
 
     // (N1/N5) CAS pre-envío: arming→submitting + submittedAt (cuarentena). Si falla → abortar SIN enviar.
     const sub = await ctx.runMutation(internal.triggerArms.markArmSubmitting, { armId });

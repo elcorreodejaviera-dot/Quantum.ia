@@ -4,6 +4,7 @@ import type { MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { getLimit } from "./executionLimits";
 import { committedMarginForAccount, dailyNotionalUsed, assertLiveAdmissible } from "./executions";
+import { resolveLeverage, MARGIN_SAFETY_BUFFER } from "./leverage";
 import { hlNetwork } from "./hlNetwork";
 import { REARM_COOLDOWN_MS } from "./triggerRearm";
 
@@ -30,7 +31,6 @@ async function rescheduleRearmIfEligible(ctx: MutationCtx, botId: Id<"bots">): P
 // --- JAV-44 Etapa 1: máquina de estados del trigger_arm (lease/fencing como reconcileExecution) ---
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const MARGIN_SAFETY_BUFFER = 0.10;
 export const ARM_RECONCILE_LEASE_MS = 60_000;
 // Cuarentena N5/N6: desde el CAS (submittedAt) hasta el momento máximo en que una petición en vuelo
 // puede aceptarse/hacerse visible en HL. Holgura generosa (vida máx. de action Convex + transporte),
@@ -114,10 +114,14 @@ export const reserveArm = internalMutation({
   args: {
     botId: v.id("bots"), userId: v.id("users"), hlAccountId: v.id("hl_api_credentials"),
     poolId: v.id("pools"), asset: v.string(), network: v.string(),
-    triggerPx: v.number(), size: v.number(), appliedLeverage: v.number(),
+    triggerPx: v.number(), size: v.number(),
     orderNotional: v.number(),    // nocional de UNA entrada (para el límite por orden)
-    reservedNotional: v.number(), // worst-case para daily (2× si dos entradas)
-    marginReserved: v.number(),   // worst-case para margen (2× si dos entradas)
+    reservedNotional: v.number(), // worst-case para daily/margen (2× si dos entradas)
+    // Leverage: reserveArm lo resuelve (auto/manual) con el helper compartido, atómico con el
+    // margen comprometido. El marginReserved se deriva de reservedNotional/appliedLeverage.
+    autoLeverage: v.boolean(),
+    manualLeverage: v.optional(v.number()),   // bot.leverage (modo manual)
+    assetMaxLeverage: v.number(),             // maxLeverage del activo en HL (entero ≥ 1)
     lowerEdge: v.number(),
     upperEdge: v.optional(v.number()),
     allowReentryFromAbove: v.optional(v.boolean()),
@@ -134,14 +138,15 @@ export const reserveArm = internalMutation({
     // throws con prefijo [kind] (auto-rearm): el cron los mapea a la política de Codex. Config inválida
     // → [blocked_config]; falta de margen/volumen → [blocked_margin]; colisión de generación → [transient].
     if (args.network !== "testnet" && args.network !== "mainnet") throw new Error("[blocked_config] network inválida.");
-    if (!(args.reservedNotional > 0) || !(args.marginReserved > 0) || !(args.size > 0)) {
-      throw new Error("[blocked_config] reservedNotional/marginReserved/size deben ser > 0");
+    if (!(args.reservedNotional > 0) || !(args.size > 0)) {
+      throw new Error("[blocked_config] reservedNotional/size deben ser > 0");
     }
     if (!(args.availableCollateral >= 0)) throw new Error("[blocked_config] availableCollateral inválido");
     // (CodeRabbit) Validar el snapshot inmutable en la frontera de persistencia: un triggerPx/
-    // leverage/lowerEdge inválido dejaría un arm corrupto consumiendo margen hasta fallar más tarde.
-    if (!(args.triggerPx > 0) || !(args.appliedLeverage > 0) || !(args.lowerEdge > 0)) {
-      throw new Error("[blocked_config] triggerPx/appliedLeverage/lowerEdge deben ser > 0");
+    // lowerEdge inválido dejaría un arm corrupto consumiendo margen hasta fallar más tarde.
+    // (appliedLeverage/marginReserved los resuelve y valida el helper resolveLeverage abajo.)
+    if (!(args.triggerPx > 0) || !(args.lowerEdge > 0)) {
+      throw new Error("[blocked_config] triggerPx/lowerEdge deben ser > 0");
     }
     // (CodeRabbit #22) Validación defensiva: el límite por orden asume orderNotional > 0.
     if (!(args.orderNotional > 0)) {
@@ -185,10 +190,17 @@ export const reserveArm = internalMutation({
       throw new Error(`[blocked_margin] Volumen diario excedido: ${dailyUsed} + ${args.reservedNotional} > ${maxDaily}.`);
     }
     const marginCommitted = await committedMarginForAccount(ctx, args.hlAccountId);
-    if ((marginCommitted + args.marginReserved) > args.availableCollateral * (1 - MARGIN_SAFETY_BUFFER)) {
+    // Resolver leverage + margen JUNTOS (helper único, mismo que JAV-43). autoLeverage sube hasta el
+    // tope para que el nocional (worst-case 2× en OCO) quepa; si ni al tope cabe → [blocked_margin].
+    const { appliedLeverage, marginRequired: marginReserved } = resolveLeverage({
+      autoLeverage: args.autoLeverage, manualLeverage: args.manualLeverage,
+      reservedNotional: args.reservedNotional, availableCollateral: args.availableCollateral,
+      marginCommitted, assetMaxLeverage: args.assetMaxLeverage,
+    });
+    if ((marginCommitted + marginReserved) > args.availableCollateral * (1 - MARGIN_SAFETY_BUFFER)) {
       throw new Error(
         `[blocked_margin] Margen insuficiente: comprometido ${marginCommitted.toFixed(2)} + requerido ` +
-        `${args.marginReserved.toFixed(2)} > colateral ${args.availableCollateral.toFixed(2)}.`);
+        `${marginReserved.toFixed(2)} > colateral ${args.availableCollateral.toFixed(2)}.`);
     }
 
     // Leer el bot ANTES de consumir su estado de rearm. (Codex #2) Re-armado: validar el lease (token +
@@ -213,8 +225,8 @@ export const reserveArm = internalMutation({
     const armId = await ctx.db.insert("trigger_arms", {
       botId: args.botId, userId: args.userId, hlAccountId: args.hlAccountId, poolId: args.poolId,
       asset: args.asset, network: args.network, generation, status: "arming", desiredState: "armed",
-      side: "Short", triggerPx: args.triggerPx, size: args.size, appliedLeverage: args.appliedLeverage,
-      reservedNotional: args.reservedNotional, marginReserved: args.marginReserved, lowerEdge: args.lowerEdge,
+      side: "Short", triggerPx: args.triggerPx, size: args.size, appliedLeverage,
+      reservedNotional: args.reservedNotional, marginReserved, lowerEdge: args.lowerEdge,
       upperEdge: twoEntries ? args.upperEdge : undefined,
       allowReentryFromAbove: twoEntries ? true : undefined,
       stopLossPct: args.stopLossPct, bufferPct: args.bufferPct, tps: args.tps,
@@ -245,7 +257,7 @@ export const reserveArm = internalMutation({
         reduceOnly: false, observedStatus: "pending", createdAt: now, updatedAt: now,
       });
     }
-    return { armId, generation, cloid: cloidLower, cloidUpper };
+    return { armId, generation, cloid: cloidLower, cloidUpper, appliedLeverage, marginReserved };
   },
 });
 

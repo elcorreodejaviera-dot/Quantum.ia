@@ -26,8 +26,12 @@ export type RearmErrorKind = "transient" | "blocked_margin" | "blocked_config" |
 
 // Extrae el [kind] del prefijo del mensaje de error de armBotInternal/reserveArm. Sin prefijo conocido
 // → "transient" (default SEGURO: un error no clasificado nunca abandona el rearm, solo reintenta).
+// (JAV-56) Convex ENVUELVE el mensaje lanzado anteponiendo "Uncaught Error: " (a veces repetido), p.ej.
+// "Uncaught Error: Uncaught Error: [blocked_config] …". Un ^\[ puro NO matchea ese wrapper → todo error
+// determinista caía a "transient" y se reintentaba para siempre en vez de marcarse blocked + alerta.
+// Anclamos permitiendo SOLO ese wrapper antes del token (no un \[…\] embebido más adelante).
 export function armErrorKind(message: string): RearmErrorKind {
-  const m = /^\[(transient|blocked_margin|blocked_config|retry_incompatible|cancel)\]/.exec(message);
+  const m = /^(?:Uncaught Error:\s*)*\[(transient|blocked_margin|blocked_config|retry_incompatible|cancel)\]/.exec(message);
   return (m?.[1] as RearmErrorKind | undefined) ?? "transient";
 }
 

@@ -2,7 +2,7 @@ import React from 'react'
 import { useUser, useClerk } from '@clerk/clerk-react'
 import { useConvexAuth, useQuery, useMutation, useAction, usePaginatedQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
-import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState, useWalletBalances, useHLAccountBalance, useHLAccountsBalances, useMetaMaskSigner, executeHLTestnetOrder } from '../hooks/useHyperliquid'
+import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState, useWalletBalances, useHLAccountBalance, useHLAccountsBalances, useHLAgentExpiry, useMetaMaskSigner, executeHLTestnetOrder } from '../hooks/useHyperliquid'
 
 const IS_TESTNET = import.meta.env.VITE_HL_NETWORK === 'testnet';
 
@@ -2619,6 +2619,12 @@ function HLAccountRow({ account, onRevoke }) {
   const { account: bal } = useHLAccountBalance(account.tradingAccountAddress);
   // Saldo TOTAL real de la cuenta = equity perp + USDC spot libre (modo unified). Sin redondear.
   const total = bal ? (bal.accountValue + bal.spotUsdcFree) : null;
+  // (JAV-58/JAV-42) Días restantes de la API key (agente) leídos en vivo de HL. Si vence, el bot NO
+  // puede ejecutar órdenes → avisar para renovar a tiempo.
+  const validUntil = useHLAgentExpiry(account.tradingAccountAddress, account.agentAddress);
+  const daysLeft = validUntil != null ? Math.floor((validUntil - Date.now()) / 86_400_000) : null;
+  const apiTone = daysLeft == null ? '' : daysLeft <= 7 ? 'red' : daysLeft <= 30 ? 'amber' : 'green';
+  const apiText = daysLeft == null ? null : daysLeft <= 0 ? '⚠️ API vencida — renovar' : `API: ${daysLeft} días`;
   return (
     <div className="hl-acct-row">
       <div className="hl-acct-id">
@@ -2626,6 +2632,7 @@ function HLAccountRow({ account, onRevoke }) {
         <div className="network" title={account.tradingAccountAddress}>
           {account.tradingAccountAddress.slice(0, 8)}…{account.tradingAccountAddress.slice(-6)}
         </div>
+        {apiText && <span className={`hl-acct-api ${apiTone}`} title="Vencimiento de la API key (agente) en Hyperliquid. Renueva antes de que llegue a 0 o el bot no podrá ejecutar.">{apiText}</span>}
       </div>
       <div className="hl-acct-bal">
         <strong>{total != null ? formatUsd2(total) : '…'}</strong>

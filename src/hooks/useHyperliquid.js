@@ -511,6 +511,37 @@ export function useHLAccountsBalances(addresses) {
   return { byAddress, loading };
 }
 
+// (JAV-58/JAV-42) Lee la expiración (validUntil) de la API wallet (agente) en HL → días restantes,
+// para que el usuario renueve ANTES de que la key venza y el bot no pueda ejecutar órdenes. Refresca
+// cada 5 min. Devuelve el timestamp ms validUntil (o null si no se encuentra el agente / aún cargando).
+export function useHLAgentExpiry(masterAddress, agentAddress) {
+  const [validUntil, setValidUntil] = useState(null);
+  useEffect(() => {
+    setValidUntil(null);
+    if (!masterAddress || !agentAddress) return;
+    let cancelled = false;
+    async function fetchAgents() {
+      try {
+        const res = await fetch(HL_REST, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'extraAgents', user: masterAddress }),
+        });
+        if (!res.ok) return;
+        const agents = await res.json();
+        const a = Array.isArray(agents)
+          ? agents.find((x) => (x.address ?? '').toLowerCase() === agentAddress.toLowerCase())
+          : null;
+        if (!cancelled) setValidUntil(typeof a?.validUntil === 'number' ? a.validUntil : null);
+      } catch { /* mantener el último valor */ }
+    }
+    fetchAgents();
+    const id = setInterval(fetchAgents, 300_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [masterAddress, agentAddress]);
+  return validUntil;
+}
+
 export function useHyperliquidSpotState(address) {
   // perpPositions: posiciones abiertas en perps (BTC, ETH, etc.)
   // hlTokens: tokens nativos de HL spot (HYPE, PURR, etc.)

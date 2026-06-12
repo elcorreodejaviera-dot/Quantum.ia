@@ -4,6 +4,7 @@ import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { getLimit } from "./executionLimits";
 import { hasPermission, requireAdmin } from "./helpers";
+import { resolveLeverage, MARGIN_SAFETY_BUFFER } from "./leverage";
 
 // Lease anti-carrera: la reconciliación no toca pending/submitting con updatedAt más reciente.
 export const LEASE_MS = 90_000;
@@ -53,8 +54,7 @@ const ALLOWED: Record<string, Set<string>> = {
 };
 
 // Reserva atómica (OCC) de idempotency + nocional, ANTES de tocar HL.
-// Margen de seguridad sobre el colateral disponible (cota conservadora; HL es autoridad final).
-const MARGIN_SAFETY_BUFFER = 0.10;
+// Margen de seguridad: FUENTE ÚNICA en leverage.ts (compartida con el dimensionado de autoleverage).
 // Estados que mantienen margen comprometido en la cuenta (todos menos los finales).
 const OPEN_MARGIN_STATES = new Set([
   "pending", "submitting", "entry_filled", "protected", "sl_failed", "unknown",
@@ -145,8 +145,12 @@ export const reserveExecution = internalMutation({
     stopLossPct: v.number(),
     requestedAmount: v.number(),
     notional: v.number(),
-    marginRequired: v.number(),       // notional/leverage de ESTA ejecución
     availableCollateral: v.number(),  // colateral snapshot (USDC spot libre) — sin doble conteo
+    // Leverage: reserveExecution lo resuelve (auto/manual) con el helper compartido, atómico con
+    // el margen comprometido. autoLeverage activo ignora manualLeverage.
+    autoLeverage: v.boolean(),
+    manualLeverage: v.optional(v.number()),   // bot.leverage (modo manual)
+    assetMaxLeverage: v.number(),             // maxLeverage del activo en HL (entero ≥ 1)
     side: v.union(v.literal("Long"), v.literal("Short")),
     network: v.string(),
     entryCloid: v.string(),
@@ -155,9 +159,6 @@ export const reserveExecution = internalMutation({
   handler: async (ctx, args) => {
     if (!Number.isFinite(args.notional) || args.notional <= 0) {
       throw new Error("notional debe ser un número finito > 0");
-    }
-    if (!Number.isFinite(args.marginRequired) || args.marginRequired <= 0) {
-      throw new Error("marginRequired debe ser un número finito > 0");
     }
     if (!Number.isFinite(args.availableCollateral) || args.availableCollateral < 0) {
       throw new Error("availableCollateral debe ser un número finito >= 0");
@@ -178,7 +179,9 @@ export const reserveExecution = internalMutation({
       const same = existing.botId === args.botId && existing.side === args.side
         && existing.network === args.network && existing.requestedAmount === args.requestedAmount;
       if (!same) throw new Error("Conflicto de idempotencia: la clave ya existe con otros parámetros.");
-      return { requestId: existing._id, status: existing.status, alreadyExists: true };
+      // Dedupe: NO se recalcula ni sobrescribe leverage/margen — se devuelve lo PERSISTIDO (Codex #3).
+      // Una fila legacy puede no tener appliedLeverage (undefined); el caller no re-ejecuta updateLeverage.
+      return { requestId: existing._id, status: existing.status, alreadyExists: true as const, appliedLeverage: existing.appliedLeverage };
     }
     // (2) Límites: por orden y volumen diario (rolling 24h, estados no-`failed`).
     const maxPerOrder = await getLimit(ctx, "maxNotionalPerOrder");
@@ -197,10 +200,18 @@ export const reserveExecution = internalMutation({
     // margen ya comprometido por AMBOS motores en la cuenta + el de esta; debe caber en el
     // colateral disponible (snapshot) con un buffer de seguridad.
     const marginCommitted = await committedMarginForAccount(ctx, args.hlAccountId);
-    if ((marginCommitted + args.marginRequired) > args.availableCollateral * (1 - MARGIN_SAFETY_BUFFER)) {
+    // Resolver leverage + margen JUNTOS (helper único). autoLeverage sube hasta el tope para que
+    // el nocional quepa; si ni al tope cabe lanza [blocked_margin]. El margen resultante alimenta el
+    // gate de abajo con el MISMO buffer (usableReal coherente).
+    const { appliedLeverage, marginRequired } = resolveLeverage({
+      autoLeverage: args.autoLeverage, manualLeverage: args.manualLeverage,
+      reservedNotional: args.notional, availableCollateral: args.availableCollateral,
+      marginCommitted, assetMaxLeverage: args.assetMaxLeverage,
+    });
+    if ((marginCommitted + marginRequired) > args.availableCollateral * (1 - MARGIN_SAFETY_BUFFER)) {
       throw new Error(
         `Margen insuficiente en la cuenta: comprometido ${marginCommitted.toFixed(2)} + requerido ` +
-        `${args.marginRequired.toFixed(2)} > colateral ${args.availableCollateral.toFixed(2)} (buffer ${MARGIN_SAFETY_BUFFER * 100}%).`);
+        `${marginRequired.toFixed(2)} > colateral ${args.availableCollateral.toFixed(2)} (buffer ${MARGIN_SAFETY_BUFFER * 100}%).`);
     }
     // (3) Reservar en estado pending.
     const now = Date.now();
@@ -213,7 +224,8 @@ export const reserveExecution = internalMutation({
       stopLossPct: args.stopLossPct,
       requestedAmount: args.requestedAmount,
       notional: args.notional,
-      marginReserved: args.marginRequired,
+      marginReserved: marginRequired,
+      appliedLeverage,
       side: args.side,
       status: "pending",
       network: args.network,
@@ -223,7 +235,7 @@ export const reserveExecution = internalMutation({
       createdAt: now,
       updatedAt: now,
     });
-    return { requestId, status: "pending" as const, alreadyExists: false };
+    return { requestId, status: "pending" as const, alreadyExists: false as const, appliedLeverage };
   },
 });
 

@@ -119,7 +119,7 @@ export function aggressiveHlPriceStr(price: number, szDecimals: number, isBuy: b
   return String(roundHlPrice(price, szDecimals, isBuy ? "ceil" : "floor"));
 }
 
-type AssetMeta = { assetId: number; szDecimals: number; markPx: number };
+type AssetMeta = { assetId: number; szDecimals: number; markPx: number; maxLeverage: number };
 export async function getAssetMeta(info: InfoClient, asset: string): Promise<AssetMeta> {
   const [meta, ctxs] = await info.metaAndAssetCtxs();
   const idx = meta.universe.findIndex((u: any) => u.name === asset);
@@ -127,7 +127,12 @@ export async function getAssetMeta(info: InfoClient, asset: string): Promise<Ass
   const szDecimals = Number(meta.universe[idx].szDecimals);
   const markPx = Number((ctxs[idx] as any)?.markPx);
   if (!Number.isFinite(markPx) || markPx <= 0) throw new Error(`markPx inválido para ${asset}`);
-  return { assetId: idx, szDecimals, markPx };
+  // maxLeverage del activo (autoLeverage no debe superarlo). Se devuelve EN CRUDO y NO se valida aquí:
+  // getAssetMeta lo usan también rutas defensivas (cierre de emergencia, reconciliación) que NO deben
+  // fallar por metadata exclusiva de apertura. La validación estricta (entero ≥ 1) vive en
+  // resolveLeverage, que solo corre al abrir/reservar.
+  const maxLeverage = Number((meta.universe[idx] as any)?.maxLeverage);
+  return { assetId: idx, szDecimals, markPx, maxLeverage };
 }
 
 // Resultado de la orden de entrada (límit IOC), discriminado:
@@ -401,21 +406,15 @@ export const executePerpMarketOrder = action({
       || (bot.direction === "short" && args.side === "Short");
     if (!dirOk) throw new Error(`side ${args.side} incompatible con la dirección del bot (${bot.direction})`);
 
-    const effectiveLeverage = (!bot.autoLeverage && bot.leverage !== undefined) ? bot.leverage : 1;
-    if (!Number.isFinite(effectiveLeverage) || effectiveLeverage < 1 || effectiveLeverage > 25) {
-      throw new Error("leverage must be a finite number between 1 and 25");
-    }
-    // HL solo acepta leverage ENTERO. El margen debe calcularse con el MISMO valor aplicado,
-    // si no la reserva quedaría por debajo de lo real (Codex: leverage 1.4 → HL 1x, margen /1.4).
-    const appliedLeverage = Math.round(effectiveLeverage);
-
+    // El leverage (auto o manual) lo resuelve reserveExecution con el helper compartido, de forma
+    // atómica con el margen comprometido de la cuenta (Codex). Aquí solo se transporta la config.
     const credential = await ctx.runQuery(internal.hlCredentials.getAccountByIdInternal, { id: bot.hlAccountId });
     if (!credential) throw new Error("Hyperliquid account not found");
     if (credential.userId !== user._id) throw new Error("Account does not belong to this user");
 
     const asset = bot.baseAsset.toUpperCase();
     const { info, exchange } = makeClients(decryptPrivateKey(credential), hlIsTestnet());
-    const { assetId, szDecimals, markPx } = await getAssetMeta(info, asset);
+    const { assetId, szDecimals, markPx, maxLeverage } = await getAssetMeta(info, asset);
 
     // Dos precios distintos (Codex): el que se ENVÍA y el que se usa para DIMENSIONAR/RESERVAR.
     //  - orderLimitPx: límite agresivo de la IOC para cruzar el book (Long arriba, Short abajo).
@@ -471,27 +470,32 @@ export const executePerpMarketOrder = action({
     const availableCollateral = (spotState.balances ?? [])
       .filter((b) => b.coin === "USDC")
       .reduce((s, b) => s + Math.max(0, parseFloat(b.total ?? "0") - parseFloat(b.hold ?? "0")), 0);
-    const marginRequired = actualNotional / appliedLeverage;
-    if (!Number.isFinite(marginRequired) || marginRequired <= 0) {
-      throw new Error("marginRequired inválido");
-    }
 
-    // (c) Reserva atómica: idempotency + nocional + MARGEN por cuenta, ANTES de tocar HL.
+    // (c) Reserva atómica: idempotency + nocional + LEVERAGE + MARGEN por cuenta, ANTES de tocar HL.
+    // reserveExecution resuelve el leverage (auto/manual) con el helper y devuelve el applied.
     const reservation = await ctx.runMutation(internal.executions.reserveExecution, {
       userId: user._id, botId: bot._id, idempotencyKey: args.idempotencyKey,
       hlAccountId: bot.hlAccountId, asset, stopLossPct: bot.stopLossPct,
       requestedAmount: args.tradeAmount,
-      notional: actualNotional, marginRequired, availableCollateral,
+      notional: actualNotional, availableCollateral,
+      autoLeverage: bot.autoLeverage === true, manualLeverage: bot.leverage,
+      assetMaxLeverage: maxLeverage,
       side: args.side, network: hlNetwork(),
       entryCloid, slCloid,
     });
     const requestId = reservation.requestId;
     if (reservation.alreadyExists) {
       // Carrera: otra ejecución creó la fila entre (a) y (c). Reconciliar si no es FINAL.
+      // NO se re-ejecuta updateLeverage: el leverage ya quedó fijado en su envío original (Codex #3).
       if (!["closed", "failed"].includes(reservation.status)) {
         await ctx.runAction(internal.hyperliquid.reconcileExecution, { requestId });
       }
       return { ok: true, deduped: true, requestId };
+    }
+    // Reserva NUEVA: el leverage resuelto por el helper gobierna el updateLeverage de abajo.
+    const appliedLeverage = reservation.appliedLeverage;
+    if (!Number.isFinite(appliedLeverage) || appliedLeverage <= 0) {
+      throw new Error("appliedLeverage inválido devuelto por la reserva");
     }
 
     // Gate (CAS pending→submitting + revalida) ANTES de cualquier efecto HL — incluido

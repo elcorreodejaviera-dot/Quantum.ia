@@ -22,6 +22,7 @@ import type * as hlCredentialActions from "../hlCredentialActions.js";
 import type * as hlCredentials from "../hlCredentials.js";
 import type * as hlNetwork from "../hlNetwork.js";
 import type * as hyperliquid from "../hyperliquid.js";
+import type * as leverage from "../leverage.js";
 import type * as migrations from "../migrations.js";
 import type * as pools from "../pools.js";
 import type * as seed from "../seed.js";
@@ -55,6 +56,7 @@ declare const fullApi: ApiFromModules<{
   hlCredentials: typeof hlCredentials;
   hlNetwork: typeof hlNetwork;
   hyperliquid: typeof hyperliquid;
+  leverage: typeof leverage;
   migrations: typeof migrations;
   pools: typeof pools;
   seed: typeof seed;

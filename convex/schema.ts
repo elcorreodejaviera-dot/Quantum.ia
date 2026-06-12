@@ -261,6 +261,7 @@ export default defineSchema({
     requestedAmount: v.number(),          // tradeAmount solicitado (base del dedupe)
     notional: v.number(),                 // nocional efectivo (size × markPx) de la 1ª ejecución
     marginReserved: v.optional(v.number()), // margen reservado por cuenta (notional/leverage) — anti-carrera
+    appliedLeverage: v.optional(v.number()), // leverage entero aplicado (auto o manual); optional para filas legacy
     side: v.union(v.literal("Long"), v.literal("Short")),
     status: v.union(
       v.literal("pending"), v.literal("submitting"), v.literal("entry_filled"),

@@ -49,6 +49,13 @@ function formatUsd(value) {
   return n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
 }
 
+// Versión con 2 decimales para SALDOS reales de HL (el usuario quiere ver el monto exacto, no redondeado).
+function formatUsd2(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '$0.00';
+  return n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 function formatUsdCompact(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return '$0';
@@ -247,15 +254,15 @@ function CoberturaViva({ bot, arm, pool, accountById, hlBalance }) {
         <div className="cv-hl">
           <div className="cv-hl-bal">
             <span className="cv-label">Saldo HL</span>
-            <strong>{formatUsd(hlBalance.spotUsdcFree)}</strong>
-            <span className="cv-sub">USDC spot libre{hlBalance.withdrawable > 0 ? ` · retirable ${formatUsd(hlBalance.withdrawable)}` : ''}</span>
+            <strong>{formatUsd2(hlBalance.spotUsdcFree)}</strong>
+            <span className="cv-sub">USDC spot libre{hlBalance.withdrawable > 0 ? ` · retirable ${formatUsd2(hlBalance.withdrawable)}` : ''}</span>
           </div>
           {pos && (
             <div className="cv-hl-pos">
               <div className="cv-hl-pnl">
                 <span className="cv-label">PNL ({pos.coin})</span>
                 <strong className={pos.unrealizedPnl >= 0 ? 'positive' : 'negative'}>
-                  {pos.unrealizedPnl >= 0 ? '+' : ''}{formatUsd(pos.unrealizedPnl)}
+                  {pos.unrealizedPnl >= 0 ? '+' : ''}{formatUsd2(pos.unrealizedPnl)}
                 </strong>
                 <span className="cv-sub">{(pos.roe * 100).toFixed(1)}% ROE</span>
               </div>
@@ -2606,18 +2613,26 @@ function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
 // Fila de una cuenta HL conectada (balance + revocar).
 function HLAccountRow({ account, onRevoke }) {
   const { account: bal } = useHLAccountBalance(account.tradingAccountAddress);
+  // Saldo TOTAL real de la cuenta = equity perp + USDC spot libre (modo unified). Sin redondear.
+  const total = bal ? (bal.accountValue + bal.spotUsdcFree) : null;
   return (
-    <div className="wallet-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '6px 0' }}>
-      <div>
-        <strong style={{ fontSize: 13 }}>{account.label ?? 'Cuenta'}</strong>
-        <div className="network" style={{ fontSize: 11 }}>
+    <div className="hl-acct-row">
+      <div className="hl-acct-id">
+        <strong>{account.label ?? 'Cuenta'}</strong>
+        <div className="network" title={account.tradingAccountAddress}>
           {account.tradingAccountAddress.slice(0, 8)}…{account.tradingAccountAddress.slice(-6)}
         </div>
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span style={{ fontSize: 12 }} title="Withdrawable API (perp) · USDC spot libre">{bal ? `W ${formatUsd(bal.withdrawable)} · S ${formatUsd(bal.spotUsdcFree)}` : '…'}</span>
-        <button className="mini-btn" onClick={onRevoke}>Revocar</button>
+      <div className="hl-acct-bal">
+        <strong>{total != null ? formatUsd2(total) : '…'}</strong>
+        <span className={`hl-acct-status${bal ? ' conn' : ''}`}>
+          <span className="dot" />{bal ? 'Conectada' : 'Conectando…'}
+        </span>
+        <span className="hl-acct-sub" title="USDC retirable (perp) · el resto es spot, colateral en modo unified">
+          Disponible {bal ? formatUsd2(bal.withdrawable) : '—'}
+        </span>
       </div>
+      <button className="mini-btn" onClick={onRevoke}>Revocar</button>
     </div>
   );
 }

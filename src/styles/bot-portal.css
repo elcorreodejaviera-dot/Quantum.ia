@@ -2601,3 +2601,14 @@ details[open] > .pool-pnl-toggle::before {
 .hl-acct-status.conn { color: var(--green); }
 .hl-acct-status .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .hl-acct-sub { font-size: 10px; color: var(--muted); }
+.hl-acct-api {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 6px;
+  border: 1px solid currentColor;
+}
+.hl-acct-api.green { color: var(--green); }
+.hl-acct-api.amber { color: var(--amber); }
+.hl-acct-api.red { color: var(--red); }

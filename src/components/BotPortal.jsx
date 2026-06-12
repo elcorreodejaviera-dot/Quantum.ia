@@ -1990,15 +1990,43 @@ function serializePoolBotConfig(bot, overrides = {}) {
   });
 }
 
+// Estimación del tiempo de pausa: el cron "reconcile pool arms" corre cada 1 min (convex/crons.ts),
+// así que la cancelación en HL cae como muy tarde en ~60s desde la solicitud. Es una ESTIMACIÓN.
+const DISARM_ETA_SECONDS = 60;
+
 // Botón de acción de un pool-bot en la PoolCard: estado + configurar/reconfigurar + pausar/activar.
 function BotActionButton({ label, bot, busy, onConfig, onToggle, onDelete }) {
+  const disarming = bot?.disarmPending === true;
+  // useEffect INCONDICIONAL (regla de hooks); el guard va dentro. Refresca `now` cada segundo solo
+  // mientras se está deteniendo, con cleanup del intervalo.
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    if (!disarming) return undefined;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [disarming]);
+
+  // Texto del estado de pausa. Con ancla (disarmRequestedAt) → contador estimado; al llegar a 0 →
+  // "finalizando…" (el cron puede tardar hasta ~60s y a veces necesita otro ciclo). Sin ancla
+  // (filas legacy o pausa recién solicitada) → solo "Deteniendo…".
+  let disarmText = 'Deteniendo…';
+  if (disarming && typeof bot.disarmRequestedAt === 'number') {
+    const elapsed = Math.max(0, Math.floor((now - bot.disarmRequestedAt) / 1000));
+    // Normaliza desfases del reloj cliente (ancla "futura") acotando el restante a [0, 60].
+    const remaining = Math.min(DISARM_ETA_SECONDS, Math.max(0, DISARM_ETA_SECONDS - elapsed));
+    disarmText = remaining > 0
+      ? `Deteniendo… ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}`
+      : 'Deteniendo… finalizando…';
+  }
+
   return (
     <div className="pool-bot-action" style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <strong style={{ fontSize: 13 }}>{label}</strong>
         {bot && (
-          <span className={`pill ${bot.active ? 'green' : 'faint'}`} style={{ fontSize: 10 }}>
-            {bot.active ? 'Activo' : 'Pausado'}{bot.simulationMode ? ' · sim' : ''}
+          <span className={`pill ${disarming ? 'faint' : (bot.active ? 'green' : 'faint')}`} style={{ fontSize: 10 }}>
+            {disarming ? 'Deteniéndose' : (bot.active ? 'Activo' : 'Pausado')}{bot.simulationMode ? ' · sim' : ''}
           </span>
         )}
       </div>
@@ -2007,8 +2035,14 @@ function BotActionButton({ label, bot, busy, onConfig, onToggle, onDelete }) {
           {bot ? 'Reconfigurar' : 'Configurar'}
         </button>
         {bot && (
-          <button className="mini-btn" onClick={onToggle} disabled={busy}>
-            {bot.active ? 'Pausar' : 'Activar'}
+          // Mientras se detiene: deshabilitado + contador estimado en el propio botón de pausa.
+          <button
+            className="mini-btn"
+            onClick={onToggle}
+            disabled={busy || disarming}
+            title={disarming ? 'Cancelando el trigger en HL; la pausa se completa al terminar.' : undefined}
+          >
+            {disarming ? disarmText : (bot.active ? 'Pausar' : 'Activar')}
           </button>
         )}
         {/* D: eliminar el bot del pool (parada segura + borrado). Deshabilitado mientras se desarma. */}
@@ -2016,11 +2050,11 @@ function BotActionButton({ label, bot, busy, onConfig, onToggle, onDelete }) {
           <button
             className="mini-btn"
             onClick={onDelete}
-            disabled={busy || bot.disarmPending}
-            title={bot.disarmPending ? 'Deteniendo el bot (cancelando órdenes en HL)…' : 'Eliminar este bot del pool'}
+            disabled={busy || disarming}
+            title={disarming ? 'Deteniendo el bot (cancelando órdenes en HL)…' : 'Eliminar este bot del pool'}
             style={{ color: 'var(--red)', borderColor: 'var(--red)' }}
           >
-            {bot.disarmPending ? 'Deteniendo…' : 'Eliminar'}
+            {disarming ? 'Deteniendo…' : 'Eliminar'}
           </button>
         )}
       </div>

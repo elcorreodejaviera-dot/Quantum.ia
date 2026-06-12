@@ -107,6 +107,10 @@ export default defineSchema({
     // JAV-44: pausa segura — bloquea nuevos arms mientras se cancela un trigger vivo, manteniendo
     // active=true hasta confirmar la cancelación en HL (requestDisarmAndDeactivate).
     disarmPending: v.optional(v.boolean()),
+    // Instante (ms) en que se SOLICITÓ la pausa (se setea al pasar disarmPending→true y NO se reinicia
+    // en llamadas repetidas). La UI lo usa para un contador estimado (~60s = intervalo del cron
+    // "reconcile pool arms") junto a "Deteniendo…". Se limpia en cada sitio que limpia disarmPending.
+    disarmRequestedAt: v.optional(v.number()),
     // JAV-44 auto-rearm durable (Codex GO): estado persistente del re-armado tras un cierre por SL.
     // El cron lo reclama con lease, revalida gates y reabre la cobertura. "Nunca desprotegido" =
     // ningún fallo TÉCNICO abandona el rearm (reintento indefinido cada 5 min); pausa/kill/pool cerrado

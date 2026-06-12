@@ -2177,9 +2177,13 @@ function BotActionButton({ label, bot, busy, onConfig, onToggle, onDelete }) {
         )}
       </div>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-        <button className="mini-btn" onClick={onConfig} style={{ flex: 1 }}>
-          {bot ? 'Reconfigurar' : 'Configurar'}
-        </button>
+        {/* (JAV-58) Sin "Reconfigurar": editar un bot existente daba error en Convex. Para cambiar la
+            config se Elimina y se vuelve a Configurar. "Configurar" (crear) solo cuando NO hay bot. */}
+        {!bot && (
+          <button className="mini-btn" onClick={onConfig} style={{ flex: 1 }}>
+            Configurar
+          </button>
+        )}
         {bot && (
           // Mientras se detiene: deshabilitado + contador estimado en el propio botón de pausa.
           <button

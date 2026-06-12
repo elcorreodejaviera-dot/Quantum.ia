@@ -3896,8 +3896,8 @@ function Dashboard({ user, onLogout, userId }) {
                 onKillSwitch={killSwitch}
               />
             )}
-            <WalletPanel />
-            <HLAccountPanel walletAddress={currentUser?.walletAddress ?? null} userLoaded={userLoaded} prices={prices} isAdmin={isAdmin} />
+            {/* (JAV-58) Quitados "Wallets" (personales, 0 conectadas) y "Cuenta Hyperliquid" (legacy testnet):
+                las únicas cuentas ancladas son las de Hyperliquid → panel "Cuentas Hyperliquid" (multi-cuenta). */}
             <NetworkLiquidity pools={filteredPools} />
             <RiskPanel pools={filteredPools} />
           </aside>

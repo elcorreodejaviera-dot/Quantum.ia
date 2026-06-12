@@ -90,13 +90,17 @@ export async function requestDisarmAndDeactivateImpl(ctx: MutationCtx, botId: Id
   const arms = await ctx.db.query("trigger_arms").withIndex("by_bot_generation", (q) => q.eq("botId", botId)).collect();
   const live = arms.filter((a) => !isArmTerminal(a.status));
   if (live.length === 0) {
-    await ctx.db.patch(botId, { active: false, disarmPending: false, ...clearRearm });
+    // Desactivación inmediata (sin arm vivo): limpiar también el ancla del contador.
+    await ctx.db.patch(botId, { active: false, disarmPending: false, disarmRequestedAt: undefined, ...clearRearm });
     return { deactivated: true };
   }
   for (const a of live) {
     if (a.desiredState !== "disarmed") await ctx.db.patch(a._id, { desiredState: "disarmed", updatedAt: Date.now() });
   }
-  await ctx.db.patch(botId, { disarmPending: true, ...clearRearm });
+  // (Codex) NO reiniciar el contador: setear disarmRequestedAt solo en la PRIMERA solicitud
+  // (disarmPending pasa de no-true a true). Una llamada repetida mientras ya se está pausando lo conserva.
+  const anchor = bot.disarmPending === true ? {} : { disarmRequestedAt: Date.now() };
+  await ctx.db.patch(botId, { disarmPending: true, ...anchor, ...clearRearm });
   return { deactivated: false };
 }
 
@@ -474,7 +478,7 @@ export const settleArm = internalMutation({
     if (ARM_TERMINAL.has(args.status)) {
       const bot = await ctx.db.get(arm.botId);
       if (bot?.disarmPending) {
-        await ctx.db.patch(arm.botId, { active: false, disarmPending: false });
+        await ctx.db.patch(arm.botId, { active: false, disarmPending: false, disarmRequestedAt: undefined });
       }
     }
     // (Codex #1) Un arm de auto-rearm que termina `failed` AQUÍ ya pasó la cuarentena N6 y la prueba
@@ -520,7 +524,7 @@ export const closeArmAndScheduleRearm = internalMutation({
     const resetAlert = { consecutiveStops: 0, lastStopAlertLevel: 0, stopAlertSentAt: undefined } as const;
     // N2: finalizar pausa si estaba pendiente (la pausa gana; no rearmar).
     if (bot?.disarmPending) {
-      await ctx.db.patch(arm.botId, { active: false, disarmPending: false, ...resetAlert });
+      await ctx.db.patch(arm.botId, { active: false, disarmPending: false, disarmRequestedAt: undefined, ...resetAlert });
       return { ok: true as const, rearmScheduled: false as const, consecutiveStops: 0 };
     }
     if (closeReason !== "sl") {
@@ -603,7 +607,7 @@ export const recoverAbandonedArming = internalMutation({
     if (Date.now() - arm.createdAt <= ARM_ARMING_RECOVERY_MS) return { ok: false as const, tooRecent: true as const };
     await ctx.db.patch(armId, { status: "failed", error: "arming abandonado pre-CAS (nunca envió)", updatedAt: Date.now() });
     const bot = await ctx.db.get(arm.botId);
-    if (bot?.disarmPending) await ctx.db.patch(arm.botId, { active: false, disarmPending: false });
+    if (bot?.disarmPending) await ctx.db.patch(arm.botId, { active: false, disarmPending: false, disarmRequestedAt: undefined });
     // (Codex #1) Abandonado pre-CAS = NUNCA envió a HL (submittedAt==null) → sin orden posible. Si era
     // auto-rearm, devolver el trabajo (reprogramar) para no dejar el bot activo sin cobertura.
     if (arm.fromRearm === true) await rescheduleRearmIfEligible(ctx, arm.botId);

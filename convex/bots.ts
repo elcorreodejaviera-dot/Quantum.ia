@@ -345,7 +345,7 @@ export const getOrCreatePoolBot = mutation({
       if (pausingActive) {
         await requestDisarmAndDeactivateImpl(ctx, existingBot._id);
       } else if (willBeActive && existingBot.disarmPending) {
-        await ctx.db.patch(existingBot._id, { disarmPending: false });
+        await ctx.db.patch(existingBot._id, { disarmPending: false, disarmRequestedAt: undefined });
       }
       // (G1) Auto-arm: un bot IL que queda ACTIVO en modo REAL entra en el motor de rearm DURABLE
       // (rearmStatus="pending") → el cron processRearms lo arma con reintento/backoff y deja el

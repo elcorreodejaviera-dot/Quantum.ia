@@ -59,10 +59,12 @@ con el que se dimensiona el margen. Helper puro único: `convex/leverage.ts:reso
    - Clasificación de errores: capacidad → `[blocked_margin]`; params/metadata → `[blocked_config]`.
      ¿Algún throw mal clasificado que el cron de auto-rearm interpretaría mal?
 
-2. **`getAssetMeta` (hyperliquid.ts)** — añade `maxLeverage` de `meta.universe[idx].maxLeverage`,
-   validado entero ≥ 1, fail-closed. ¿El campo existe y es entero en la HL Info API para todos los
-   activos? ¿Romper aquí (throw) bloquea armados que antes funcionaban? ¿El otro call site de
-   `getAssetMeta` (el que solo destructura `{assetId, szDecimals}`) sigue OK con el nuevo campo?
+2. **`getAssetMeta` (hyperliquid.ts)** — añade `maxLeverage` de `meta.universe[idx].maxLeverage` EN
+   CRUDO, **sin validar** (puede ser `NaN` si HL lo omite): `getAssetMeta` lo usan también rutas
+   defensivas (cierre de emergencia, reconciliación) que NO deben fallar por metadata exclusiva de
+   apertura. La validación estricta (entero ≥ 1) vive en `resolveLeverage`, solo en el camino de
+   apertura/reserva (modo AUTO). ¿El otro call site de `getAssetMeta` (el que solo destructura
+   `{assetId, szDecimals}`) sigue OK con el nuevo campo?
 
 3. **`reserveExecution` (executions.ts)**:
    - Ya NO recibe `marginRequired` del action; lo calcula el helper. ¿Se eliminaron todas las
@@ -102,7 +104,9 @@ con el que se dimensiona el margen. Helper puro único: `convex/leverage.ts:reso
 
 - Leverage entero siempre; el enviado a HL == el usado para el margen.
 - En modo AUTO: nunca leverage > min(20, maxActivo); nunca posición infradimensionada silenciosa.
-  (En modo MANUAL se conserva el rango 1–25 previo, sin acotar por maxActivo — HL lo rechaza si excede.)
+  (En modo MANUAL se conserva el rango 1–25 previo; además, CUANDO la metadata es fiable —`maxActivo`
+  entero ≥ 1— se rechaza `appliedLeverage > maxActivo` ANTES de reservar (fix #2); si HL la omite, no
+  se acota y HL queda como autoridad final, sin bloquear por metadata ausente (fix #1).)
 - `getAssetMeta` NO valida maxLeverage (rutas defensivas no deben fallar); la validación estricta
   vive en `resolveLeverage`, solo en el camino de apertura/reserva.
 - Gate de margen atómico con `MARGIN_SAFETY_BUFFER` y `committedMarginForAccount` intacto (solo

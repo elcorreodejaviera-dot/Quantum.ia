@@ -47,9 +47,12 @@ export function resolveLeverage(args: {
   }
 
   if (!autoLeverage) {
-    // Modo manual: leverage = round(manualLeverage), validado al rango 1–25 (paridad con el código
-    // previo). (Codex #1) La validación ESTRICTA de assetMaxLeverage NO corre aquí: si HL omite o
-    // cambia esa metadata, el modo manual —que no la necesita— no debe bloquearse.
+    // Modo manual. PARIDAD EXACTA con el código previo (auditada por Codex, NO cambiar): se valida
+    // el valor CRUDO recibido en el rango [1,25] y DESPUÉS se redondea — igual que antes
+    // (effectiveLeverage validado en [1,25] → Math.round). Por eso un 25.4 o un 0.6 se rechazan aquí
+    // (como en producción hoy), en vez de redondear-y-luego-validar (lo que CAMBIARÍA ese contrato).
+    // (Codex #1) La validación ESTRICTA de assetMaxLeverage NO corre aquí: si HL omite o cambia esa
+    // metadata, el modo manual —que no la necesita— no debe bloquearse.
     if (manualLeverage === undefined || !Number.isFinite(manualLeverage)
       || manualLeverage < MANUAL_LEVERAGE_MIN || manualLeverage > MANUAL_LEVERAGE_MAX) {
       throw new Error(`[blocked_config] leverage manual debe estar entre ${MANUAL_LEVERAGE_MIN} y ${MANUAL_LEVERAGE_MAX}`);

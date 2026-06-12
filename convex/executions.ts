@@ -210,7 +210,9 @@ export const reserveExecution = internalMutation({
     });
     if ((marginCommitted + marginRequired) > args.availableCollateral * (1 - MARGIN_SAFETY_BUFFER)) {
       throw new Error(
-        `Margen insuficiente en la cuenta: comprometido ${marginCommitted.toFixed(2)} + requerido ` +
+        // (CodeRabbit) Prefijo [blocked_margin]: coherente con resolveLeverage/reserveArm y con el
+        // contrato de buckets de capacidad (la misma función ya lanza [blocked_margin] desde el helper).
+        `[blocked_margin] Margen insuficiente en la cuenta: comprometido ${marginCommitted.toFixed(2)} + requerido ` +
         `${marginRequired.toFixed(2)} > colateral ${args.availableCollateral.toFixed(2)} (buffer ${MARGIN_SAFETY_BUFFER * 100}%).`);
     }
     // (3) Reservar en estado pending.

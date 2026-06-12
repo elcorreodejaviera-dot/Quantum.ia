@@ -92,7 +92,7 @@ Validación de argumentos (fail-closed, **antes** de calcular):
 
 Cálculo:
 
-```
+```text
 usableReal = availableCollateral * (1 - MARGIN_SAFETY_BUFFER) - marginCommitted   // 0.10
 
 // modo manual: leverage = round(manualLeverage) acotado al rango actual (igual que hoy)

@@ -18,20 +18,6 @@ const POOLS = [
   { id: 6, pair: 'ETH/USDC', network: 'Optimism', min: 3860, max: 4240, liquidity: 24560, fees24h: 22, apr: 24.9, exposure: 0.88, status: 'Fuera de rango' },
 ];
 
-const INITIAL_BOTS = [
-  { id: 'bot1', name: 'bot1', action: 'Cobertura short', active: true, mode: 'Short', trigger: 'Precio sale del rango o delta > 0.65', hedge: '$42,300', health: 'Normal', poolTokenId: '#893421', walletId: 'WLT-001', capitalPerTrade: 2500, poolCapitalPercent: 75, leverage: 3, autoLeverage: true, stop: 2.5, takeProfit: 'Escalonado', tpSteps: [25, 50, 25], orderType: 'Trigger por precio', marginMode: 'Isolated', collateral: 'USDC', entryTrigger: 'Fuera de rango', triggerPrice: 68150 },
-  { id: 'bot2', name: 'bot2', action: 'Cobertura long', active: true, mode: 'Long', trigger: 'Entrada defensiva cuando el precio recupera rango', hedge: '$31,700', health: 'Alta actividad', poolTokenId: '#893577', walletId: 'WLT-002', capitalPerTrade: 1800, poolCapitalPercent: 50, leverage: 2, autoLeverage: false, stop: 1.8, takeProfit: 'Fijo', tpSteps: [25, 50, 25], orderType: 'Trigger por rango', marginMode: 'Isolated', collateral: 'USDC', entryTrigger: 'Retorno al rango', triggerPrice: 3740 },
-  { id: 'bot3', name: 'bot3', action: 'Rebalanceo APR', active: false, mode: 'Long + Short', trigger: 'Rebalanceo cuando APR cae bajo 18%', hedge: '$18,900', health: 'Pausado', poolTokenId: '#894002', walletId: 'WLT-003', capitalPerTrade: 1200, poolCapitalPercent: 100, leverage: 1, autoLeverage: true, stop: 3.2, takeProfit: 'Trailing', tpSteps: [25, 50, 25], orderType: 'Trigger por APR', marginMode: 'Isolated', collateral: 'USDC', entryTrigger: 'APR bajo', triggerPrice: 18 },
-];
-
-const WALLETS = [
-  { id: 'WLT-001', label: 'Wallet bot1', type: 'Bot', owner: 'bot1', address: '0x8a21...91F4', balance: 42850, network: 'Arbitrum' },
-  { id: 'WLT-002', label: 'Wallet bot2', type: 'Bot', owner: 'bot2', address: '0x43d9...A2c8', balance: 31640, network: 'Base' },
-  { id: 'WLT-003', label: 'Wallet bot3', type: 'Bot', owner: 'bot3', address: '0x71b4...0E19', balance: 28620, network: 'Optimism' },
-  { id: 'WLT-004', label: 'Wallet pool BTC', type: 'Pool', owner: 'BTC/USDC', address: '0x5c02...B7D1', balance: 19840, network: 'Arbitrum' },
-  { id: 'WLT-005', label: 'Wallet pool ETH', type: 'Pool', owner: 'ETH/USDC', address: '0x96ef...3C44', balance: 15290, network: 'Base' },
-];
-
 const SUBSCRIPTIONS = [
   { type: 'Starter', coverage: 10000 },
   { type: 'Growth', coverage: 20000 },
@@ -48,11 +34,6 @@ const ALERT_TYPE_LABELS = {
   apy_below: 'APY bajo umbral',
   price_cross: 'Precio cruza nivel',
 };
-
-const INITIAL_SPOT_POSITIONS = [
-  { asset: 'BTC', amount: 0.42, dca: 63200, currentPrice: null },
-  { asset: 'ETH', amount: 8.6, dca: 3420, currentPrice: null },
-];
 
 // Campos UI de bots que no están en el schema de Convex (trading config extendida)
 const DEFAULT_BOT_UI = {
@@ -528,12 +509,38 @@ function SubscriptionBar({ pools = [] }) {
   );
 }
 
+// (JAV-57 #2) Precio USD de un token spot. Estables = $1; ETH/WETH y BTC/WBTC/cbBTC vía allMids de HL.
+// Devuelve null si no hay precio fiable → la valuación de esa wallet se marca "parcial" (no se inventa 0).
+function tokenUsd(symbol, amount, mids) {
+  if (symbol === 'USDC' || symbol === 'USDT' || symbol === 'DAI') return amount;
+  if (symbol === 'ETH' || symbol === 'WETH') { const p = Number(mids?.ETH); return Number.isFinite(p) && p > 0 ? amount * p : null; }
+  if (symbol === 'BTC' || symbol === 'WBTC' || symbol === 'cbBTC') { const p = Number(mids?.BTC); return Number.isFinite(p) && p > 0 ? amount * p : null; }
+  return null;
+}
+
 function WalletPanel() {
-  const walletsFromDb = useQuery(api.wallets.listWallets);
-  const wallets = (walletsFromDb ?? []).map((w) => ({ ...w, id: w._id, owner: w.ownerId ?? '—', balance: 0 }));
-  const botWallets = wallets.filter((wallet) => wallet.type === 'Bot');
-  const poolWallets = wallets.filter((wallet) => wallet.type === 'Pool');
+  // (JAV-57 #1) listMyWallets: SOLO las wallets del usuario autenticado. listWallets devolvía TODAS
+  // a cualquier usuario (fuga multi-tenant) y este panel además leía/valoraba balances ajenos.
+  const walletsFromDb = useQuery(api.wallets.listMyWallets);
+  const wallets = (walletsFromDb ?? []).map((w) => ({ ...w, id: w._id, owner: w.ownerId ?? '—' }));
+  const { walletTokens, loading: balLoading } = useWalletBalances(wallets);
+  const { allPrices } = useHyperliquidAllMids();
   const [open, setOpen] = React.useState(false);
+
+  // (JAV-57 #2/#3) Valor USD REAL por wallet (keyed por _id) + estado explícito
+  // (ok | partial | unavailable | loading). Un fallo NUNCA se muestra como $0 silencioso.
+  const enriched = wallets.map((w) => {
+    const wt = walletTokens[w._id];
+    if (!wt) return { ...w, balanceUsd: null, balStatus: balLoading ? 'loading' : 'unavailable' };
+    let usd = 0;
+    let priced = true;
+    for (const [sym, amt] of Object.entries(wt.tokens)) {
+      const v = tokenUsd(sym, amt, allPrices);
+      if (v === null) priced = false; else usd += v;
+    }
+    const balStatus = wt.status !== 'ok' ? wt.status : (priced ? 'ok' : 'partial');
+    return { ...w, balanceUsd: usd, balStatus };
+  });
 
   return (
     <section className="panel">
@@ -545,25 +552,23 @@ function WalletPanel() {
       </div>
       <div className="wallet-summary">
         <span className="pill">{wallets.length} conectadas</span>
-        <span className="label">Wallets de bots y pools conectadas al portal.</span>
+        <span className="label">Tus wallets conectadas al portal.</span>
       </div>
       {open && (
-        <>
-          <div className="wallet-group-title">Bots</div>
-          <div className="wallet-list">
-            {botWallets.map((wallet) => <WalletRow key={wallet.id} wallet={wallet} />)}
-          </div>
-          <div className="wallet-group-title">Pools</div>
-          <div className="wallet-list">
-            {poolWallets.map((wallet) => <WalletRow key={wallet.id} wallet={wallet} />)}
-          </div>
-        </>
+        <div className="wallet-list">
+          {enriched.length === 0
+            ? <div className="wallet-group-title">No tienes wallets conectadas.</div>
+            : enriched.map((wallet) => <WalletRow key={wallet.id} wallet={wallet} />)}
+        </div>
       )}
     </section>
   );
 }
 
 function WalletRow({ wallet }) {
+  // (JAV-57 #2) Representar el estado del saldo, nunca un error como cero.
+  const s = wallet.balStatus;
+  const value = s === 'loading' ? '…' : s === 'unavailable' ? 'no disponible' : formatUsd(wallet.balanceUsd ?? 0);
   return (
     <div className="wallet-row">
       <div>
@@ -571,7 +576,8 @@ function WalletRow({ wallet }) {
         <div className="network">{wallet.address}</div>
       </div>
       <div className="wallet-right">
-        <span className="mono">{formatUsd(wallet.balance)}</span>
+        <span className="mono">{value}</span>
+        {s === 'partial' && <span className="pill faint" title="Algunas lecturas de saldo fallaron o no tienen precio">parcial</span>}
         <span className="pill">{wallet.owner}</span>
       </div>
     </div>
@@ -646,7 +652,6 @@ function getSignalMeta(bot, pools, prices) {
 function BotCard({ bot, pools = [], poolClosed, canManage, onSetActive, onMode, onConfig, onManualTrigger, userLoaded }) {
   const tone = bot.active ? 'green' : 'faint';
   const [configOpen, setConfigOpen] = React.useState(false);
-  const wallet = WALLETS.find((item) => item.id === bot.walletId);
   const tpTotal = bot.tpSteps.reduce((sum, value) => sum + value, 0);
 
   function updateTpStep(index, value) {
@@ -722,7 +727,7 @@ function BotCard({ bot, pools = [], poolClosed, canManage, onSetActive, onMode, 
           <div className="config-header">
             <div>
               <div className="config-title">{bot.name}</div>
-              <div className="network">{wallet?.label} · {wallet?.address}</div>
+              <div className="network">{bot.walletId?.startsWith('0x') ? bot.walletId : '—'}</div>
             </div>
             <span className="pill">{bot.poolTokenId}</span>
           </div>
@@ -1032,27 +1037,37 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
   const updatePositionMutation = useMutation(api.spot_positions.updatePosition);
   const recordPurchaseMutation = useMutation(api.spot_positions.recordPurchase);
   const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
-  const [positions, setPositions] = React.useState(() =>
-    INITIAL_SPOT_POSITIONS.map(p => ({ ...p, protector: loadProtector(userId, p.asset) }))
-  );
+  // (JAV-57 #1) Sin datos demo: el estado autenticado arranca VACÍO y se llena solo desde Convex.
+  // Un usuario nuevo no debe ver capital ficticio (alimentaba valor/PnL y señales/triggers).
+  const [positions, setPositions] = React.useState([]);
   const [openAssets, setOpenAssets] = React.useState({});
   const [addForm, setAddForm] = React.useState({});
   const [openPurchase, setOpenPurchase] = React.useState({});
   const [purchaseForm, setPurchaseForm] = React.useState({});
   const [openHistory, setOpenHistory] = React.useState({});
   const [editingAssets, setEditingAssets] = React.useState({});
-  const [drafts, setDrafts] = React.useState(() => {
-    const d = {};
-    for (const p of INITIAL_SPOT_POSITIONS) {
-      d[p.asset] = { dca: String(p.dca), amount: String(p.amount) };
-    }
-    return d;
-  });
+  const [drafts, setDrafts] = React.useState({});
   const cooldownRef = React.useRef({});
   const COOLDOWN_MS = 60 * 60 * 1000;
 
+  // (JAV-57 #3) Cambio de sesión/usuario: limpiar de inmediato el estado del usuario ANTERIOR para no
+  // mostrar posiciones ajenas ni mantener vivo el effect de señales mientras la query se recarga. El
+  // guard de carga (undefined) del effect de abajo rellena luego con los datos del nuevo usuario.
   React.useEffect(() => {
-    if (!positionsFromDb?.length) return;
+    setPositions([]);
+    setDrafts({});
+    cooldownRef.current = {};
+  }, [userId]);
+
+  React.useEffect(() => {
+    // undefined = aún cargando (no tocar); [] = el usuario no tiene posiciones → estado VACÍO real.
+    // (JAV-57 #1) Distinguir ambos: una respuesta vacía DEBE limpiar, no conservar datos previos.
+    if (positionsFromDb === undefined) return;
+    // (Codex #3) Asociar el resultado a la identidad que lo pidió: si algún registro NO es del userId
+    // actual, es el resultado CACHEADO del usuario anterior durante un cambio de sesión (la query aún
+    // no se recomputó). No aplicarlo — evita repoblar con datos ajenos tras el effect de limpieza.
+    // listMyPositions guarda userId = identity.subject (Clerk), igual que el prop userId del componente.
+    if (positionsFromDb.some((p) => p.userId !== userId)) return;
     setPositions(positionsFromDb.map((p) => ({
       ...p, id: p._id, currentPrice: null, protector: loadProtector(userId, p.asset),
     })));
@@ -1063,7 +1078,7 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
       }
       return next;
     });
-  }, [positionsFromDb]);
+  }, [positionsFromDb, userId]);
 
   React.useEffect(() => {
     setPositions((items) => items.map((pos) => ({

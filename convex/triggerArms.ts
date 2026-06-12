@@ -1,7 +1,8 @@
-import { internalMutation, internalQuery } from "./_generated/server";
+import { internalMutation, internalQuery, query } from "./_generated/server";
 import { v } from "convex/values";
 import type { MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
+import { requireUser } from "./helpers";
 import { getLimit } from "./executionLimits";
 import { committedMarginForAccount, dailyNotionalUsed, assertLiveAdmissible } from "./executions";
 import { resolveLeverage, MARGIN_SAFETY_BUFFER } from "./leverage";
@@ -612,6 +613,48 @@ export const recoverAbandonedArming = internalMutation({
     // auto-rearm, devolver el trabajo (reprogramar) para no dejar el bot activo sin cobertura.
     if (arm.fromRearm === true) await rescheduleRearmIfEligible(ctx, arm.botId);
     return { ok: true as const };
+  },
+});
+
+// --- Query pública: estado vivo de la cobertura para la UI (JAV-58 Fase A) ---
+// (Codex) Multi-tenant ESTRICTO: NO acepta botId del cliente; requireUser; bots por by_user; además
+// valida arm.userId === user._id (defensa en profundidad) y devuelve órdenes SOLO de esos arms. Es
+// READ-ONLY: no toca el motor de ejecución/rearm ni el dimensionado de margen/leverage.
+export const listMyActiveArms = query({
+  args: {},
+  handler: async (ctx) => {
+    const user = await requireUser(ctx);
+    const bots = await ctx.db.query("bots").withIndex("by_user", (q) => q.eq("userId", user._id)).collect();
+    const out: Array<{
+      botId: Id<"bots">; status: string; desiredState: string; side: string;
+      triggerPx: number; lowerEdge: number; upperEdge: number | undefined;
+      appliedLeverage: number; reservedNotional: number; generation: number;
+      orders: Array<{ role: string; oid: string | undefined; cloid: string; triggerPx: number; observedStatus: string }>;
+    }> = [];
+    for (const bot of bots) {
+      const arms = await ctx.db
+        .query("trigger_arms")
+        .withIndex("by_bot_generation", (q) => q.eq("botId", bot._id))
+        .collect();
+      // Arm NO terminal más reciente (mayor generation). Defensa en profundidad: arm.userId === user._id.
+      const live = arms
+        .filter((a) => !isArmTerminal(a.status) && a.userId === user._id)
+        .sort((a, b) => b.generation - a.generation)[0];
+      if (!live) continue;
+      const orders = await ctx.db
+        .query("trigger_orders")
+        .withIndex("by_arm_role", (q) => q.eq("armId", live._id))
+        .collect();
+      out.push({
+        botId: bot._id, status: live.status, desiredState: live.desiredState, side: live.side,
+        triggerPx: live.triggerPx, lowerEdge: live.lowerEdge, upperEdge: live.upperEdge,
+        appliedLeverage: live.appliedLeverage, reservedNotional: live.reservedNotional, generation: live.generation,
+        orders: orders.map((o) => ({
+          role: o.role, oid: o.oid, cloid: o.cloid, triggerPx: o.triggerPx, observedStatus: o.observedStatus,
+        })),
+      });
+    }
+    return out;
   },
 });
 

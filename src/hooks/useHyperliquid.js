@@ -376,6 +376,34 @@ export function useWalletBalances(wallets) {
   return { balances, walletTokens, loading, error };
 }
 
+// Parsea el snapshot de cuenta HL (clearinghouseState + spotClearinghouseState) a la forma de la UI.
+// Modo unified: withdrawable (perp, firme) y spotUsdcFree se exponen POR SEPARADO; la disponibilidad real
+// de margen la valida el backend al operar (no se suman en cliente). Función PURA (sin fetch/estado).
+function parseHLAccount(data, spotData) {
+  const spotUsdcFree = (spotData?.balances ?? [])
+    .filter((b) => b.coin === 'USDC')
+    .reduce((s, b) => s + (parseFloat(b.total ?? 0) - parseFloat(b.hold ?? 0)), 0);
+  return {
+    accountValue: parseFloat(data?.marginSummary?.accountValue ?? 0),
+    withdrawable: parseFloat(data?.withdrawable ?? 0),
+    spotUsdcFree,
+    totalNtlPos: parseFloat(data?.marginSummary?.totalNtlPos ?? 0),
+    totalMarginUsed: parseFloat(data?.marginSummary?.totalMarginUsed ?? 0),
+    openPositions: (data?.assetPositions ?? [])
+      .filter(({ position: p }) => parseFloat(p?.szi ?? 0) !== 0)
+      .map(({ position: p }) => ({
+        coin: p.coin,
+        size: parseFloat(p.szi),
+        entryPx: parseFloat(p.entryPx ?? 0),
+        unrealizedPnl: parseFloat(p.unrealizedPnl ?? 0),
+        positionValue: parseFloat(p.positionValue ?? 0),
+        roe: parseFloat(p.returnOnEquity ?? 0),
+        leverage: p.leverage?.value ?? null,
+        liquidationPx: p.liquidationPx ? parseFloat(p.liquidationPx) : null,
+      })),
+  };
+}
+
 export function useHLAccountBalance(address, { includeOrders = false } = {}) {
   const [account, setAccount] = useState(null);
   const [openOrders, setOpenOrders] = useState([]);
@@ -411,33 +439,7 @@ export function useHLAccountBalance(address, { includeOrders = false } = {}) {
           ordersRes?.ok ? ordersRes.json() : Promise.resolve([]),
         ]);
         if (cancelled) return;
-        // Modo unified: el USDC en spot PUEDE contar como colateral, pero HL aplica reglas de
-        // margen (haircuts) no calculables en cliente. NO se suman (Codex): se muestran por
-        // separado — withdrawable (perp, dato firme de la API) y USDC spot LIBRE (total − hold).
-        // La disponibilidad real la valida el backend antes de operar.
-        const spotUsdcFree = (spotData.balances ?? [])
-          .filter((b) => b.coin === 'USDC')
-          .reduce((s, b) => s + (parseFloat(b.total ?? 0) - parseFloat(b.hold ?? 0)), 0);
-        const perpWithdrawable = parseFloat(data.withdrawable ?? 0);
-        setAccount({
-          accountValue: parseFloat(data.marginSummary?.accountValue ?? 0),
-          withdrawable: perpWithdrawable,
-          spotUsdcFree,
-          totalNtlPos: parseFloat(data.marginSummary?.totalNtlPos ?? 0),
-          totalMarginUsed: parseFloat(data.marginSummary?.totalMarginUsed ?? 0),
-          openPositions: (data.assetPositions ?? [])
-            .filter(({ position: p }) => parseFloat(p?.szi ?? 0) !== 0)
-            .map(({ position: p }) => ({
-              coin: p.coin,
-              size: parseFloat(p.szi),
-              entryPx: parseFloat(p.entryPx ?? 0),
-              unrealizedPnl: parseFloat(p.unrealizedPnl ?? 0),
-              positionValue: parseFloat(p.positionValue ?? 0),
-              roe: parseFloat(p.returnOnEquity ?? 0),
-              leverage: p.leverage?.value ?? null,
-              liquidationPx: p.liquidationPx ? parseFloat(p.liquidationPx) : null,
-            })),
-        });
+        setAccount(parseHLAccount(data, spotData));
         setOpenOrders(Array.isArray(orders) ? orders : []);
         setError(null);
       } catch (_) {
@@ -453,6 +455,60 @@ export function useHLAccountBalance(address, { includeOrders = false } = {}) {
   }, [address]);
 
   return { account, openOrders, loading, error };
+}
+
+// (JAV-58 Fase C) Agregador: lee el snapshot de cuenta de VARIAS direcciones HL en UN ciclo (30s),
+// deduplicando direcciones. Evita N llamadas duplicadas si varios bots comparten cuenta (Codex #3).
+// Devuelve { byAddress: { [addr]: account }, loading }. Una dirección que falla queda ausente del map.
+export function useHLAccountsBalances(addresses) {
+  const [byAddress, setByAddress] = useState({});
+  const [loading, setLoading] = useState(false);
+  const key = JSON.stringify([...new Set((addresses ?? []).filter(Boolean))]);
+
+  useEffect(() => {
+    const list = JSON.parse(key);
+    setByAddress({});
+    if (list.length === 0) { setLoading(false); return; }
+    const controller = new AbortController();
+    let cancelled = false;
+    let latestRun = 0;
+
+    async function fetchAll() {
+      const myRun = ++latestRun;
+      setLoading(true);
+      try {
+        const entries = await Promise.all(list.map(async (addr) => {
+          try {
+            const hlReq = (type) => fetch(HL_REST, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ type, user: addr }),
+              signal: controller.signal,
+            });
+            const [stateRes, spotRes] = await Promise.all([hlReq('clearinghouseState'), hlReq('spotClearinghouseState')]);
+            if (!stateRes.ok) return [addr, null];
+            const [data, spotData] = await Promise.all([
+              stateRes.json(),
+              spotRes?.ok ? spotRes.json() : Promise.resolve({}),
+            ]);
+            return [addr, parseHLAccount(data, spotData)];
+          } catch { return [addr, null]; }
+        }));
+        if (cancelled || myRun !== latestRun) return;
+        const map = {};
+        for (const [addr, acc] of entries) if (acc) map[addr] = acc;
+        setByAddress(map);
+      } finally {
+        if (!cancelled && myRun === latestRun) setLoading(false);
+      }
+    }
+
+    fetchAll();
+    const interval = setInterval(fetchAll, 30_000);
+    return () => { cancelled = true; controller.abort(); clearInterval(interval); };
+  }, [key]);
+
+  return { byAddress, loading };
 }
 
 export function useHyperliquidSpotState(address) {

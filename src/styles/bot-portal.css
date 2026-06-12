@@ -2551,6 +2551,24 @@ details[open] > .pool-pnl-toggle::before {
 .cv-tile strong { font-size: 13px; }
 .cv-dist { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .cv-wallet { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cv-hl {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--green) 30%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--green) 16%, var(--panel));
+}
+.cv-hl-bal { display: flex; flex-direction: column; gap: 1px; }
+.cv-hl-bal strong { font-size: 16px; }
+.cv-hl-pos { display: flex; flex-direction: column; gap: 1px; align-items: flex-end; text-align: right; }
+.cv-hl-pnl { display: flex; flex-direction: column; gap: 1px; align-items: flex-end; }
+.cv-hl-pnl strong { font-size: 15px; }
+.cv-sub { font-size: 10px; color: var(--muted); }
+.cv-hl-meta { font-variant-numeric: tabular-nums; }
 .cobertura-oids { font-size: 11px; color: var(--muted); }
 .cobertura-oids summary { cursor: pointer; }
 .cobertura-oids ul { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }

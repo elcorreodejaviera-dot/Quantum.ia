@@ -2,7 +2,7 @@ import React from 'react'
 import { useUser, useClerk } from '@clerk/clerk-react'
 import { useConvexAuth, useQuery, useMutation, useAction, usePaginatedQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
-import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState, useWalletBalances, useHLAccountBalance, useMetaMaskSigner, executeHLTestnetOrder } from '../hooks/useHyperliquid'
+import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState, useWalletBalances, useHLAccountBalance, useHLAccountsBalances, useMetaMaskSigner, executeHLTestnetOrder } from '../hooks/useHyperliquid'
 
 const IS_TESTNET = import.meta.env.VITE_HL_NETWORK === 'testnet';
 
@@ -178,7 +178,7 @@ const ARM_STATE_LABEL = {
   protecting: 'Protegiendo', protected: 'Protegido', disarming: 'Deteniéndose', unknown: 'Verificando',
   failed: 'Falló',
 };
-function CoberturaViva({ bot, arm, pool, accountById }) {
+function CoberturaViva({ bot, arm, pool, accountById, hlBalance }) {
   if (!bot) return null;
   const price = pool?.price ?? null;
 
@@ -212,6 +212,9 @@ function CoberturaViva({ bot, arm, pool, accountById }) {
   const walletLabel = acc?.label
     || (acc?.tradingAccountAddress ? `${acc.tradingAccountAddress.slice(0, 6)}…${acc.tradingAccountAddress.slice(-4)}` : '—');
 
+  // (Fase C) Posición HL en vivo del activo del bot (si hay alguna abierta).
+  const pos = hlBalance?.openPositions?.find((p) => p.coin === bot.baseAsset) ?? null;
+
   return (
     <div className="cobertura-viva">
       <div className="cobertura-head">
@@ -240,6 +243,29 @@ function CoberturaViva({ bot, arm, pool, accountById }) {
           <strong className="cv-wallet" title={acc?.tradingAccountAddress ?? ''}>{walletLabel}</strong>
         </div>
       </div>
+      {hlBalance && (
+        <div className="cv-hl">
+          <div className="cv-hl-bal">
+            <span className="cv-label">Saldo HL</span>
+            <strong>{formatUsd(hlBalance.spotUsdcFree)}</strong>
+            <span className="cv-sub">USDC spot libre{hlBalance.withdrawable > 0 ? ` · retirable ${formatUsd(hlBalance.withdrawable)}` : ''}</span>
+          </div>
+          {pos && (
+            <div className="cv-hl-pos">
+              <div className="cv-hl-pnl">
+                <span className="cv-label">PNL ({pos.coin})</span>
+                <strong className={pos.unrealizedPnl >= 0 ? 'positive' : 'negative'}>
+                  {pos.unrealizedPnl >= 0 ? '+' : ''}{formatUsd(pos.unrealizedPnl)}
+                </strong>
+                <span className="cv-sub">{(pos.roe * 100).toFixed(1)}% ROE</span>
+              </div>
+              <span className="cv-sub cv-hl-meta">
+                entry ${formatPrice(pool.pair, pos.entryPx)} · {pos.leverage}x{pos.liquidationPx ? ` · liq $${formatPrice(pool.pair, pos.liquidationPx)}` : ''}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
       {arm?.orders?.length > 0 && (
         <details className="cobertura-oids">
           <summary>Órdenes en Hyperliquid ({arm.orders.length})</summary>
@@ -258,7 +284,7 @@ function CoberturaViva({ bot, arm, pool, accountById }) {
   );
 }
 
-function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById }) {
+function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBalanceByAddress }) {
   const deletePoolMutation = useMutation(api.pools.deletePool);
   const allBots = useQuery(api.bots.listBots);
   const savePoolBot = useMutation(api.bots.getOrCreatePoolBot);
@@ -268,6 +294,9 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById }) {
   const tradingBot = (allBots ?? []).find((b) => b.poolId === pool.id && b.kind === 'trading') ?? null;
   // (JAV-58 Fase B) arm vivo del bot IL, resuelto a nivel padre (map botId → arm).
   const ilArm = ilBot ? (armsByBot?.[ilBot._id] ?? null) : null;
+  // (JAV-58 Fase C) saldo/posición HL del bot IL, vía agregador a nivel padre.
+  const ilAcc = ilBot?.hlAccountId ? (accountById?.[ilBot.hlAccountId] ?? null) : null;
+  const ilHlBal = ilAcc?.tradingAccountAddress ? (hlBalanceByAddress?.[ilAcc.tradingAccountAddress] ?? null) : null;
   const [botModal, setBotModal] = React.useState(null);   // 'il' | 'trading' | null
   const [botBusy, setBotBusy] = React.useState(false);
 
@@ -485,7 +514,7 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById }) {
       </div>
 
       {(ilBot?.active || ilArm) && (
-        <CoberturaViva bot={ilBot} arm={ilArm} pool={pool} accountById={accountById} />
+        <CoberturaViva bot={ilBot} arm={ilArm} pool={pool} accountById={accountById} hlBalance={ilHlBal} />
       )}
 
       <div className="pool-meta">
@@ -2286,7 +2315,11 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
   // colateral estimado en modo unified (haircuts no calculables en cliente) — se muestra aparte.
   const withdrawable = bal?.withdrawable ?? 0;
   const spotUsdcFree = bal?.spotUsdcFree ?? 0;
-  const availableAfter = withdrawable - thisBotMargin;
+  // (JAV-58 Fase C) En modo unified el colateral incluye el USDC spot, no solo el withdrawable perp.
+  // Mostrar la COBERTURA del margen con ambos (etiquetado "perp+spot") en vez de un −$ rojo engañoso.
+  // La disponibilidad firme la valida el backend al operar; esto es solo orientación de UI.
+  const unifiedFree = withdrawable + spotUsdcFree;
+  const marginCovered = unifiedFree >= thisBotMargin;
 
   async function handleSave() {
     setError(''); setSaving(true);
@@ -2343,7 +2376,11 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
               <Metric label="Margen usado actual" value={formatUsd(marginUsed)} />
               <Metric label="Margen este bot" value={formatUsd(thisBotMargin)} />
               <Metric label="Withdrawable API" value={formatUsd(withdrawable)} />
-              <Metric label="Disponible después" value={<span className={availableAfter >= 0 ? 'positive' : 'negative'}>{formatUsd(availableAfter)}</span>} />
+              <Metric label="Cobertura margen (perp+spot)" value={
+                <span className={marginCovered ? 'positive' : 'negative'}>
+                  {marginCovered ? `✓ ${formatUsd(unifiedFree - thisBotMargin)}` : `falta ${formatUsd(thisBotMargin - unifiedFree)}`}
+                </span>
+              } />
             </div>
             {spotUsdcFree > 0 && (
               <span style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 8, display: 'block' }}>
@@ -3381,6 +3418,17 @@ function Dashboard({ user, onLogout, userId }) {
     for (const a of hlAccounts ?? []) m[a.id] = a;
     return m;
   }, [hlAccounts]);
+  // (JAV-58 Fase C) Saldo/posición HL en vivo: direcciones únicas de los bots → UN agregador (no por
+  // tarjeta, refinamiento #3 de Codex; deduplica si varios bots comparten cuenta).
+  const hlAddresses = React.useMemo(() => {
+    const s = new Set();
+    for (const b of botsFromDb ?? []) {
+      const acc = b.hlAccountId ? accountById[b.hlAccountId] : null;
+      if (acc?.tradingAccountAddress) s.add(acc.tradingAccountAddress);
+    }
+    return [...s];
+  }, [botsFromDb, accountById]);
+  const { byAddress: hlBalanceByAddress } = useHLAccountsBalances(hlAddresses);
   const userPermissions = useQuery(api.users.getUserPermissions, {});
   // Gestionar bots: admins o usuarios con el permiso canManageBots vigente.
   const canManageBots = isAdmin || (userPermissions ?? []).some((p) => p.permission === 'canManageBots');
@@ -3782,7 +3830,7 @@ function Dashboard({ user, onLogout, userId }) {
                 </button>
               </div>
               <div className="pool-grid">
-                {filteredPools.map((pool) => <PoolCard key={pool.id} pool={pool} canManage={canManageBots} canTradeLive={canTradeLive} armsByBot={armsByBot} accountById={accountById} />)}
+                {filteredPools.map((pool) => <PoolCard key={pool.id} pool={pool} canManage={canManageBots} canTradeLive={canTradeLive} armsByBot={armsByBot} accountById={accountById} hlBalanceByAddress={hlBalanceByAddress} />)}
               </div>
             </section>
             {canTradeLive && <HLAccountsPanel />}

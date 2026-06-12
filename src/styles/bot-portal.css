@@ -2516,9 +2516,9 @@ details[open] > .pool-pnl-toggle::before {
 .cobertura-viva {
   margin-top: 10px;
   padding: 10px;
-  border: 1px solid var(--line);
+  border: 1px solid color-mix(in srgb, var(--green) 35%, var(--line));
   border-radius: 10px;
-  background: var(--surface);
+  background: color-mix(in srgb, var(--green) 8%, var(--surface));
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -2542,12 +2542,12 @@ details[open] > .pool-pnl-toggle::before {
   flex-direction: column;
   gap: 2px;
   padding: 6px 8px;
-  border: 1px solid var(--line);
+  border: 1px solid color-mix(in srgb, var(--green) 30%, var(--line));
   border-radius: 8px;
-  background: var(--panel);
+  background: color-mix(in srgb, var(--green) 14%, var(--panel));
   min-width: 0;
 }
-.cv-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+.cv-label { font-size: 10px; color: color-mix(in srgb, var(--green) 55%, var(--muted)); text-transform: uppercase; letter-spacing: .03em; }
 .cv-tile strong { font-size: 13px; }
 .cv-dist { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .cv-wallet { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -195,14 +195,26 @@ const CHAIN_CONFIG = {
   },
 };
 
-async function rpcFetch(rpc, method, params) {
+// Timeout por request RPC: evita que una lectura colgada bloquee el refresco (Codex #4).
+const RPC_TIMEOUT_MS = 10_000;
+
+// rpcFetch valida transporte (res.ok) y la capa JSON-RPC (json.error). LANZA en error en vez de
+// devolver null → el llamador (Promise.allSettled) lo cuenta como fallo (estado partial/unavailable),
+// nunca como saldo 0 (Codex #2/#4). `signal` permite abortar (timeout + cancelación del efecto).
+async function rpcFetch(rpc, method, params, signal) {
   const res = await fetch(rpc, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    signal,
   });
+  if (!res.ok) throw new Error(`RPC HTTP ${res.status} en ${method}`);
   const json = await res.json();
-  return json.result ?? null;
+  if (json.error) throw new Error(`RPC error en ${method}: ${json.error?.message ?? 'desconocido'}`);
+  // (Codex #2) Un result ausente es respuesta MALFORMADA → lanzar, no devolver null (que hexToFloat
+  // convertiría en 0 = saldo falso). Un saldo cero legítimo llega como "0x0", no como ausencia.
+  if (json.result === undefined || json.result === null) throw new Error(`RPC sin result en ${method}`);
+  return json.result;
 }
 
 // Convierte hex EVM (256-bit) a Number para visualización.
@@ -217,24 +229,30 @@ function hexToFloat(hex, decimals) {
   return Number(scaled) / 10 ** (decimals - shift);  // Number solo al final
 }
 
-async function getNative(rpc, address) {
-  const hex = await rpcFetch(rpc, 'eth_getBalance', [address, 'latest']);
+async function getNative(rpc, address, signal) {
+  const hex = await rpcFetch(rpc, 'eth_getBalance', [address, 'latest'], signal);
   return hexToFloat(hex, 18);
 }
 
-async function getErc20(rpc, token, address, decimals) {
+async function getErc20(rpc, token, address, decimals, signal) {
   const data = '0x70a08231' + address.slice(2).padStart(64, '0');
-  const hex = await rpcFetch(rpc, 'eth_call', [{ to: token, data }, 'latest']);
+  const hex = await rpcFetch(rpc, 'eth_call', [{ to: token, data }, 'latest'], signal);
   return hexToFloat(hex, decimals);
 }
 
-async function getBitcoinBalance(address) {
-  const res = await fetch(`https://blockstream.info/api/address/${address}`);
-  if (!res.ok) return 0;
+// LANZA en error (HTTP no-ok) en vez de devolver 0: así un fallo cuenta como "no disponible", no como
+// saldo cero (Codex #2). `signal` para timeout/cancelación.
+async function getBitcoinBalance(address, signal) {
+  const res = await fetch(`https://blockstream.info/api/address/${address}`, { signal });
+  if (!res.ok) throw new Error(`Blockstream HTTP ${res.status}`);
   const data = await res.json();
-  const funded = data.chain_stats?.funded_txo_sum ?? 0;
-  const spent = data.chain_stats?.spent_txo_sum ?? 0;
-  return (funded - spent) / 1e8;
+  // (Codex #2) Validar la estructura: una respuesta sin chain_stats numérico es malformada → lanzar,
+  // no asumir 0.
+  const cs = data?.chain_stats;
+  if (!cs || typeof cs.funded_txo_sum !== 'number' || typeof cs.spent_txo_sum !== 'number') {
+    throw new Error('Blockstream: chain_stats inválido');
+  }
+  return (cs.funded_txo_sum - cs.spent_txo_sum) / 1e8;
 }
 
 // wallets: [{ _id, address, network, label }]
@@ -253,56 +271,86 @@ export function useWalletBalances(wallets) {
     setBalances({});
     setWalletTokens({});
     setError(null);
-    if (!wallets || wallets.length === 0) return;
+    // (Codex #4) Apagar loading al quedar sin wallets: si el efecto previo estaba cargando, la UI
+    // se quedaría en "cargando" indefinidamente al eliminar la última wallet.
+    if (!wallets || wallets.length === 0) { setLoading(false); return; }
+    // (Codex #4) AbortController del efecto: aborta lecturas en vuelo al desmontar o re-ejecutar.
+    const controller = new AbortController();
     let cancelled = false;
+    // (Codex #4) Guard de solapamiento: solo el run MÁS RECIENTE escribe estado. Un refresco lento de
+    // 60s no puede pisar el resultado de uno posterior con datos viejos.
+    let latestRun = 0;
+
+    // Señal por request = aborto del efecto + timeout individual.
+    const reqSignal = () => AbortSignal.any([controller.signal, AbortSignal.timeout(RPC_TIMEOUT_MS)]);
 
     async function fetchAll() {
+      const myRun = ++latestRun;
       setLoading(true);
       try {
-        const ethAcc = {};
+        const ethAcc = {};   // (Codex #3) clave por _id, no por label(network): sin colisiones.
         const btcAcc = {};
         const wTokens = {};
 
-        await Promise.allSettled(wallets.map(async (w) => {
+        // Promise.all (no allSettled aquí): cada wallet maneja sus propios fallos y nunca rechaza;
+        // así un fallo aislado no afecta al resto.
+        await Promise.all(wallets.map(async (w) => {
           const walletKey = w._id;
           const tokenMap = {};
+          let attempted = 0;
+          let failed = 0;
 
           if (w.network === 'Bitcoin') {
-            const bal = await getBitcoinBalance(w.address);
-            if (bal > 0) {
-              tokenMap['BTC'] = bal;
-              btcAcc[`${w.label}(BTC)`] = bal;
-            }
+            attempted += 1;
+            try {
+              const bal = await getBitcoinBalance(w.address, reqSignal());
+              if (bal > 0) { tokenMap['BTC'] = bal; btcAcc[walletKey] = (btcAcc[walletKey] ?? 0) + bal; }
+            } catch { failed += 1; }
           } else {
             const cfg = CHAIN_CONFIG[w.network];
-            if (!cfg) return;
+            if (!cfg) {
+              // (Codex #2) Red no soportada → "no disponible" explícito, NO saldo 0.
+              wTokens[walletKey] = { label: w.label, network: w.network, address: w.address, tokens: {}, status: 'unavailable' };
+              return;
+            }
 
             // ETH nativo
-            const nativeEth = await getNative(cfg.rpc, w.address);
-            if (nativeEth > 0) tokenMap['ETH'] = (tokenMap['ETH'] ?? 0) + nativeEth;
+            attempted += 1;
+            try {
+              const nativeEth = await getNative(cfg.rpc, w.address, reqSignal());
+              if (nativeEth > 0) tokenMap['ETH'] = (tokenMap['ETH'] ?? 0) + nativeEth;
+            } catch { failed += 1; }
 
-            // Todos los tokens ERC-20 configurados
-            await Promise.allSettled(
+            // Tokens ERC-20 configurados: inspeccionar CADA resultado (Codex #2).
+            const results = await Promise.allSettled(
               Object.entries(cfg.tokens).map(async ([symbol, { address, decimals }]) => {
-                const bal = await getErc20(cfg.rpc, address, w.address, decimals);
-                if (bal > 0) tokenMap[symbol] = (tokenMap[symbol] ?? 0) + bal;
+                const bal = await getErc20(cfg.rpc, address, w.address, decimals, reqSignal());
+                return { symbol, bal };
               })
             );
+            for (const r of results) {
+              attempted += 1;
+              if (r.status === 'fulfilled') {
+                if (r.value.bal > 0) tokenMap[r.value.symbol] = (tokenMap[r.value.symbol] ?? 0) + r.value.bal;
+              } else {
+                failed += 1;
+              }
+            }
 
-            // Acumular ETH y BTC para las cards de spot
+            // Acumular ETH y BTC por _id para las cards de spot.
             const totalEthHere = (tokenMap['ETH'] ?? 0) + (tokenMap['WETH'] ?? 0);
             const totalBtcHere = (tokenMap['WBTC'] ?? 0) + (tokenMap['cbBTC'] ?? 0);
-            const wKey = `${w.label}(${w.network})`;
-            if (totalEthHere > 0) ethAcc[wKey] = totalEthHere;
-            if (totalBtcHere > 0) btcAcc[wKey] = totalBtcHere;
+            if (totalEthHere > 0) ethAcc[walletKey] = totalEthHere;
+            if (totalBtcHere > 0) btcAcc[walletKey] = (btcAcc[walletKey] ?? 0) + totalBtcHere;
           }
 
-          if (Object.keys(tokenMap).length > 0) {
-            wTokens[walletKey] = { label: w.label, network: w.network, address: w.address, tokens: tokenMap };
-          }
+          // (Codex #2) Estado del saldo: ok (nada falló) | partial (algunas lecturas fallaron) |
+          // unavailable (todas fallaron). Nunca se presenta un error como cero/parcial silencioso.
+          const status = failed === 0 ? 'ok' : (failed >= attempted ? 'unavailable' : 'partial');
+          wTokens[walletKey] = { label: w.label, network: w.network, address: w.address, tokens: tokenMap, status };
         }));
 
-        if (cancelled) return;
+        if (cancelled || myRun !== latestRun) return;
 
         const totalEth = Object.values(ethAcc).reduce((s, v) => s + v, 0);
         const totalBtc = Object.values(btcAcc).reduce((s, v) => s + v, 0);
@@ -314,15 +362,15 @@ export function useWalletBalances(wallets) {
         setWalletTokens(wTokens);
         setError(null);
       } catch (err) {
-        if (!cancelled) setError('Error leyendo balances');
+        if (!cancelled && myRun === latestRun) setError('Error leyendo balances');
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled && myRun === latestRun) setLoading(false);
       }
     }
 
     fetchAll();
     const interval = setInterval(fetchAll, 60_000);
-    return () => { cancelled = true; clearInterval(interval); };
+    return () => { cancelled = true; controller.abort(); clearInterval(interval); };
   }, [key]);
 
   return { balances, walletTokens, loading, error };

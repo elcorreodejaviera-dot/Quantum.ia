@@ -629,6 +629,7 @@ export const listMyActiveArms = query({
       botId: Id<"bots">; status: string; desiredState: string; side: string;
       triggerPx: number; lowerEdge: number; upperEdge: number | undefined;
       appliedLeverage: number; reservedNotional: number; generation: number;
+      reservationReduced: boolean; allowReentryFromAbove: boolean;
       orders: Array<{ role: string; oid: string | undefined; cloid: string; triggerPx: number; observedStatus: string }>;
     }> = [];
     for (const bot of bots) {
@@ -636,10 +637,11 @@ export const listMyActiveArms = query({
         .query("trigger_arms")
         .withIndex("by_bot_generation", (q) => q.eq("botId", bot._id))
         .collect();
-      // Arm NO terminal más reciente (mayor generation). Defensa en profundidad: arm.userId === user._id.
-      const live = arms
-        .filter((a) => !isArmTerminal(a.status) && a.userId === user._id)
-        .sort((a, b) => b.generation - a.generation)[0];
+      // Solo arms del usuario (defensa en profundidad), por generación desc.
+      const mine = arms.filter((a) => a.userId === user._id).sort((a, b) => b.generation - a.generation);
+      // (Codex #2) Arm vivo (no terminal) más reciente; si no hay y el ÚLTIMO arm FALLÓ, devolverlo para
+      // NO ocultar el fallo. closed/disarmed (terminales normales) no se muestran.
+      const live = mine.find((a) => !isArmTerminal(a.status)) ?? (mine[0]?.status === "failed" ? mine[0] : undefined);
       if (!live) continue;
       const orders = await ctx.db
         .query("trigger_orders")
@@ -649,6 +651,7 @@ export const listMyActiveArms = query({
         botId: bot._id, status: live.status, desiredState: live.desiredState, side: live.side,
         triggerPx: live.triggerPx, lowerEdge: live.lowerEdge, upperEdge: live.upperEdge,
         appliedLeverage: live.appliedLeverage, reservedNotional: live.reservedNotional, generation: live.generation,
+        reservationReduced: live.reservationReduced ?? false, allowReentryFromAbove: live.allowReentryFromAbove ?? false,
         orders: orders.map((o) => ({
           role: o.role, oid: o.oid, cloid: o.cloid, triggerPx: o.triggerPx, observedStatus: o.observedStatus,
         })),

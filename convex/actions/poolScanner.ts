@@ -576,7 +576,9 @@ export const fetchPositionLiquidity = action({
 // (JAV-40 #13) Concurrencia máxima del chequeo de cierres: a lo sumo N RPC simultáneos por lote,
 // para no superar el límite de ejecución de la action con muchos pools (RPC hasta 8s c/u).
 const POOL_SCAN_CONCURRENCY = 5;
-type PoolScanCategory = "closed" | "reopened" | "unavailable" | "skipped" | "errored";
+// (CodeRabbit) "active" (no "reopened"): esta rama cuenta TODOS los pools activos verificados, no
+// solo las transiciones closed→open reales — esas se registran como eventos en `pool_events`.
+type PoolScanCategory = "closed" | "active" | "unavailable" | "skipped" | "errored";
 
 export const checkAllPoolClosures = internalAction({
   args: {},
@@ -601,16 +603,17 @@ export const checkAllPoolClosures = internalAction({
           await ctx.runMutation(internal.pools.markPoolClosedAndPauseBots, { id: pool._id, reason: status });
           return "closed";
         }
-        // active: si estaba marcado como cerrado, reabrir (posición re-fondeada).
+        // active: si estaba marcado como cerrado, reabrir (posición re-fondeada). reopenPoolIfClosed
+        // solo registra el evento "reopened" si realmente venía cerrado (transición); aquí contamos activos.
         await ctx.runMutation(internal.pools.reopenPoolIfClosed, { id: pool._id });
-        return "reopened";
+        return "active";
       } catch (e) {
         console.error(`checkAllPoolClosures: fallo en pool ${pool._id}`, e);
         return "errored";
       }
     };
 
-    const counts: Record<PoolScanCategory, number> = { closed: 0, reopened: 0, unavailable: 0, skipped: 0, errored: 0 };
+    const counts: Record<PoolScanCategory, number> = { closed: 0, active: 0, unavailable: 0, skipped: 0, errored: 0 };
     // Lotes de concurrencia limitada: a lo sumo POOL_SCAN_CONCURRENCY RPC simultáneos.
     for (let i = 0; i < pools.length; i += POOL_SCAN_CONCURRENCY) {
       const batch = pools.slice(i, i + POOL_SCAN_CONCURRENCY);

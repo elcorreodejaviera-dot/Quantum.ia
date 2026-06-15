@@ -56,10 +56,21 @@ export default defineSchema({
     // closed = la posición se vació/cerró en Uniswap/Revert. Reversible:
     // si la posición vuelve a recibir liquidez, el cron limpia el flag.
     closed: v.optional(v.boolean()),
-    closedAt: v.optional(v.number()),           // primer cierre detectado (no se sobrescribe)
+    // (JAV-40) ESTADO ACTUAL: instante del cierre vigente; se limpia al reabrir. El historial
+    // verdadero (cierres/reaperturas sucesivos) vive en `pool_events`, no aquí.
+    closedAt: v.optional(v.number()),
     closureReason: v.optional(v.string()),       // "empty" | "not_found"
     closureCheckedAt: v.optional(v.number()),    // último chequeo del cron (incluye RPC unavailable)
   }).index("by_user", ["userId"]),
+
+  // (JAV-40 #15) Historial de cierres/reaperturas de pools. El doc de pools refleja el ESTADO
+  // actual (closed/closedAt); esta tabla preserva la secuencia de eventos aunque closedAt se limpie.
+  pool_events: defineTable({
+    poolId: v.id("pools"),
+    type: v.union(v.literal("closed"), v.literal("reopened")),
+    reason: v.optional(v.string()),   // solo en "closed": "empty" | "not_found"
+    at: v.number(),
+  }).index("by_pool", ["poolId", "at"]),
 
   bots: defineTable({
     name: v.string(),

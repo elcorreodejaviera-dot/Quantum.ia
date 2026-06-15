@@ -175,13 +175,19 @@ export const deletePool = mutation({
 // Detección de cierre — mutaciones internas usadas por el cron checkAllPoolClosures.
 
 // Marca el pool como cerrado y pausa atómicamente los bots vinculados.
-// Idempotente: preserva el primer closedAt; closureCheckedAt siempre se refresca.
+// Idempotente: closedAt = inicio del cierre VIGENTE (no se sobrescribe mientras siga cerrado; se
+// limpia al reabrir). closureCheckedAt siempre se refresca. El historial completo de cierres/
+// reaperturas vive en `pool_events` (JAV-40), no en closedAt.
 export const markPoolClosedAndPauseBots = internalMutation({
   args: { id: v.id("pools"), reason: v.string() },
   handler: async (ctx, { id, reason }) => {
     const pool = await ctx.db.get(id);
     if (!pool) return;
     const now = Date.now();
+    // (JAV-40 #15) Evento SOLO en la transición real (no estaba cerrado) → sin spam por-ciclo.
+    if (!pool.closed) {
+      await ctx.db.insert("pool_events", { poolId: id, type: "closed", reason, at: now });
+    }
     await ctx.db.patch(id, {
       closed: true,
       closureReason: reason,
@@ -206,6 +212,8 @@ export const reopenPoolIfClosed = internalMutation({
     if (!pool) return;
     const now = Date.now();
     if (pool.closed) {
+      // (JAV-40 #15) Evento de reapertura dentro de la transición (atómico con el cambio de estado).
+      await ctx.db.insert("pool_events", { poolId: id, type: "reopened", at: now });
       // No reactivamos bots automáticamente — el usuario decide reanudar la protección.
       await ctx.db.patch(id, {
         closed: false,

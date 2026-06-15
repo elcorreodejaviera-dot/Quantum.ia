@@ -1,4 +1,4 @@
-import { MutationCtx, QueryCtx } from "./_generated/server";
+import { ActionCtx, MutationCtx, QueryCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 
 // Normaliza símbolos wrapped → activo base de HL. Espejo (no-node) del map de
@@ -9,7 +9,9 @@ export function deriveBaseAsset(pair: string): string {
   return NORMALIZE_ASSET[sym] ?? sym;
 }
 
-export async function requireAuth(ctx: QueryCtx | MutationCtx) {
+// (JAV-38 #8) Acepta también ActionCtx: solo usa ctx.auth, presente en los tres contextos.
+// Permite exigir auth en actions públicas (p.ej. scanPoolByTokenId / fetchPositionLiquidity).
+export async function requireAuth(ctx: QueryCtx | MutationCtx | ActionCtx) {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) throw new Error("Not authenticated");
   return identity;

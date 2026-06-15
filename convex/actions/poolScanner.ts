@@ -3,6 +3,7 @@
 import { action, internalAction } from "../_generated/server";
 import { internal } from "../_generated/api";
 import { v } from "convex/values";
+import { requireAuth } from "../helpers";   // (JAV-38 #8) exigir auth en las actions públicas
 
 const NFT_MANAGER: Record<string, string> = {
   Ethereum: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
@@ -190,7 +191,8 @@ function tickPrice(tick: number, dec0: number, dec1: number): number {
 
 export const scanPoolByTokenId = action({
   args: { tokenId: v.number(), network: v.string() },
-  handler: async (_ctx, { tokenId, network }) => {
+  handler: async (ctx, { tokenId, network }) => {
+    await requireAuth(ctx);   // (JAV-38 #8) no consumir RPC/cuota sin auth
     if (!Number.isFinite(tokenId) || !Number.isInteger(tokenId) || tokenId <= 0 || tokenId > Number.MAX_SAFE_INTEGER)
       throw new Error("Token ID inválido. Debe ser un entero positivo.");
 
@@ -427,7 +429,8 @@ export const fetchPositionNotionalStrict = internalAction({
 
 export const fetchPositionLiquidity = action({
   args: { tokenId: v.number(), network: v.string(), priceUsd: v.number(), poolAddress: v.optional(v.string()) },
-  handler: async (_ctx, { tokenId, network, priceUsd, poolAddress: knownPoolAddress }) => {
+  handler: async (ctx, { tokenId, network, priceUsd, poolAddress: knownPoolAddress }) => {
+    await requireAuth(ctx);   // (JAV-38 #8) no consumir RPC/cuota sin auth
     const rpcs = RPC[network];
     const nft  = NFT_MANAGER[network];
     const factory = FACTORY[network];

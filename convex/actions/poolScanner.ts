@@ -573,41 +573,54 @@ export const fetchPositionLiquidity = action({
 // Recorre todos los pools con tokenId, lee su estado on-chain y persiste el
 // resultado de forma atómica. El caso crítico es el cierre EXTERNO (el usuario
 // cierra en Uniswap/Revert y el portal no se entera por otra vía).
+// (JAV-40 #13) Concurrencia máxima del chequeo de cierres: a lo sumo N RPC simultáneos por lote,
+// para no superar el límite de ejecución de la action con muchos pools (RPC hasta 8s c/u).
+const POOL_SCAN_CONCURRENCY = 5;
+type PoolScanCategory = "closed" | "reopened" | "unavailable" | "skipped" | "errored";
+
 export const checkAllPoolClosures = internalAction({
   args: {},
   // Promise<any>: corta el ciclo de inferencia de tipos (TS2589) del grafo de funciones internas.
   handler: async (ctx): Promise<any> => {
     const pools = await ctx.runQuery(internal.pools.listPoolsInternal);
-    let closed = 0, reopened = 0, unavailable = 0, skipped = 0, errored = 0;
 
-    for (const pool of pools) {
-      if (!pool.tokenId) { skipped++; continue; }
+    // Worker por pool: AISLADO (su fallo no aborta al resto) y DEVUELVE una categoría — el caller
+    // agrega los contadores secuencialmente (no se mutan contadores compartidos desde paralelas).
+    const processPool = async (pool: typeof pools[number]): Promise<PoolScanCategory> => {
+      if (!pool.tokenId) return "skipped";
       const rpcs = RPC[pool.network];
       const nft = NFT_MANAGER[pool.network];
-      if (!rpcs || !nft) { skipped++; continue; }
-
-      // Aislar cada pool: un fallo no debe abortar el chequeo del resto.
+      if (!rpcs || !nft) return "skipped";
       try {
         const status = await readPositionStatus(rpcs, nft, pool.tokenId);
-
         if (status === "unavailable") {
           // RPC caído: no concluir nada, solo registrar que se intentó.
           await ctx.runMutation(internal.pools.touchPoolChecked, { id: pool._id });
-          unavailable++;
+          return "unavailable";
         } else if (status === "empty" || status === "not_found") {
           await ctx.runMutation(internal.pools.markPoolClosedAndPauseBots, { id: pool._id, reason: status });
-          closed++;
-        } else {
-          // active: si estaba marcado como cerrado, reabrir (posición re-fondeada).
-          await ctx.runMutation(internal.pools.reopenPoolIfClosed, { id: pool._id });
-          reopened++;
+          return "closed";
         }
+        // active: si estaba marcado como cerrado, reabrir (posición re-fondeada).
+        await ctx.runMutation(internal.pools.reopenPoolIfClosed, { id: pool._id });
+        return "reopened";
       } catch (e) {
-        errored++;
         console.error(`checkAllPoolClosures: fallo en pool ${pool._id}`, e);
+        return "errored";
+      }
+    };
+
+    const counts: Record<PoolScanCategory, number> = { closed: 0, reopened: 0, unavailable: 0, skipped: 0, errored: 0 };
+    // Lotes de concurrencia limitada: a lo sumo POOL_SCAN_CONCURRENCY RPC simultáneos.
+    for (let i = 0; i < pools.length; i += POOL_SCAN_CONCURRENCY) {
+      const batch = pools.slice(i, i + POOL_SCAN_CONCURRENCY);
+      const results = await Promise.allSettled(batch.map(processPool));
+      for (const r of results) {
+        if (r.status === "fulfilled") counts[r.value]++;
+        else { counts.errored++; console.error("checkAllPoolClosures: worker rechazado", r.reason); }
       }
     }
 
-    return { total: pools.length, closed, reopened, unavailable, skipped, errored };
+    return { total: pools.length, ...counts };
   },
 });

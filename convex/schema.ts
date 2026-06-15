@@ -179,6 +179,10 @@ export default defineSchema({
     encryptedPrivateKey: v.string(),
     iv: v.string(),
     authTag: v.string(),
+    // (JAV-63) Id de la clave de cifrado con la que se cifró esta credencial. AUSENTE = clave legacy
+    // (HL_CREDENTIALS_ENCRYPTION_KEY) → registros previos siguen descifrando sin cambios. Permite rotar
+    // la clave sin dejar credenciales ilegibles (keyring + re-cifrado gradual).
+    keyId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })

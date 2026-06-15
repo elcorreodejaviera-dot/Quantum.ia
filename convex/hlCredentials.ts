@@ -68,6 +68,26 @@ export const getAccountByIdInternal = internalQuery({
   handler: async (ctx, { id }) => await ctx.db.get(id),
 });
 
+// (JAV-63) Todas las credenciales (para el re-cifrado en la rotación de clave). Solo internal.
+export const listAllInternal = internalQuery({
+  args: {},
+  handler: async (ctx) => await ctx.db.query("hl_api_credentials").collect(),
+});
+
+// (JAV-63) Reemplaza el ciphertext + keyId de una credencial (re-cifrado con la clave activa).
+export const updateCipherInternal = internalMutation({
+  args: {
+    id: v.id("hl_api_credentials"),
+    encryptedPrivateKey: v.string(),
+    iv: v.string(),
+    authTag: v.string(),
+    keyId: v.optional(v.string()),
+  },
+  handler: async (ctx, { id, encryptedPrivateKey, iv, authTag, keyId }) => {
+    await ctx.db.patch(id, { encryptedPrivateKey, iv, authTag, keyId, updatedAt: Date.now() });
+  },
+});
+
 // Inserta una cuenta nueva con unicidad GLOBAL (agente y cuenta operativa).
 export const insertAccountInternal = internalMutation({
   args: {
@@ -78,6 +98,7 @@ export const insertAccountInternal = internalMutation({
     encryptedPrivateKey: v.string(),
     iv: v.string(),
     authTag: v.string(),
+    keyId: v.optional(v.string()),   // (JAV-63) versión de clave; ausente = legacy
   },
   handler: async (ctx, args) => {
     const dupAgent = await ctx.db

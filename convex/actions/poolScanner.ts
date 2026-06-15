@@ -428,8 +428,10 @@ export const fetchPositionNotionalStrict = internalAction({
 });
 
 export const fetchPositionLiquidity = action({
-  args: { tokenId: v.number(), network: v.string(), priceUsd: v.number(), poolAddress: v.optional(v.string()) },
-  handler: async (ctx, { tokenId, network, priceUsd, poolAddress: knownPoolAddress }) => {
+  // (JAV-58 Fase D) entryPriceUsd opcional: con la MISMA lectura de L/rango se hace una 2ª valuación
+  // al precio de entrada para el PNL. Read-only; no toca ejecución/margen.
+  args: { tokenId: v.number(), network: v.string(), priceUsd: v.number(), poolAddress: v.optional(v.string()), entryPriceUsd: v.optional(v.number()) },
+  handler: async (ctx, { tokenId, network, priceUsd, poolAddress: knownPoolAddress, entryPriceUsd }) => {
     await requireAuth(ctx);   // (JAV-38 #8) no consumir RPC/cuota sin auth
     const rpcs = RPC[network];
     const nft  = NFT_MANAGER[network];
@@ -516,6 +518,32 @@ export const fetchPositionLiquidity = action({
     const baseValue = invert ? amount1 * priceUsd : amount0 * priceUsd;
     const exposure = Math.min(1, Math.max(0, baseValue / liquidityUsd));
 
+    // (JAV-58 Fase D) Valor V3 de la posición al PRECIO DE ENTRADA (misma L/rango) → PNL = capital
+    // ganado + fees. Requiere EXACTAMENTE un token stable para identificar base/quote y derivar el
+    // sqrtPrice de entrada (sp en unidades raw token1/token0). Si no, null (no inventar PNL).
+    let valueAtEntryUsd: number | null = null;
+    const t0Stable = STABLES.has(t0.symbol), t1Stable = STABLES.has(t1.symbol);
+    if (t0Stable !== t1Stable && Number.isFinite(entryPriceUsd) && (entryPriceUsd ?? 0) > 0) {
+      const dexp = t1.decimals - t0.decimals;   // dec1 − dec0
+      // invert=true (token0 stable, token1 base): rawRatio = (1/px)·10^dexp
+      // invert=false (token1 stable, token0 base): rawRatio = px·10^dexp ; spAtEntry = sqrt(rawRatio)
+      const rawRatioEntry = invert
+        ? (1 / (entryPriceUsd as number)) * Math.pow(10, dexp)
+        : (entryPriceUsd as number) * Math.pow(10, dexp);
+      const spE = Math.sqrt(rawRatioEntry);
+      if (Number.isFinite(spE) && spE > 0) {
+        // Mismas fórmulas de amounts V3 que arriba, evaluadas en spE.
+        let a0r = 0, a1r = 0;
+        if (spE <= sa) a0r = L * (sb - sa) / (sa * sb);
+        else if (spE >= sb) a1r = L * (sb - sa);
+        else { a0r = L * (sb - spE) / (spE * sb); a1r = L * (spE - sa); }
+        const a0 = a0r / Math.pow(10, t0.decimals);
+        const a1 = a1r / Math.pow(10, t1.decimals);
+        const vEntry = invert ? a0 + a1 * (entryPriceUsd as number) : a0 * (entryPriceUsd as number) + a1;
+        if (Number.isFinite(vEntry) && vEntry > 0) valueAtEntryUsd = Math.round(vEntry * 100) / 100;
+      }
+    }
+
     // Check Revert Finance Lend: ownerOf → loanInfo
     let borrowHealth = 0;
     let leverageRevert = 0;
@@ -559,6 +587,7 @@ export const fetchPositionLiquidity = action({
       liquidityUsd: Math.round(liquidityUsd * 100) / 100,
       exposure: Math.round(exposure * 1000) / 1000,
       feesUncollectedUsd,
+      valueAtEntryUsd,   // (JAV-58 Fase D) para el PNL; null si no aplica
       borrowHealth,
       leverageRevert,
       healthFactor,

@@ -926,12 +926,11 @@ function BotCard({ bot, pools = [], poolClosed, canManage, onSetActive, onMode, 
               <>
                 <label className="config-field" style={{ marginTop: 6 }}>
                   <span>Precio DCA / nivel de entrada</span>
-                  <input
-                    type="number"
+                  <NumberInput
                     min="0"
                     step="0.01"
                     value={bot.triggerPrice}
-                    onChange={(event) => onConfig(bot.id, { triggerPrice: Number(event.target.value) })}
+                    onChange={(n) => onConfig(bot.id, { triggerPrice: n })}
                   />
                 </label>
                 <label className="config-field">
@@ -2270,6 +2269,39 @@ function RealModeToggle({ realMode, setRealMode, canTradeLive }) {
   );
 }
 
+// Input numérico controlado que mantiene el TEXTO crudo mientras se edita y solo expone un
+// Number al padre. Evita el bug del "0" pegado adelante (value={Number} + Number() por tecla
+// hacía "09", impedía vaciar el campo y reinyectaba "0"). El value externo solo re-sincroniza
+// el texto cuando cambia de verdad (reset/precarga), nunca pisa la edición en curso.
+function NumberInput({ value, onChange, ...rest }) {
+  const [text, setText] = React.useState(value == null ? '' : String(value));
+  const textRef = React.useRef(text);
+  textRef.current = text;
+  const prevValue = React.useRef(value);
+  React.useEffect(() => {
+    if (prevValue.current !== value) {
+      prevValue.current = value;
+      const n = Number(textRef.current);
+      if (!(Number.isFinite(n) && n === value)) {
+        setText(value == null ? '' : String(value));
+      }
+    }
+  }, [value]);
+  const handleChange = (e) => {
+    let t = e.target.value;
+    if (/^0\d/.test(t)) t = String(parseInt(t, 10));   // quita ceros a la izquierda: "09" -> "9"
+    setText(t);
+    if (t === '') return;                               // estado intermedio: no empujar al padre
+    const n = Number(t);
+    if (Number.isFinite(n)) { prevValue.current = n; onChange(n); }
+  };
+  const handleBlur = () => {
+    if (text === '') { prevValue.current = 0; onChange(0); setText('0'); }   // vacío al salir -> 0
+    else if (!Number.isFinite(Number(text))) { setText(value == null ? '' : String(value)); }
+  };
+  return <input type="number" {...rest} value={text} onChange={handleChange} onBlur={handleBlur} />;
+}
+
 // Filas de take-profits (gainPct / closePct). Cantidad fija según el tipo de bot.
 function TakeProfitRows({ tps, setTps }) {
   const update = (i, field, val) =>
@@ -2280,13 +2312,13 @@ function TakeProfitRows({ tps, setTps }) {
         <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 6 }}>
           <label className="config-field" style={{ margin: 0 }}>
             <span>TP{i + 1} — % ganancia</span>
-            <input type="number" step="0.1" min="0" value={tp.gainPct}
-              onChange={(e) => update(i, 'gainPct', e.target.value)} />
+            <NumberInput step="0.1" min="0" value={tp.gainPct}
+              onChange={(n) => update(i, 'gainPct', n)} />
           </label>
           <label className="config-field" style={{ margin: 0 }}>
             <span>TP{i + 1} — % cierre</span>
-            <input type="number" step="1" min="0" value={tp.closePct}
-              onChange={(e) => update(i, 'closePct', e.target.value)} />
+            <NumberInput step="1" min="0" value={tp.closePct}
+              onChange={(n) => update(i, 'closePct', n)} />
           </label>
         </div>
       ))}
@@ -2419,8 +2451,7 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
 
         <label className="config-field" style={{ padding: '4px 0' }}>
           <span>Stop Loss Fijo (%)</span>
-          <input type="number" step="0.1" min="0" value={stopLossPct}
-            onChange={(e) => setStopLossPct(Number(e.target.value))} />
+          <NumberInput step="0.1" min="0" value={stopLossPct} onChange={setStopLossPct} />
         </label>
 
         <div className="config-field" style={{ padding: '4px 0' }}>
@@ -2565,8 +2596,7 @@ function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
 
         <label className="config-field" style={{ padding: '4px 0' }}>
           <span>Stop Loss Fijo (%)</span>
-          <input type="number" step="0.1" min="0" value={stopLossPct}
-            onChange={(e) => setStopLossPct(Number(e.target.value))} />
+          <NumberInput step="0.1" min="0" value={stopLossPct} onChange={setStopLossPct} />
         </label>
 
         <div className="config-field" style={{ padding: '4px 0' }}>
@@ -2583,8 +2613,7 @@ function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
           Trailing Stop
         </label>
         {trailingStop && (
-          <input type="number" step="0.1" min="0" value={trailingPct}
-            onChange={(e) => setTrailingPct(Number(e.target.value))}
+          <NumberInput step="0.1" min="0" value={trailingPct} onChange={setTrailingPct}
             style={{ width: '100%' }} />
         )}
 
@@ -3115,15 +3144,14 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulation
       {/* Monto de la operación */}
       <div className="config-field" style={{ padding: '4px 0' }}>
         <span>Monto a operar (USDC)</span>
-        <input
-          type="number"
+        <NumberInput
           className="hl-search"
           style={{ margin: 0 }}
           min="0"
           step="100"
           placeholder="0"
           value={protector.tradeAmount ?? 0}
-          onChange={(e) => onChange({ tradeAmount: Number(e.target.value) })}
+          onChange={(n) => onChange({ tradeAmount: n })}
         />
       </div>
 

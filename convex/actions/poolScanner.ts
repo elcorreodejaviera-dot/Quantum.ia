@@ -469,6 +469,7 @@ export const fetchPositionLiquidity = action({
 
     // Usar poolAddress ya conocido para evitar la llamada al factory (ahorra 1 RPC)
     let sp: number;
+    let poolActiveLiq = 0;   // (fee APR concentrado) liquidez ACTIVA en-rango del pool (liquidity())
     try {
       let poolAddr = knownPoolAddress?.toLowerCase();
       if (!poolAddr) {
@@ -482,6 +483,12 @@ export const fetchPositionLiquidity = action({
       if (poolAddr === "0x0000000000000000000000000000000000000000") return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd };
       const s0 = (await rpcCallWithFallback(rpcs, poolAddr, "0x3850c7bd")).slice(2);
       sp = Number(uintAt(s0, 0)) / 2 ** 96;
+      // (Fee APR concentrado) liquidity() = 0x1a686502 → liquidez activa en-rango. OPCIONAL: si falla
+      // queda 0 → feeShareRatio null → el front cae al fee APR pool-wide (no rompe la valuación).
+      try {
+        const liqActiveRaw = (await rpcCallWithFallback(rpcs, poolAddr, "0x1a686502")).slice(2);
+        poolActiveLiq = Number(uintAt(liqActiveRaw, 0));
+      } catch { /* sin liquidez activa → fee APR pool-wide */ }
     } catch { return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd }; }
 
     if (!Number.isFinite(sp) || sp <= 0) return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd };
@@ -492,6 +499,28 @@ export const fetchPositionLiquidity = action({
     if (sa >= sb) return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd };
 
     const L = Number(liqRaw);
+    // (Fee APR concentrado) Fracción de la liquidez ACTIVA del pool que es de esta posición → el front
+    // computa fees1d · feeShareRatio / valor · 365 · 100. SOLO si la posición está EN RANGO (sp entre
+    // sa y sb): fuera de rango su L no aporta a la liquidez activa ni gana fees actuales → null (no
+    // inflar el APR). Clamp ≤1: L forma parte de la liquidez activa, el ratio no puede superar 1;
+    // >1 = lectura inconsistente → null. (Codex: edge fuera de rango.)
+    // (Codex) Estado EXPLÍCITO para que el front no dependa de su propio pool.status (precio live,
+    // otra fuente/latencia): el backend decide in-range desde el MISMO slot0 on-chain.
+    //   "ok" → usar feeShareRatio · "out_of_range"/"inconsistent" → mostrar '—' (no inflar)
+    //   "unavailable" → no se pudo leer liquidity() → el front puede caer al fee APR pool-wide.
+    const inRange = sp > sa && sp < sb;
+    let feeShareRatio: number | null = null;
+    let feeShareStatus: "ok" | "out_of_range" | "inconsistent" | "unavailable";
+    if (!(Number.isFinite(poolActiveLiq) && poolActiveLiq > 0)) {
+      feeShareStatus = "unavailable";
+    } else if (!inRange) {
+      feeShareStatus = "out_of_range";
+    } else if (!(Number.isFinite(L) && L > 0 && L <= poolActiveLiq)) {
+      feeShareStatus = "inconsistent";
+    } else {
+      feeShareRatio = L / poolActiveLiq;
+      feeShareStatus = "ok";
+    }
 
     // Uniswap V3 amounts in raw (smallest) token units
     let amount0_raw = 0, amount1_raw = 0;
@@ -588,6 +617,8 @@ export const fetchPositionLiquidity = action({
       exposure: Math.round(exposure * 1000) / 1000,
       feesUncollectedUsd,
       valueAtEntryUsd,   // (JAV-58 Fase D) para el PNL; null si no aplica
+      feeShareRatio,     // (Fee APR concentrado) L_posición / L_activa del pool; solo si feeShareStatus==="ok"
+      feeShareStatus,    // (Codex) "ok" | "out_of_range" | "inconsistent" | "unavailable"
       borrowHealth,
       leverageRevert,
       healthFactor,

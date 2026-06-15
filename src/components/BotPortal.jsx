@@ -407,6 +407,23 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
   const mFees = Number.isFinite(pool.feesUncollectedUsd) ? pool.feesUncollectedUsd : null;
   const mPnl = (Number.isFinite(mValorLP) && Number.isFinite(pool.valueAtEntryUsd) && Number.isFinite(mFees))
     ? (mValorLP - pool.valueAtEntryUsd + mFees) : null;
+  // (Fee APR concentrado) Fee APR de TU posición = fees1d · (L_pos/L_activa) / valor · 365 · 100.
+  // Una posición en rango estrecho rinde más que el promedio pool-wide. Cae a feeApr pool-wide si no hay dato.
+  const concentratedFeeApr = (Number.isFinite(pool.feeShareRatio) && pool.feeShareRatio > 0 && Number.isFinite(mValorLP) && mValorLP > 0)
+    ? (fees1d * pool.feeShareRatio / mValorLP) * 365 * 100 : null;
+  // (Codex) Decidir según el STATUS AUTORITATIVO del backend (in-range desde el mismo slot0), NO desde
+  // pool.status del front (precio live, otra fuente). out_of_range/inconsistent → '—' (no inflar);
+  // unavailable/legacy → cae al fee APR pool-wide; ok → concentrado.
+  const feeStatus = pool.feeShareStatus;
+  const displayFeeApr =
+    (feeStatus === 'out_of_range' || feeStatus === 'inconsistent') ? null
+    : concentratedFeeApr != null ? concentratedFeeApr
+    : feeApr;
+  const feeAprTip =
+    feeStatus === 'out_of_range' ? 'Fuera de rango: la posición no aporta liquidez activa, no gana fees ahora.'
+    : feeStatus === 'inconsistent' ? 'Dato de liquidez activa inconsistente; no se muestra el Fee APR de la posición.'
+    : concentratedFeeApr != null ? 'APR de comisiones de TU posición concentrada (no el promedio pool-wide).'
+    : 'APR de comisiones del pool (sin dato de liquidez activa para concentrar a tu posición).';
   const showMetricsBar = pool.liquidityReal && !pool.closed;
 
   return (
@@ -450,8 +467,8 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
             value={mPnl != null ? <span className={mPnl >= 0 ? 'positive' : 'negative'}>{mPnl >= 0 ? '+' : ''}{formatUsd2(mPnl)}</span> : '—'} />
           <Metric label="APR" title="APR total estimado del pool."
             value={Number.isFinite(displayApy) ? <span className="positive">{displayApy.toFixed(1)}%</span> : '—'} />
-          <Metric label="Fee APR" title="APR proveniente solo de comisiones."
-            value={feeApr != null ? <span className="positive">{feeApr.toFixed(1)}%</span> : '—'} />
+          <Metric label="Fee APR" title={feeAprTip}
+            value={displayFeeApr != null ? <span className="positive">{displayFeeApr.toFixed(1)}%</span> : '—'} />
           <Metric label="Fees" title="Comisiones de tu posición pendientes de cobrar."
             value={mFees != null ? <span className="positive">{formatUsd2(mFees)}</span> : '—'} />
         </div>
@@ -3622,6 +3639,8 @@ function Dashboard({ user, onLogout, userId }) {
           exposure: pd.exposure,
           feesUncollectedUsd: pd.feesUncollectedUsd ?? null,   // F1: fees sin cobrar (null = sin dato)
           valueAtEntryUsd: pd.valueAtEntryUsd ?? null,         // (JAV-58 Fase D) para el PNL
+          feeShareRatio: pd.feeShareRatio ?? null,             // (Fee APR concentrado) L_pos / L_activa
+          feeShareStatus: pd.feeShareStatus ?? null,           // (Codex) ok|out_of_range|inconsistent|unavailable
           ...(pd.borrowHealth > 0 ? {
             borrowHealth: pd.borrowHealth,
             leverageRevert: pd.leverageRevert ?? 0,

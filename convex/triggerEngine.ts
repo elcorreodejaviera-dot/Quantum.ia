@@ -18,6 +18,13 @@ import { TransportError } from "@nktkas/hyperliquid";
 const HL_ORDER_TIMEOUT_MS = 30_000;
 // Banda agresiva del market al dispararse el trigger de entrada (venta). Gap > banda → puede no llenar.
 const ENTRY_TRIGGER_SLIPPAGE = 0.02;
+// (JAV-61) Offset de PERFORACIÓN del borde inferior en armMode="reentry_coexist": entry_lower se
+// arma estrictamente por debajo de lowerEdge para separarse del tp_final (que vive EN lowerEdge) y
+// representar "el precio rompió el rango hacia abajo", no "lo tocó". POLÍTICA FIJADA: 0.1% del precio
+// (≈ varios ticks en los activos operados: ETH/BTC). Garantía dura: reserveArm exige
+// entryLowerTriggerPx < lowerEdge y lanza [blocked_config] si el redondeo no quedara estrictamente
+// por debajo (activos donde 0.1% < 1 tick), evitando colisión silenciosa con el tp_final.
+const LOWER_PERFORATION_OFFSET = 0.001;
 // Grace antes de declarar filled→closed (Fix #2): tras el fill, clearinghouseState puede dar szi==0
 // transitoriamente por lag aunque la posición exista. Esperar este margen desde filledAt evita un
 // closed prematuro que liberaría margen/credencial con la posición aún abierta.
@@ -196,13 +203,27 @@ export const armBotInternal = internalAction({
     if (size <= 0) throw new Error("[blocked_config] Size redondea a cero");
     const orderNotional = size * notionalCapPx;          // nocional de UNA entrada (límite por orden)
 
-    // 2ª entrada (borde superior) si el bot lo permite Y el precio está por DEBAJO del borde superior
-    // (el trigger debe dispararse al SUBIR). entry_upper = SELL trigger ABOVE maxRange, tpsl:"tp".
+    // (JAV-61) 2ª entrada (borde superior), dos modos según la posición del precio:
+    //  - precio DENTRO del rango (markPx < upperEdge): "breakout_up" — SELL trigger ARRIBA del borde,
+    //    dispara al SUBIR (tpsl:"tp"). OCO clásico (al llenar una se cancela la hermana, reduce 2×→1×).
+    //  - precio POR ENCIMA (markPx > upperEdge): "reentry_down" — SELL trigger EN el borde superior,
+    //    dispara al BAJAR/reentrar (tpsl:"sl"). Coexistencia (reentry_coexist): NO se cancela
+    //    entry_lower ni se reduce la reserva; tras el TP-final el arm pasa a `armed_lower_only`.
+    //  - markPx == upperEdge exacto (borde): NO se coloca entry_upper (evita un trigger que dispara solo).
     const upperEdgeNorm = roundHlPrice(pool.maxRange, szDecimals, "ceil");
-    const twoEntries = bot.allowReentryFromAbove === true && Number.isFinite(pool.maxRange)
-      && pool.maxRange > 0 && markPx < upperEdgeNorm;
-    // (Codex #1) Con DOS entradas, reservar el PEOR CASO 2× (doble-fill); se reduce a 1× tras el OCO.
-    // El margen (y el leverage auto) se dimensionan sobre este worst-case dentro de reserveArm.
+    const upperValid = bot.allowReentryFromAbove === true && Number.isFinite(pool.maxRange) && pool.maxRange > 0;
+    const reentryFromAbove = upperValid && markPx > upperEdgeNorm;
+    const breakoutUp = upperValid && markPx < upperEdgeNorm;
+    const twoEntries = reentryFromAbove || breakoutUp;
+    const entryUpperMode: "breakout_up" | "reentry_down" = reentryFromAbove ? "reentry_down" : "breakout_up";
+    const armMode: "oco" | "reentry_coexist" = reentryFromAbove ? "reentry_coexist" : "oco";
+    // (JAV-61) En reentry_coexist, entry_lower dispara solo por PERFORACIÓN: triggerPx estrictamente
+    // bajo el borde inferior (separado del tp_final que vive EN lowerEdge). En OCO = borde inferior.
+    const entryLowerTriggerPx = reentryFromAbove
+      ? roundHlPrice(pool.minRange * (1 - LOWER_PERFORATION_OFFSET), szDecimals, "floor")
+      : triggerPxNorm;
+    // (Codex #1) Con DOS entradas, reservar el PEOR CASO 2× (doble-fill). En OCO se reduce a 1× tras el
+    // OCO; en reentry_coexist se MANTIENE 2× (ambas patas conviven). reserveArm dimensiona margen/auto.
     const factor = twoEntries ? 2 : 1;
     const reservedNotional = orderNotional * factor;
 
@@ -221,6 +242,9 @@ export const armBotInternal = internalAction({
       orderNotional, reservedNotional, lowerEdge: pool.minRange,
       upperEdge: twoEntries ? upperEdgeNorm : undefined,
       allowReentryFromAbove: twoEntries ? true : undefined,
+      // (JAV-61) modo de coexistencia + semántica del entry_upper + perforación del entry_lower.
+      armMode, entryUpperMode: twoEntries ? entryUpperMode : undefined,
+      entryLowerTriggerPx: reentryFromAbove ? entryLowerTriggerPx : undefined,
       stopLossPct: bot.stopLossPct, bufferPct, tps, availableCollateral,
       rearmToken,   // (Codex #2) si es un re-armado, la reserva consume el trabajo atómicamente
     });
@@ -244,14 +268,21 @@ export const armBotInternal = internalAction({
       return { ok: false, status: "gated", armId };
     }
 
-    // Colocar las entradas (SELL, reduceOnly:false). entry_lower: trigger BELOW minRange, tpsl:"sl".
-    // entry_upper (si twoEntries): trigger ABOVE maxRange, tpsl:"tp". Banda agresiva floor (venta).
+    // Colocar las entradas (SELL, reduceOnly:false). Banda agresiva floor (venta).
+    // entry_lower: SELL trigger que dispara al BAJAR (tpsl:"sl"); en reentry_coexist su triggerPx es la
+    //   PERFORACIÓN (bajo lowerEdge), en OCO es el borde inferior (triggerPxNorm).
+    // entry_upper (JAV-61): "breakout_up" → trigger ARRIBA del borde, dispara al subir (tpsl:"tp");
+    //   "reentry_down" → trigger EN el borde superior, dispara al BAJAR/reentrar (tpsl:"sl").
     const entries: { role: "entry_lower" | "entry_upper"; cloid: string; triggerPx: number; tpsl: "sl" | "tp" }[] = [
-      { role: "entry_lower", cloid, triggerPx: triggerPxNorm, tpsl: "sl" },
+      { role: "entry_lower", cloid, triggerPx: entryLowerTriggerPx, tpsl: "sl" },
     ];
-    if (cloidUpper) entries.push({ role: "entry_upper", cloid: cloidUpper, triggerPx: upperEdgeNorm, tpsl: "tp" });
+    if (cloidUpper) entries.push({
+      role: "entry_upper", cloid: cloidUpper, triggerPx: upperEdgeNorm,
+      tpsl: reentryFromAbove ? "sl" : "tp",
+    });
 
     let anyFilled = false, anyPlaced = false, filledSize = 0, entryPrice = 0;
+    let filledRole: "entry_lower" | "entry_upper" | undefined;   // (JAV-61) qué entrada llenó (para tp_final)
     let hardError: string | undefined, transportUncertain = false;
     for (const en of entries) {
       const enLimitPx = aggressiveHlPriceStr(en.triggerPx * (1 - ENTRY_TRIGGER_SLIPPAGE), szDecimals, false);
@@ -270,7 +301,8 @@ export const armBotInternal = internalAction({
         } else if (stE?.filled?.oid != null) {
           await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: en.role, observedStatus: "filled", oid: String(stE.filled.oid) });
           const fS = Number(stE.filled.totalSz), fP = Number(stE.filled.avgPx);
-          if (fS > 0 && fP > 0) { anyFilled = true; filledSize = fS; entryPrice = fP; }
+          // (JAV-61) Preferir entry_upper como filledRole (gobierna el tp_final) si ambas llenaran.
+          if (fS > 0 && fP > 0) { anyFilled = true; filledSize = fS; entryPrice = fP; if (en.role === "entry_upper" || filledRole === undefined) filledRole = en.role; }
         } else if (stE === "waitingForTrigger") {
           anyPlaced = true;   // observed sigue pending; reconcile lo confirma por CLOID
         } else if (stE?.error) {
@@ -286,6 +318,9 @@ export const armBotInternal = internalAction({
     // Resolver el estado del arm. Prioridad: fill > colocado/incierto > error.
     if (anyFilled) {
       await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "filled", filledSize, entryPrice });
+      // (JAV-61) Registrar la entrada que llenó (el tp_final solo aplica si fue entry_upper). Si llenó
+      // en el armado inicial, NO pasaría por la rama OCO de reconcile que lo setea.
+      if (filledRole) await ctx.runMutation(internal.triggerArms.setArmFilledEntryRole, { armId, token, role: filledRole });
     } else if (anyPlaced || transportUncertain) {
       // Al menos una entrada colocada (o envío incierto) → armed/unknown reconciliable; el reconcile
       // confirma por CLOID y, si una entrada falló definitivamente, la reintenta o reduce a 1×.
@@ -403,7 +438,9 @@ export const reconcileArm = internalAction({
         // (Codex #1) Reducir reserva 2×→1× SOLO ahora que la posición está abierta: confirmar por CLOID
         // que las entradas hermanas MURIERON (ensureOrdersDead) y que la posición es de 1× (no doble-
         // fill: szi ≈ una sola entrada). Nunca liberar margen con una hermana aún viva.
-        if (arm.allowReentryFromAbove && !arm.reservationReduced) {
+        // (JAV-61) En reentry_coexist NO se reduce ni se cancela la hermana: las dos patas conviven
+        // (entry_lower sigue armada para la perforación). El margen 2× se mantiene a propósito.
+        if (arm.armMode !== "reentry_coexist" && arm.allowReentryFromAbove && !arm.reservationReduced) {
           const entryCloidsP = allOrders.filter((o) => o.role === "entry_lower" || o.role === "entry_upper").map((o) => o.cloid);
           if (Math.abs(szi) > 0 && Math.abs(szi) <= arm.size * 1.5 && (await ensureOrdersDead(info, exchange, user, assetId, entryCloidsP))) {
             await ctx.runMutation(internal.triggerArms.reduceArmReservation, { armId, token, reservedNotional: arm.reservedNotional / 2, marginReserved: arm.marginReserved / 2 });
@@ -413,21 +450,41 @@ export const reconcileArm = internalAction({
           if (Date.now() - (arm.filledAt ?? arm.createdAt) <= CLOSE_CONFIRM_GRACE_MS) return { skipped: "close_confirm_grace" };
           const renewC = await ctx.runMutation(internal.triggerArms.renewArmReconcile, { armId, token });
           if (!renewC.ok) return { skipped: "lease_lost" };
-          if (!(await ensureOrdersDead(info, exchange, user, assetId, allCloids))) {
-            return { skipped: "closing_cancel_live_orders" };   // había una orden viva → cancelada; reintentar
-          }
-          if (arm.closeConfirmSince == null) {
-            await ctx.runMutation(internal.triggerArms.setArmCloseConfirm, { armId, token, value: Date.now() });
-            return { skipped: "close_first_flat" };
-          }
-          // (Codex #1) Confirmar si el SL realmente llenó por API (orderStatus + fills), NO solo el
-          // observedStatus persistido: HL pudo llenarlo con Convex aún en open/triggered.
+          // (Codex #1) ¿El SL realmente llenó? (orderStatus + fills, no solo el observed persistido).
+          // (JAV-61 fix P0#2) Se evalúa ANTES del carve-out: un cierre por SL del short de arriba NO es
+          // un TP-final → debe ir al cierre normal (cuenta whipsaw/consecutiveStops + rearma el esquema
+          // completo), NUNCA transicionar silenciosamente a armed_lower_only.
           let slConfirmed = slOrder?.observedStatus === "filled";
           if (!slConfirmed && slOrder) {
             const ss: any = await info.orderStatus({ user, oid: slOrder.cloid as `0x${string}` });
             const sState = ss?.status === "order" ? ss.order?.status : undefined;
             const sFill = await fillsByCloid(info, user, slOrder.cloid);
             if (sState === "filled" || sFill.size > 0) slConfirmed = true;
+          }
+          // (JAV-61) reentry_coexist: SOLO si el cierre NO fue por SL (es decir TP-final/parciales) y
+          // entry_lower sigue armada → armed_lower_only (no cerrar ni cancelarla; cancelar SOLO las
+          // órdenes del short de arriba). Si fue por SL → cae al cierre normal de abajo (rearma upper).
+          if (!slConfirmed && arm.armMode === "reentry_coexist" && !wantDisarm) {
+            const lowerOrder = allOrders.find((o) => o.role === "entry_lower");
+            if (lowerOrder && (await openByCloid(info, user, lowerOrder.cloid))) {
+              if (arm.closeConfirmSince == null) {
+                await ctx.runMutation(internal.triggerArms.setArmCloseConfirm, { armId, token, value: Date.now() });
+                return { skipped: "armed_lower_only_first_flat" };
+              }
+              const nonLowerCloids = allOrders.filter((o) => o.role !== "entry_lower").map((o) => o.cloid);
+              if (!(await ensureOrdersDead(info, exchange, user, assetId, nonLowerCloids))) {
+                return { skipped: "armed_lower_only_cancel_live" };   // SL/TP del short de arriba aún vivo → reintentar
+              }
+              const tr = await ctx.runMutation(internal.triggerArms.transitionToArmedLowerOnly, { armId, token });
+              return { result: tr.ok ? "armed_lower_only" : "armed_lower_only_failed" };
+            }
+          }
+          if (!(await ensureOrdersDead(info, exchange, user, assetId, allCloids))) {
+            return { skipped: "closing_cancel_live_orders" };   // había una orden viva → cancelada; reintentar
+          }
+          if (arm.closeConfirmSince == null) {
+            await ctx.runMutation(internal.triggerArms.setArmCloseConfirm, { armId, token, value: Date.now() });
+            return { skipped: "close_first_flat" };
           }
           // (Codex #2) Prioridad SEGURA: emergencyClosing > SL confirmado > manual. NUNCA rearmar un
           // ciclo cuyo mecanismo protector falló (cierre de emergencia) ni un cierre externo del usuario.
@@ -476,6 +533,48 @@ export const reconcileArm = internalAction({
           return { result: "emergency_close_sent" };
         }
 
+        // (2.4) (JAV-61 fix P0#1/#2/#3) Redimensión del SL en reentry_coexist cuando el szi creció (2ª
+        // entrada llenó / gap): el SL viejo (1×) no cubre la posición real. Respeta anti-doble-SL:
+        //  - si el SL viejo llenó → marcar filled (flat lo cerrará);
+        //  - si sigue VIVO → cancelar y CONFIRMAR muerte el próximo ciclo (NO rotar todavía);
+        //  - si está CONFIRMADO muerto → recolocar full-size (realSize) en ESTE mismo claim (sin ventana extra).
+        if (arm.armMode === "reentry_coexist" && slOrder && realSize > slOrder.size * 1.02
+            && (arm.status === "protected" || arm.status === "protecting")) {
+          const slFillR = await fillsByCloid(info, user, slOrder.cloid);
+          if (slFillR.size > 0) {
+            await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "filled" });
+            return { skipped: "sl_filled_during_resize" };
+          }
+          if (await openByCloid(info, user, slOrder.cloid)) {
+            const renewRz = await ctx.runMutation(internal.triggerArms.renewArmReconcile, { armId, token });
+            if (!renewRz.ok) return { skipped: "lease_lost" };
+            try { await exchange.cancelByCloid({ cancels: [{ asset: assetId, cloid: slOrder.cloid as `0x${string}` }] }); } catch { /* el próximo ciclo reintenta */ }
+            return { skipped: "sl_resize_cancel_sent" };   // confirmar muerte antes de rotar (anti-doble-SL)
+          }
+          // SL viejo CONFIRMADO muerto (no en book, sin fills): rotar + recolocar full-size YA.
+          await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "canceled" });
+          if ((arm.slAttempts ?? 0) >= SL_MAX_ATTEMPTS) return { skipped: "sl_resize_max_attempts" };
+          const prepRz = await ctx.runMutation(internal.triggerArms.prepareSlAttempt, { armId, token, protectDeadlineMs: SL_PROTECT_DEADLINE_MS, size: floorToDecimals(realSize, szDecimals) });
+          if (!prepRz.ok) return { skipped: "sl_resize_prep_race" };
+          const renewRz2 = await ctx.runMutation(internal.triggerArms.renewArmReconcile, { armId, token });
+          if (!renewRz2.ok) return { skipped: "lease_lost" };
+          try {
+            const slR = await placeStopLoss(exchange, assetId, szDecimals, "Short", realSize, posEntryPx, arm.stopLossPct, prepRz.cloid as `0x${string}`);
+            if (slR.state === "resting") {
+              await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "open", oid: slR.oid });
+              await ctx.runMutation(internal.triggerArms.markArmSlSubmitted, { armId, token });
+              return { result: "sl_resized_full" };
+            }
+            if (slR.state === "filled") {
+              await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "filled", oid: slR.oid });
+              await ctx.runMutation(internal.triggerArms.markArmSlSubmitted, { armId, token });
+              return { skipped: "sl_resized_fired" };
+            }
+            await ctx.runMutation(internal.triggerArms.markArmSlSubmitted, { armId, token });
+            return { skipped: "sl_resized_pending" };
+          } catch { return { skipped: "sl_resize_place_error" }; }
+        }
+
         // (2.5) TPs sobre el BÚFER (solo cuando ya hay SL → status protected). Cada TP es Take Profit
         // Market reduceOnly (BUY, tpsl:"tp", trigger ABAJO del entry = el short gana al caer). Σ tamaños
         // ≤ búfer → el pool nunca lo cierran los TPs (sigue bajo el SL full-size). Coloca/confirma con
@@ -483,9 +582,10 @@ export const reconcileArm = internalAction({
         if (arm.status === "protected") {
           const tps = arm.tps ?? [];
           const bufferPct = arm.bufferPct ?? 0;
-          if (tps.length === 0 || bufferPct <= 0) return { skipped: "no_tps" };
-          const bufferSize = floorToDecimals((realSize * bufferPct) / (100 + bufferPct), szDecimals);
-          for (let i = 0; i < tps.length; i++) {
+          // (JAV-61 fix P1#4) NO retornar si no hay TP parciales: el TP-final debe colocarse igual.
+          // El loop de parciales solo corre si hay TPs y búfer (bufferSize>0); si no, se va al TP-final.
+          const bufferSize = (tps.length > 0 && bufferPct > 0) ? floorToDecimals((realSize * bufferPct) / (100 + bufferPct), szDecimals) : 0;
+          for (let i = 0; bufferSize > 0 && i < tps.length; i++) {
             const tpSize = floorToDecimals((bufferSize * tps[i].closePct) / 100, szDecimals);
             if (tpSize <= 0) continue;   // (Codex #2) redondea a 0 → omitir (queda como pool bajo el SL)
             const tpOrder = await ctx.runQuery(internal.triggerArms.getArmTpOrder, { armId, tpIndex: i });
@@ -527,6 +627,70 @@ export const reconcileArm = internalAction({
             } finally { acT.clear(); }
             return { result: `tp_${i}_handled` };   // una colocación por ciclo
           }
+          // (JAV-61) TP-final: SOLO si el short abrió por ARRIBA (reentry). BUY reduceOnly trigger en el
+          // borde INFERIOR → cierra lo que QUEDE del short al llegar al fondo del rango. reduceOnly =
+          // residual dinámico (lo ya cerrado por los parciales no se re-cierra). Al llenarse → flat →
+          // armed_lower_only (entry_lower sigue armada). Confirmar-antes-de-rotar (grace anti-doble).
+          // NOTA semántica: los parciales cierran fracción del BÚFER; el TP-final (reduceOnly, tamaño =
+          // posición real) cierra el remanente real del short al llegar al borde inferior.
+          if (arm.armMode === "reentry_coexist" && arm.filledEntryRole === "entry_upper") {
+            // (JAV-61 fix P0#1) Si la pata INFERIOR también llenó (doble-fill / gap), el tp_final NO se
+            // coloca: cerraría parte del short inferior. El SL full-size (redimensionado en 2.4) protege
+            // ambos. Detectar por observed de entry_lower o por szi materialmente > UN short. Cancelar un
+            // tp_final resting previo para que no dispare sobre el short inferior.
+            const lowerOrd = await ctx.runQuery(internal.triggerArms.getArmOrderInternal, { armId });   // entry_lower
+            const lowerFilled = lowerOrd?.observedStatus === "filled" || realSize > arm.size * 1.5;
+            if (lowerFilled) {
+              const tpfOld = await ctx.runQuery(internal.triggerArms.getArmOrderByRole, { armId, role: "tp_final" });
+              if (tpfOld && (tpfOld.oid != null || tpfOld.observedStatus === "open")) {
+                try { await exchange.cancelByCloid({ cancels: [{ asset: assetId, cloid: tpfOld.cloid as `0x${string}` }] }); } catch { /* reintenta */ }
+                await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "tp_final", observedStatus: "canceled" });
+              }
+              return { result: "tp_final_skipped_double_fill" };
+            }
+            // (JAV-61 fix P1#5) Σ closePct ≥ 100 → los parciales ya cierran todo el búfer configurado;
+            // no se coloca TP-final (spec: TP-final % = 100 − Σ closePct).
+            const sumClose = tps.reduce((s, t) => s + (t.closePct ?? 0), 0);
+            const tpfTrigger = roundHlPrice(arm.lowerEdge, szDecimals, "floor");
+            // (JAV-61 fix P0#1) Tamaño = UN short (arm.size), NO realSize: cierra solo lo atribuible al
+            // short superior; reduceOnly acota a lo que reste tras los parciales.
+            const tpfSize = floorToDecimals(arm.size, szDecimals);
+            if (sumClose < 100 && tpfTrigger > 0 && tpfSize > 0) {
+              const tpf = await ctx.runQuery(internal.triggerArms.getArmOrderByRole, { armId, role: "tp_final" });
+              if (tpf && (tpf.observedStatus !== "pending" || tpf.submittedAt != null)) {
+                const fs: any = await info.orderStatus({ user, oid: tpf.cloid as `0x${string}` });
+                const fState = fs?.status === "order" ? fs.order?.status : undefined;
+                const fOpen = await openByCloid(info, user, tpf.cloid);
+                const fFill = await fillsByCloid(info, user, tpf.cloid);
+                if (fState === "filled" || fFill.size > 0) { await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "tp_final", observedStatus: "filled" }); return { skipped: "tp_final_fired_awaiting_flat" }; }
+                if (fState === "open" || fOpen) { await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "tp_final", observedStatus: "open", oid: tpf.oid }); return { result: "tp_final_resting" }; }
+                if (fState === "triggered") { await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "tp_final", observedStatus: "triggered" }); return { skipped: "tp_final_triggered" }; }
+                if (tpf.submittedAt && Date.now() - tpf.submittedAt < SL_SUBMIT_GRACE_MS) return { skipped: "tp_final_grace" };
+                await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "tp_final", observedStatus: "canceled" });
+              }
+              const renewF = await ctx.runMutation(internal.triggerArms.renewArmReconcile, { armId, token });
+              if (!renewF.ok) return { skipped: "lease_lost" };
+              const prepF = await ctx.runMutation(internal.triggerArms.prepareTpFinalOrder, { armId, token, triggerPx: tpfTrigger, size: tpfSize });
+              if (!prepF.ok) return { skipped: "tp_final_prep_race" };
+              const tpfLimitPx = aggressiveHlPriceStr(tpfTrigger * (1 + ENTRY_TRIGGER_SLIPPAGE), szDecimals, true);  // BUY ceil
+              const acF = abortAfter(HL_ORDER_TIMEOUT_MS);
+              try {
+                const respF: any = await exchange.order({
+                  orders: [{ a: assetId, b: true, p: tpfLimitPx, s: String(tpfSize), r: true, t: { trigger: { isMarket: true, triggerPx: formatHlPrice(tpfTrigger, szDecimals), tpsl: "tp" } }, c: prepF.cloid as `0x${string}` }],
+                  grouping: "na",
+                }, { signal: acF.signal, expiresAfter: Date.now() + HL_ORDER_TIMEOUT_MS });
+                const stF = respF?.response?.data?.statuses?.[0];
+                if (stF?.resting?.oid != null) await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "tp_final", observedStatus: "open", oid: String(stF.resting.oid), markSubmitted: true });
+                else if (stF?.filled?.oid != null) await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "tp_final", observedStatus: "filled", oid: String(stF.filled.oid), markSubmitted: true });
+                else if (stF === "waitingForTrigger" || stF === "waitingForFill") await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "tp_final", observedStatus: "pending", markSubmitted: true });
+                else if (stF?.error) await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "tp_final", observedStatus: "rejected" });
+                else await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "tp_final", observedStatus: "pending", markSubmitted: true });
+              } catch (e) {
+                if (e instanceof TransportError) await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "tp_final", observedStatus: "pending", markSubmitted: true });
+              } finally { acF.clear(); }
+              return { result: "tp_final_handled" };
+            }
+          }
           return { result: "protected_tps_ok" };
         }
 
@@ -561,7 +725,7 @@ export const reconcileArm = internalAction({
         // Colocar un NUEVO intento de SL (no hay order, nunca enviado, o el anterior se confirmó muerto).
         if ((arm.slAttempts ?? 0) >= SL_MAX_ATTEMPTS) return { skipped: "sl_max_attempts" };   // (2) escala a emergencia
         if (arm.status === "filled") await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "protecting" });
-        const prep = await ctx.runMutation(internal.triggerArms.prepareSlAttempt, { armId, token, protectDeadlineMs: SL_PROTECT_DEADLINE_MS });
+        const prep = await ctx.runMutation(internal.triggerArms.prepareSlAttempt, { armId, token, protectDeadlineMs: SL_PROTECT_DEADLINE_MS, size: floorToDecimals(realSize, szDecimals) });
         if (!prep.ok) return { skipped: "sl_prep_race" };
         const renew = await ctx.runMutation(internal.triggerArms.renewArmReconcile, { armId, token });
         if (!renew.ok) return { skipped: "lease_lost" };
@@ -593,10 +757,16 @@ export const reconcileArm = internalAction({
       const entryOrders = (await ctx.runQuery(internal.triggerArms.getArmOrdersInternal, { armId }))
         .filter((o) => o.role === "entry_lower" || o.role === "entry_upper");
       const entryCloids = entryOrders.map((o) => o.cloid);
+      // (JAV-61) En armed_lower_only el short de ARRIBA ya se consumió (abrió y cerró por TP-final):
+      // solo se vigila entry_lower (perforación). Excluir entry_upper para no releer su fill viejo
+      // (que dispararía la rama de "llenado" sobre una entrada ya consumida).
+      const relevantEntries = arm.status === "armed_lower_only"
+        ? entryOrders.filter((o) => o.role === "entry_lower")
+        : entryOrders;
 
       // (A) OCO: si CUALQUIER entrada llenó → filled + cancelar las hermanas (+ reducir reserva a 1×
       // si ninguna hermana llenó). El SL/cierre usan el tamaño REAL (szi) → doble-fill cubierto.
-      for (const eo of entryOrders) {
+      for (const eo of relevantEntries) {
         const os: any = await info.orderStatus({ user, oid: eo.cloid as `0x${string}` });
         const oState = os?.status === "order" ? os.order?.status : undefined;
         const f = await fillsByCloid(info, user, eo.cloid);
@@ -604,12 +774,16 @@ export const reconcileArm = internalAction({
           if (!(f.size > 0 && f.avgPx > 0)) return { skipped: "fill_data_pending" };
           await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: eo.role, observedStatus: "filled", oid: eo.oid });
           await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "filled", filledSize: f.size, entryPrice: f.avgPx });
-          // Cancelar las OTRAS entradas (OCO). La REDUCCIÓN de reserva 2×→1× NO se hace aquí: se hace
-          // en la fase de posición SOLO tras confirmar (ensureOrdersDead) que las hermanas murieron y
-          // que la posición es de 1× (no doble-fill) — evita liberar margen con una hermana aún viva.
-          for (const other of entryOrders) {
-            if (other._id === eo._id) continue;
-            try { await exchange.cancelByCloid({ cancels: [{ asset: assetId, cloid: other.cloid as `0x${string}` }] }); } catch { /* cron */ }
+          // (JAV-61) Registrar QUÉ entrada llenó: el tp_final solo se coloca si llenó entry_upper.
+          await ctx.runMutation(internal.triggerArms.setArmFilledEntryRole, { armId, token, role: eo.role });
+          // (JAV-61) En reentry_coexist NO se cancela la hermana: entry_lower debe seguir armada para la
+          // perforación. En OCO sí se cancela. La REDUCCIÓN 2×→1× (solo OCO) se hace en la fase de
+          // posición tras confirmar por CLOID que las hermanas murieron (no liberar margen con una viva).
+          if (arm.armMode !== "reentry_coexist") {
+            for (const other of entryOrders) {
+              if (other._id === eo._id) continue;
+              try { await exchange.cancelByCloid({ cancels: [{ asset: assetId, cloid: other.cloid as `0x${string}` }] }); } catch { /* cron */ }
+            }
           }
           return { result: "filled_oco" };
         }
@@ -629,8 +803,9 @@ export const reconcileArm = internalAction({
       }
 
       // (C) ARMADO: confirmar cada entrada por CLOID. Vivo (open/triggered) → cuenta como armado.
+      // (JAV-61) En armed_lower_only solo se confirma entry_lower (relevantEntries).
       let anyAlive = false;
-      for (const eo of entryOrders) {
+      for (const eo of relevantEntries) {
         const os: any = await info.orderStatus({ user, oid: eo.cloid as `0x${string}` });
         const oState = os?.status === "order" ? os.order?.status : undefined;
         if (oState === "open") { await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: eo.role, observedStatus: "open", oid: eo.oid }); anyAlive = true; }
@@ -639,11 +814,11 @@ export const reconcileArm = internalAction({
         else { await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: eo.role, observedStatus: "canceled" }); }  // muerta (terminal/unknownOid sin book)
       }
       if (anyAlive) {
-        if (arm.status !== "armed") await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "armed" });
+        // (JAV-61) armed_lower_only se MANTIENE (no transiciona a "armed": el short de arriba ya pasó).
+        if (arm.status !== "armed" && arm.status !== "armed_lower_only") await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "armed" });
         // (Fix #2) Si quedó UNA sola entrada viva (la otra confirmada muerta), ya no hay doble-fill
-        // posible → reducir reserva a 1×. Con datos FRESCOS (re-query, no el array obsoleto) y
-        // confirmando muertas las no-vivas por CLOID (ensureOrdersDead las cancela y prueba).
-        if (arm.allowReentryFromAbove && !arm.reservationReduced && entryOrders.length > 1) {
+        // posible → reducir reserva a 1×. (JAV-61) NO en reentry_coexist: las dos patas conviven (2×).
+        if (arm.armMode !== "reentry_coexist" && arm.allowReentryFromAbove && !arm.reservationReduced && entryOrders.length > 1) {
           const fresh = (await ctx.runQuery(internal.triggerArms.getArmOrdersInternal, { armId }))
             .filter((o) => o.role === "entry_lower" || o.role === "entry_upper");
           const liveRoles = fresh.filter((o) => o.observedStatus === "open" || o.observedStatus === "triggered" || o.observedStatus === "pending");
@@ -652,7 +827,32 @@ export const reconcileArm = internalAction({
             await ctx.runMutation(internal.triggerArms.reduceArmReservation, { armId, token, reservedNotional: arm.reservedNotional / 2, marginReserved: arm.marginReserved / 2 });
           }
         }
-        return { result: "armed" };
+        return { result: arm.status === "armed_lower_only" ? "armed_lower_only" : "armed" };
+      }
+      // (JAV-61 fix P1#6) armed_lower_only sin entry_lower viva: el short de arriba ya completó su ciclo
+      // (TP-final). NO es "prueba negativa" (hubo posición). Política: confirmar FLAT (sin posición) +
+      // muerte sostenida (grace, anti-lectura-transitoria) → cerrar limpio y, si aplica, reprogramar una
+      // generación nueva (esquema completo) para no dejar el bot activo sin cobertura.
+      if (arm.status === "armed_lower_only") {
+        const chN: any = await info.clearinghouseState({ user });
+        const pN = (chN.assetPositions ?? []).find((x: any) => x.position?.coin === arm.asset.toUpperCase());
+        if (pN && Math.abs(Number(pN.position?.szi ?? 0)) > 0) {
+          return { skipped: "armed_lower_only_position_live" };   // hay posición → el fill se detectará; no cerrar
+        }
+        if (arm.closeConfirmSince == null) {
+          await ctx.runMutation(internal.triggerArms.setArmCloseConfirm, { armId, token, value: Date.now() });
+          return { skipped: "armed_lower_only_dead_first" };
+        }
+        if (Date.now() - arm.closeConfirmSince < CLOSE_CONFIRM_GRACE_MS) return { skipped: "armed_lower_only_dead_grace" };
+        const renewE = await ctx.runMutation(internal.triggerArms.renewArmReconcile, { armId, token });
+        if (!renewE.ok) return { skipped: "lease_lost" };
+        // (JAV-61 fix P1#4) Solo cerrar con PRUEBA NEGATIVA completa: si ensureOrdersDead no confirma
+        // que entry_lower murió (orden viva en book o cancel incierto), reintentar — no cerrar huérfano.
+        if (!(await ensureOrdersDead(info, exchange, user, assetId, entryCloids))) {
+          return { skipped: "armed_lower_only_cancel_pending" };
+        }
+        const ce = await ctx.runMutation(internal.triggerArms.closeArmLowerOnlyExpired, { armId, token });
+        return { result: ce.ok ? (ce.rearmScheduled ? "armed_lower_only_closed_rearm" : "armed_lower_only_closed") : "armed_lower_only_close_failed" };
       }
       // Ninguna entrada viva ni llena → prueba negativa → failed (cuarentena N6 lo retiene si toca).
       const rF = await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "failed", error: "entradas muertas (prueba negativa)" });

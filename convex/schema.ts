@@ -313,6 +313,9 @@ export default defineSchema({
     status: v.union(
       v.literal("arming"), v.literal("submitting"), v.literal("armed"), v.literal("disarming"),
       v.literal("disarmed"), v.literal("filled"), v.literal("protecting"), v.literal("protected"),
+      // (JAV-61) armed_lower_only: el short de arriba (reentry) cerró por TP-final pero entry_lower
+      // sigue armada esperando PERFORACIÓN del borde inferior. Flat, sin short, cobertura viva.
+      v.literal("armed_lower_only"),
       v.literal("closed"), v.literal("failed"), v.literal("unknown")),
     desiredState: v.union(v.literal("armed"), v.literal("disarmed")),
     // snapshot de config (inmutable durante la vida del arm)
@@ -326,6 +329,17 @@ export default defineSchema({
     upperEdge: v.optional(v.number()),   // maxRange normalizado (entry_upper, si allowReentryFromAbove)
     allowReentryFromAbove: v.optional(v.boolean()),  // 2ª entrada (borde superior) + OCO
     reservationReduced: v.optional(v.boolean()),     // la reserva 2×→1× ya se aplicó (tras OCO confirmado)
+    // (JAV-61) Modo de coexistencia de las dos patas. undefined/"oco" = flujo in-range clásico
+    // (al llenarse una entrada se cancela la hermana y se reduce 2×→1×). "reentry_coexist" = ambas
+    // patas conviven: NO se cancela entry_lower al llenarse entry_upper, NO se reduce la reserva, y
+    // tras el TP-final del short de arriba el arm pasa a `armed_lower_only` (entry_lower sigue viva).
+    armMode: v.optional(v.union(v.literal("oco"), v.literal("reentry_coexist"))),
+    // (JAV-61) Semántica de entry_upper: "breakout_up" = SELL trigger ARRIBA del borde, dispara al
+    // SUBIR (tpsl:"tp"), precio dentro del rango. "reentry_down" = SELL trigger EN el borde superior,
+    // dispara al BAJAR/reentrar (tpsl:"sl"), precio por encima del rango.
+    entryUpperMode: v.optional(v.union(v.literal("breakout_up"), v.literal("reentry_down"))),
+    // (JAV-61) Qué entrada llenó la posición. El TP-final solo se coloca si llenó "entry_upper".
+    filledEntryRole: v.optional(v.union(v.literal("entry_lower"), v.literal("entry_upper"))),
     // (Codex #1 auto-rearm) Este arm nació de un auto-rearm: si termina `failed` SIN entrada viva/fill
     // (prueba negativa confirmada), settleArm/recoverAbandonedArming REPROGRAMA otro rearm atómicamente
     // (el consumo transfirió la responsabilidad al arm; al fallar sin cobertura, devuelve el trabajo).
@@ -364,7 +378,9 @@ export default defineSchema({
   // Cada orden trigger nativa de un arm. CLOID = identidad primaria determinista.
   trigger_orders: defineTable({
     armId: v.id("trigger_arms"),
-    role: v.union(v.literal("entry_lower"), v.literal("entry_upper"), v.literal("sl_upper"), v.literal("tp")),  // entradas (2) + SL + TPs
+    // entradas (2) + SL + TPs parciales + (JAV-61) tp_final: cierre del remanente del short de arriba
+    // al llegar al borde inferior (reduceOnly, size residual dinámico = 100 − Σ closePct parciales).
+    role: v.union(v.literal("entry_lower"), v.literal("entry_upper"), v.literal("sl_upper"), v.literal("tp"), v.literal("tp_final")),
     tpIndex: v.optional(v.number()),      // solo role:"tp" (0..N-1) — unicidad por (armId, "tp", tpIndex)
     cloid: v.string(),                    // determinista botId|generation|role[:tpIndex]:attempt
     oid: v.optional(v.string()),          // de HL; OPCIONAL (waitingForTrigger/timeout sin oid)

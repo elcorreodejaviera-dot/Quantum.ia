@@ -402,6 +402,9 @@ export const reconcileArm = internalAction({
         tradingConfig?.value !== true || simConfig?.value === true ||
         pool?.closed === true || hlNetwork() !== arm.network ||
         !bot || !bot.active || bot.simulationMode === true ||
+        // (CodeRabbit) Defensa: una pausa pendiente fuerza wantDisarm en TODOS los caminos (incl.
+        // reentry_coexist/armed_lower_only), aunque desiredState aún no refleje el disarmed.
+        bot.disarmPending === true ||
         bot.hlAccountId !== arm.hlAccountId || bot.poolId !== arm.poolId || !canLive;
       if (killed && arm.desiredState !== "disarmed") {
         await ctx.runMutation(internal.triggerArms.requestDisarmAndDeactivate, { botId: arm.botId });
@@ -638,7 +641,7 @@ export const reconcileArm = internalAction({
             // coloca: cerraría parte del short inferior. El SL full-size (redimensionado en 2.4) protege
             // ambos. Detectar por observed de entry_lower o por szi materialmente > UN short. Cancelar un
             // tp_final resting previo para que no dispare sobre el short inferior.
-            const lowerOrd = await ctx.runQuery(internal.triggerArms.getArmOrderInternal, { armId });   // entry_lower
+            const lowerOrd = await ctx.runQuery(internal.triggerArms.getArmOrderByRole, { armId, role: "entry_lower" });   // entry_lower explícito (CodeRabbit)
             const lowerFilled = lowerOrd?.observedStatus === "filled" || realSize > arm.size * 1.5;
             if (lowerFilled) {
               const tpfOld = await ctx.runQuery(internal.triggerArms.getArmOrderByRole, { armId, role: "tp_final" });

@@ -2697,8 +2697,8 @@ function HLAccountRow({ account, onRevoke }) {
         <span className={`hl-acct-status${bal ? ' conn' : ''}`}>
           <span className="dot" />{bal ? 'Conectada' : 'Conectando…'}
         </span>
-        <span className="hl-acct-sub" title="USDC retirable (perp) · el resto es spot, colateral en modo unified">
-          Disponible {bal ? formatUsd2(bal.withdrawable) : '—'}
+        <span className="hl-acct-sub" title="Colateral disponible en modo unified: retirable del perp + USDC spot libre (todo opera como margen).">
+          Disponible {bal ? formatUsd2((bal.withdrawable ?? 0) + (bal.spotUsdcFree ?? 0)) : '—'}
         </span>
       </div>
       <button className="mini-btn" onClick={onRevoke}>Revocar</button>

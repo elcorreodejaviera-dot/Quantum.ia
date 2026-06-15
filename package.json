@@ -6,8 +6,9 @@
   "scripts": {
     "dev": "vite",
     "dev:testnet": "VITE_HL_NETWORK=testnet vite",
+    "linear": "node scripts/linear.mjs",
     "typecheck": "tsc -p convex/tsconfig.json --noEmit",
-    "build": "npm run typecheck && node node_modules/convex/bin/main.js deploy --yes && vite build",
+    "build": "npm run typecheck && vite build && node node_modules/convex/bin/main.js deploy --yes",
     "preview": "vite preview",
     "start": "node server.js"
   },
@@ -29,5 +30,8 @@
     "@vitejs/plugin-react": "^4.3.4",
     "typescript": "^5.6.3",
     "vite": "^6.3.5"
+  },
+  "overrides": {
+    "ws": "^8.21.0"
   }
 }

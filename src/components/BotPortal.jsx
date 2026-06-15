@@ -183,6 +183,8 @@ function shortenAddress(addr) {
 const ARM_STATE_LABEL = {
   arming: 'Armando', submitting: 'Armando', armed: 'Trigger armado', filled: 'Posición abierta',
   protecting: 'Protegiendo', protected: 'Protegido', disarming: 'Deteniéndose', unknown: 'Verificando',
+  // (JAV-61/JAV-62) short de arriba cerró por TP-final; entry_lower sigue armada esperando perforación.
+  armed_lower_only: 'Cobertura inferior armada',
   failed: 'Falló',
 };
 function CoberturaViva({ bot, arm, pool, accountById, hlBalance }) {
@@ -193,7 +195,7 @@ function CoberturaViva({ bot, arm, pool, accountById, hlBalance }) {
   if (arm) {
     estado = ARM_STATE_LABEL[arm.status] ?? arm.status;
     tone = arm.status === 'failed' ? 'red'
-      : (arm.status === 'protected' || arm.status === 'filled' || arm.status === 'armed') ? 'green'
+      : (arm.status === 'protected' || arm.status === 'filled' || arm.status === 'armed' || arm.status === 'armed_lower_only') ? 'green'
       : arm.status === 'disarming' ? 'amber' : 'faint';
   } else if (bot.disarmPending) {
     estado = 'Deteniéndose'; tone = 'amber';

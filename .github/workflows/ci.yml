@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Typecheck (Convex)
+        run: npm run typecheck
+
+      # Solo compila el frontend; NO usa `npm run build` (que despliega Convex).
+      - name: Build frontend (sin deploy de Convex)
+        run: npx vite build
+
+      # (JAV-39 #21/#22) `ws` ya está parcheado vía overrides (^8.21.0). Quedan high de `esbuild`
+      # (build-tooling de vite/convex, no runtime de prod) que solo se arreglan con bumps mayores
+      # riesgosos → audit falla solo ante CRITICAL hasta ese follow-up.
+      - name: npm audit
+        run: npm audit --audit-level=critical

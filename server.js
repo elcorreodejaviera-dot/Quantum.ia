@@ -21,8 +21,38 @@ const contentTypes = {
 
 const STATIC_EXTENSIONS = new Set(Object.keys(contentTypes).filter(e => e !== '.html'));
 
-function send(res, status, body, contentType = 'text/plain; charset=utf-8') {
-  res.writeHead(status, { 'Content-Type': contentType });
+// (JAV-39 #19) CSP en Report-Only: observa violaciones sin romper Clerk/Convex/Hyperliquid/
+// WalletConnect; se endurece a enforcing (Content-Security-Policy) tras tunear con los reportes.
+const CSP_REPORT_ONLY = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.clerk.accounts.dev https://*.clerk.com",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "img-src 'self' data: blob: https:",
+  "font-src 'self' data: https://fonts.gstatic.com",
+  "connect-src 'self' https: wss:",
+  "frame-src 'self' https://*.clerk.com https://*.clerk.accounts.dev",
+  "worker-src 'self' blob:",
+  "base-uri 'self'",
+  "form-action 'self'",
+].join('; ');
+
+// (JAV-39 #19) Cabeceras de seguridad en TODAS las respuestas.
+const SECURITY_HEADERS = {
+  'Strict-Transport-Security': 'max-age=63072000; includeSubDomains; preload',
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  'Content-Security-Policy-Report-Only': CSP_REPORT_ONLY,
+};
+
+// (JAV-39 #20) Cache: no-cache para HTML/SPA/dinámico; immutable para assets versionados (el nombre
+// lleva hash de Vite → seguro cachear 1 año). Evita servir un index viejo y 404 de hashes antiguos.
+const NO_CACHE = 'no-cache, no-store, must-revalidate';
+const IMMUTABLE = 'public, max-age=31536000, immutable';
+
+function send(res, status, body, contentType = 'text/plain; charset=utf-8', cacheControl = NO_CACHE) {
+  res.writeHead(status, { ...SECURITY_HEADERS, 'Cache-Control': cacheControl, 'Content-Type': contentType });
   res.end(body);
 }
 
@@ -60,7 +90,9 @@ http.createServer((req, res) => {
 
   fs.readFile(filePath, (err, data) => {
     if (!err) {
-      send(res, 200, data, contentTypes[ext] || 'application/octet-stream');
+      // (JAV-39 #20) assets versionados (/assets/*, con hash) → immutable; resto → no-cache.
+      const cache = pathname.startsWith('/assets/') ? IMMUTABLE : NO_CACHE;
+      send(res, 200, data, contentTypes[ext] || 'application/octet-stream', cache);
       return;
     }
 

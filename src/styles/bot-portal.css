@@ -1278,14 +1278,24 @@ details[open] > .pool-pnl-toggle::before {
   grid-template-columns: repeat(4, 1fr);
 }
 
+/* (JAV-58 Fase D) Cabecera de métricas: 6 cols desktop → responsive sin solapar valores. */
+.pool-metrics-header {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
 @media (max-width: 900px) {
   .pool-pnl-grid { grid-template-columns: repeat(2, 1fr); }
   .pool-pnl-grid-4 { grid-template-columns: repeat(2, 1fr); }
+  .pool-metrics-header { grid-template-columns: repeat(3, 1fr); }
 }
 
 @media (max-width: 640px) {
   .pool-pnl-grid,
   .pool-pnl-grid-4 { grid-template-columns: repeat(2, 1fr); }
+  .pool-metrics-header { grid-template-columns: repeat(2, 1fr); }
 }
 
 /* Audit log panel */

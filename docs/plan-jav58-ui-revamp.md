@@ -124,3 +124,85 @@ Resumen autocontenido para un auditor sin el contexto del chat.
 3. Cruzar contra la HL API (`clearinghouseState`/`spotClearinghouseState` de la cuenta) que los números del panel coinciden con HL.
 4. Pausar el bot → el estado pasa a "Deteniéndose" y luego desaparece el panel (sin órdenes huérfanas).
 5. Cuando una entrada se llene (precio fuera de rango): el panel debe mostrar la **posición abierta con PNL/entry/leverage** desde `useHLAccountBalance.openPositions`.
+
+---
+
+# Fase D — Cabecera de métricas tipo DefiSuite (VALOR LP · ENTRY · PNL · APR · FEE APR · FEES)
+
+> Pedido del usuario (captura del bot de cobertura de un amigo / DefiSuite). Replicar esa barra
+> de métricas en la PoolCard de Quantum.ia.
+
+## Las 6 métricas y su fuente
+
+| Métrica | Fuente | Estado |
+|---|---|---|
+| **VALOR LP** | `liquidityUsd` (fetchPositionLiquidity) | ✅ ya disponible |
+| **ENTRY** | `pool.entryPrice` | ✅ ya disponible |
+| **APR** | `displayApy` (Uniswap calc o DeFiLlama apy) | ✅ ya disponible |
+| **FEE APR** | `(fees1d / tvl) · 365 · 100` (ya calculado en PoolCard) | ✅ ya disponible |
+| **FEES** | `feesUncollectedUsd` (JAV-46) | ✅ ya disponible |
+| **PNL** | fórmula abajo | ⚠️ nuevo (1 cálculo backend) |
+
+## PNL — definición (validada con el usuario)
+
+`PNL = capital ganado + fees`, donde:
+- **capital ganado** = revalorización de la posición restante vs. la entrada =
+  `valor(precio_actual) − valor(precio_entrada)`, con la **misma liquidez L y rango** (matemática
+  V3). Captura el ETH que el pool aún no vendió y que sigue subiendo.
+- **fees** = `feesUncollectedUsd`.
+
+```
+PNL = liquidityUsd − valueAtEntryUsd + feesUncollectedUsd
+```
+
+**Supuesto v1 (validado):** posición **intacta desde la entrada** (no se agregó/quitó liquidez →
+misma `L`). Si se reposiciona, el PNL es aproximado → se aclara en el tooltip.
+
+## Cambio backend (1, read-only)
+
+- `convex/actions/poolScanner.ts` → `fetchPositionLiquidity`: añadir arg opcional `entryPriceUsd`.
+  Con la **misma lectura on-chain** (L + rango) computar `valueAtEntryUsd` = valor V3 de la posición
+  evaluado a `entryPriceUsd`, y devolverlo junto a `liquidityUsd`/`feesUncollectedUsd`. **Una sola
+  lectura RPC, dos valuaciones.** Sin money-path (observabilidad).
+- Edge: `entryPriceUsd` ausente/≤0 → `valueAtEntryUsd: null` → la UI muestra PNL `—`.
+
+## Cambio frontend
+
+- PoolCard: **cabecera de 6 columnas** (VALOR LP · ENTRY · PNL · APR · FEE APR · FEES) con tooltips
+  `?` estilo DefiSuite. PNL en verde/rojo según signo.
+- Donde ya se llama `fetchPositionLiquidity`, pasar `entryPriceUsd: pool.entryPrice`.
+
+## Riesgo / auditoría
+
+- Toca la **matemática de valuación V3** (read-only). Money-**adjacent** (observabilidad), no toca
+  ejecución/margen. → Codex + CodeRabbit.
+- El supuesto de `L` constante se documenta en el tooltip del PNL.
+
+## Verificación
+
+1. `npm run typecheck` + `vite build`.
+2. Cruzar PNL contra un cálculo manual (o el panel del amigo) en un pool real (cuenta `0x7bbc…add0`).
+3. `entryPrice` ausente → PNL `—` sin romper la card.
+
+## Condiciones técnicas de implementación (Codex GO)
+
+**Cálculo de `valueAtEntryUsd` — NO usar `entryPriceUsd` como si fuera `sp`.** La valuación V3 usa
+`sp = sqrtPriceX96 / 2^96` en unidades **raw token1/token0**. El `spAtEntry` debe respetar orden real
+token0/token1, decimales de ambos, y qué token es el stable:
+
+- token0 = stable, token1 = base: `rawRatio = (1 / entryPriceUsd) · 10^(dec1 − dec0)`
+- token1 = stable, token0 = base: `rawRatio = entryPriceUsd · 10^(dec1 − dec0)`
+- `spAtEntry = sqrt(rawRatio)`
+
+Luego se **reutiliza la misma fórmula de amounts V3** (con `L`, `sa`, `sb`) y se valúa a `entryPriceUsd`.
+
+**Redacción corregida (no "1 RPC"):** `fetchPositionLiquidity` ya hace varias lecturas RPC. Lo correcto:
+*"sin segunda lectura de posición; con la misma lectura de L/rango se hacen DOS valuaciones"* (actual + entry).
+
+**Frontend:** la llamada actual está en `src/components/BotPortal.jsx:3525` → pasar `entryPriceUsd: p.entryPrice`.
+
+**Condiciones de auditoría (devolver null, no inventar PNL):**
+- `entryPriceUsd` ausente / no finito / ≤ 0 → `valueAtEntryUsd: null`.
+- ambos tokens stable o ninguno stable → `valueAtEntryUsd: null`.
+- PNL solo si `liquidityUsd`, `valueAtEntryUsd` y `feesUncollectedUsd` son finitos.
+- Tooltip claro: **aproximado** si la posición fue modificada desde la entrada (L pudo cambiar).

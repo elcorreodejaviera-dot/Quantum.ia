@@ -399,6 +399,15 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
   const userShare = tvl > 0 && userLiquidity > 0 ? userLiquidity / tvl : null;
   const userFees1d = userShare != null ? fees1d * userShare : null;
 
+  // (JAV-58 Fase D) Cabecera de métricas estilo DefiSuite: VALOR LP · ENTRY · PNL · APR · FEE APR · FEES.
+  // Solo cuando hay posición LP REAL on-chain (liquidityReal). PNL = capital ganado + fees:
+  // (valor actual − valor al precio de entrada) + fees sin cobrar. null si falta algún dato (no inventar).
+  const mValorLP = pool.liquidityReal ? pool.liquidity : null;
+  const mEntry = Number.isFinite(pool.entryPrice) ? pool.entryPrice : null;
+  const mFees = Number.isFinite(pool.feesUncollectedUsd) ? pool.feesUncollectedUsd : null;
+  const mPnl = (Number.isFinite(mValorLP) && Number.isFinite(pool.valueAtEntryUsd) && Number.isFinite(mFees))
+    ? (mValorLP - pool.valueAtEntryUsd + mFees) : null;
+  const showMetricsBar = pool.liquidityReal && !pool.closed;
 
   return (
     <>
@@ -427,6 +436,24 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
         <div className="pool-closed-banner">
           Esta posición ya no existe en Uniswap/Revert. Cierra la protección (pausa su bot)
           para poder proteger otro pool, o elimina este pool del portal.
+        </div>
+      )}
+
+      {/* (JAV-58 Fase D) Cabecera de métricas — mismo estilo que la proyección de fees (Metric + verde positive) */}
+      {showMetricsBar && (
+        <div className="pool-metrics-header">
+          <Metric label="Valor LP" title="Valor actual de tu posición LP (lectura on-chain)."
+            value={mValorLP != null ? formatUsd2(mValorLP) : '—'} />
+          <Metric label="Entry" title="Precio de entrada estimado (primer precio observado de la posición)."
+            value={mEntry != null ? mEntry.toLocaleString('en-US', { maximumFractionDigits: 2 }) : '—'} />
+          <Metric label="PNL" title="Capital ganado (revalorización del activo restante vs. la entrada) + fees sin cobrar. Aproximado si reposicionaste la posición desde la entrada."
+            value={mPnl != null ? <span className={mPnl >= 0 ? 'positive' : 'negative'}>{mPnl >= 0 ? '+' : ''}{formatUsd2(mPnl)}</span> : '—'} />
+          <Metric label="APR" title="APR total estimado del pool."
+            value={Number.isFinite(displayApy) ? <span className="positive">{displayApy.toFixed(1)}%</span> : '—'} />
+          <Metric label="Fee APR" title="APR proveniente solo de comisiones."
+            value={feeApr != null ? <span className="positive">{feeApr.toFixed(1)}%</span> : '—'} />
+          <Metric label="Fees" title="Comisiones de tu posición pendientes de cobrar."
+            value={mFees != null ? <span className="positive">{formatUsd2(mFees)}</span> : '—'} />
         </div>
       )}
 
@@ -3522,7 +3549,7 @@ function Dashboard({ user, onLogout, userId }) {
       const priceUsd = prices[asset];
       if (!priceUsd) continue;
       positionFetchedRef.current[key] = now;
-      fetchPositionAction({ tokenId: p.tokenId, network: p.network, priceUsd, poolAddress: p.poolAddress ?? undefined })
+      fetchPositionAction({ tokenId: p.tokenId, network: p.network, priceUsd, poolAddress: p.poolAddress ?? undefined, entryPriceUsd: p.entryPrice ?? undefined })
         .then(result => { setPositionData(prev => ({ ...prev, [p._id]: result })); })
         .catch(() => { delete positionFetchedRef.current[key]; });
     }
@@ -3594,6 +3621,7 @@ function Dashboard({ user, onLogout, userId }) {
           liquidityReal: true,          // lectura on-chain real (vs mock estimado)
           exposure: pd.exposure,
           feesUncollectedUsd: pd.feesUncollectedUsd ?? null,   // F1: fees sin cobrar (null = sin dato)
+          valueAtEntryUsd: pd.valueAtEntryUsd ?? null,         // (JAV-58 Fase D) para el PNL
           ...(pd.borrowHealth > 0 ? {
             borrowHealth: pd.borrowHealth,
             leverageRevert: pd.leverageRevert ?? 0,

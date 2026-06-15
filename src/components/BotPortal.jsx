@@ -216,6 +216,12 @@ function CoberturaViva({ bot, arm, pool, accountById, hlBalance }) {
     ? (arm.reservationReduced ? arm.reservedNotional : arm.reservedNotional / (twoEntries ? 2 : 1))
     : null;
   const lev = arm?.appliedLeverage ?? bot.leverage ?? null;
+  // (JAV-50) Leverage EFECTIVO: con autoLeverage y un arm vivo (appliedLeverage), mostrar "Auto · Nx";
+  // si autoLeverage sin arm aún, "Auto"; manual → "Nx".
+  const levText = lev == null ? ''
+    : bot.autoLeverage
+      ? (arm?.appliedLeverage != null ? `Auto · ${lev}x` : 'Auto')
+      : `${lev}x`;
 
   const acc = bot.hlAccountId ? accountById?.[bot.hlAccountId] : null;
   const walletLabel = acc?.label
@@ -245,7 +251,7 @@ function CoberturaViva({ bot, arm, pool, accountById, hlBalance }) {
         <div className="cv-tile">
           <span className="cv-label">Capital</span>
           <strong>{capital != null ? formatUsdCompact(capital) : '—'}</strong>
-          <span className="cv-dist">{lev != null ? `${lev}x` : ''}</span>
+          <span className="cv-dist">{levText}</span>
         </div>
         <div className="cv-tile">
           <span className="cv-label">Wallet</span>

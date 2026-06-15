@@ -15,15 +15,17 @@ import { hlInfoUrl } from "./hlNetwork";
 // comportamiento es IDÉNTICO al actual: registros sin keyId se cifran/descifran con la clave legacy.
 const LEGACY_KEY_ID = "legacy";
 
-function legacyKey(): Buffer {
-  const secret = process.env.HL_CREDENTIALS_ENCRYPTION_KEY;
-  if (!secret) throw new Error("HL_CREDENTIALS_ENCRYPTION_KEY is not configured");
+function hashSecret(secret: string): Buffer {
   return createHash("sha256").update(secret).digest();
 }
 
-// Mapa id → clave de 32 bytes. SIEMPRE incluye la legacy.
+// Mapa id → clave de 32 bytes. La legacy es OPCIONAL (CodeRabbit): si se retira
+// HL_CREDENTIALS_ENCRYPTION_KEY tras migrar TODO a una clave nueva, las credenciales con keyId
+// no-legacy siguen descifrando. Exige al menos UNA clave en el ring.
 function keyring(): Record<string, Buffer> {
-  const ring: Record<string, Buffer> = { [LEGACY_KEY_ID]: legacyKey() };
+  const ring: Record<string, Buffer> = {};
+  const legacy = process.env.HL_CREDENTIALS_ENCRYPTION_KEY;
+  if (legacy && legacy.trim()) ring[LEGACY_KEY_ID] = hashSecret(legacy);
   const raw = process.env.HL_CREDENTIALS_KEYRING;
   if (raw && raw.trim()) {
     let parsed: Record<string, unknown>;
@@ -31,8 +33,11 @@ function keyring(): Record<string, Buffer> {
     for (const [id, secret] of Object.entries(parsed)) {
       if (id === LEGACY_KEY_ID) throw new Error("HL_CREDENTIALS_KEYRING no puede redefinir el id 'legacy'.");
       if (typeof secret !== "string" || !secret) throw new Error(`HL_CREDENTIALS_KEYRING: secreto inválido para '${id}'.`);
-      ring[id] = createHash("sha256").update(secret).digest();
+      ring[id] = hashSecret(secret);
     }
+  }
+  if (Object.keys(ring).length === 0) {
+    throw new Error("Sin claves de cifrado: configurá HL_CREDENTIALS_ENCRYPTION_KEY y/o HL_CREDENTIALS_KEYRING.");
   }
   return ring;
 }
@@ -169,7 +174,8 @@ export const reencryptCredentials = internalAction({
     const cap = limit ?? 100;
     let reencrypted = 0, skipped = 0, failed = 0;
     for (const c of all) {
-      if (reencrypted >= cap) break;
+      // (CodeRabbit) Acotar el TRABAJO real (cripto + update), no solo los éxitos: reencrypted+failed.
+      if (reencrypted + failed >= cap) break;
       const currentId = c.keyId ?? LEGACY_KEY_ID;
       if (currentId === active) { skipped++; continue; }   // ya en la clave activa
       try {

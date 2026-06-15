@@ -52,11 +52,16 @@ const ALLOWED_ARM: Record<string, Set<string>> = {
   armed: new Set(["filled", "disarming", "unknown", "disarmed", "failed"]),
   // post-fill: filled→protecting (colocar SL); protecting→protected (SL puesto) | closed (cierre de
   // emergencia o SL llenado); protected→closed (SL/cierre). disarming desde cualquier estado abierto.
-  filled: new Set(["protecting", "closed", "disarming", "unknown"]),
-  protecting: new Set(["protected", "closed", "disarming", "unknown"]),
-  protected: new Set(["closed", "disarming"]),
-  disarming: new Set(["disarmed", "filled", "protecting", "protected", "closed", "unknown", "failed"]),
-  unknown: new Set(["armed", "filled", "protecting", "protected", "disarmed", "failed", "closed"]),
+  // (JAV-61) En armMode="reentry_coexist", si el short de arriba cierra (TP-final) pero entry_lower
+  // sigue armada → transición a `armed_lower_only` (flat, sin short, cobertura inferior viva).
+  filled: new Set(["protecting", "closed", "disarming", "unknown", "armed_lower_only"]),
+  protecting: new Set(["protected", "closed", "disarming", "unknown", "armed_lower_only"]),
+  protected: new Set(["closed", "disarming", "armed_lower_only"]),
+  // (JAV-61) armed_lower_only: esperando que el precio perfore el borde inferior y llene entry_lower
+  // (→ filled → protecting → protected, el ciclo normal del nuevo short), o cierre/pausa.
+  armed_lower_only: new Set(["filled", "protecting", "protected", "closed", "disarming", "unknown"]),
+  disarming: new Set(["disarmed", "filled", "protecting", "protected", "closed", "unknown", "failed", "armed_lower_only"]),
+  unknown: new Set(["armed", "filled", "protecting", "protected", "disarmed", "failed", "closed", "armed_lower_only"]),
 };
 
 function isArmTerminal(status: string): boolean {
@@ -130,6 +135,12 @@ export const reserveArm = internalMutation({
     lowerEdge: v.number(),
     upperEdge: v.optional(v.number()),
     allowReentryFromAbove: v.optional(v.boolean()),
+    // (JAV-61) Modo de coexistencia + semántica de entry_upper + triggerPx de entry_lower.
+    // En "reentry_coexist" entry_lower va con triggerPx de PERFORACIÓN (estrictamente bajo lowerEdge)
+    // para no chocar con el tp_final que se coloca EN lowerEdge. undefined → flujo OCO clásico.
+    armMode: v.optional(v.union(v.literal("oco"), v.literal("reentry_coexist"))),
+    entryUpperMode: v.optional(v.union(v.literal("breakout_up"), v.literal("reentry_down"))),
+    entryLowerTriggerPx: v.optional(v.number()),
     stopLossPct: v.number(),
     bufferPct: v.optional(v.number()),
     tps: v.optional(v.array(v.object({ gainPct: v.number(), closePct: v.number() }))),
@@ -152,6 +163,12 @@ export const reserveArm = internalMutation({
     // (appliedLeverage/marginReserved los resuelve y valida el helper resolveLeverage abajo.)
     if (!(args.triggerPx > 0) || !(args.lowerEdge > 0)) {
       throw new Error("[blocked_config] triggerPx/lowerEdge deben ser > 0");
+    }
+    // (JAV-61) Si viene un triggerPx de perforación para entry_lower, debe ser válido y < lowerEdge
+    // (estrictamente por debajo del borde, donde vive el tp_final).
+    if (args.entryLowerTriggerPx !== undefined
+      && !(args.entryLowerTriggerPx > 0 && args.entryLowerTriggerPx < args.lowerEdge)) {
+      throw new Error("[blocked_config] entryLowerTriggerPx debe ser > 0 y < lowerEdge (perforación).");
     }
     // (CodeRabbit #22) Validación defensiva: el límite por orden asume orderNotional > 0.
     if (!(args.orderNotional > 0)) {
@@ -234,6 +251,9 @@ export const reserveArm = internalMutation({
       reservedNotional: args.reservedNotional, marginReserved, lowerEdge: args.lowerEdge,
       upperEdge: twoEntries ? args.upperEdge : undefined,
       allowReentryFromAbove: twoEntries ? true : undefined,
+      // (JAV-61) Persistir el modo (default "oco") y, si dos entradas, la semántica del entry_upper.
+      armMode: args.armMode ?? "oco",
+      entryUpperMode: twoEntries ? args.entryUpperMode : undefined,
       stopLossPct: args.stopLossPct, bufferPct: args.bufferPct, tps: args.tps,
       // (Codex crítico) hereda la responsabilidad de rearm si viene de un auto-rearm O reemplaza uno
       // pendiente → si falla antes del envío, settleArm/recover devuelven el trabajo (no se pierde).
@@ -251,7 +271,8 @@ export const reserveArm = internalMutation({
       });
     }
     await ctx.db.insert("trigger_orders", {
-      armId, role: "entry_lower", cloid: cloidLower, oid: undefined, triggerPx: args.triggerPx, size: args.size,
+      armId, role: "entry_lower", cloid: cloidLower, oid: undefined,
+      triggerPx: args.entryLowerTriggerPx ?? args.triggerPx, size: args.size,
       reduceOnly: false, observedStatus: "pending", createdAt: now, updatedAt: now,
     });
     let cloidUpper: string | undefined;
@@ -334,6 +355,66 @@ export const reduceArmReservation = internalMutation({
     const newMar = Math.min(arm.marginReserved, marginReserved);
     await ctx.db.patch(armId, { reservedNotional: newRes, marginReserved: newMar, reservationReduced: true, updatedAt: Date.now() });
     return { ok: true as const };
+  },
+});
+
+// (JAV-61) Marca qué entrada llenó la posición (entry_lower | entry_upper). El TP-final solo se
+// coloca si filledEntryRole === "entry_upper". Bajo claim/fencing.
+export const setArmFilledEntryRole = internalMutation({
+  args: { armId: v.id("trigger_arms"), token: v.string(), role: v.union(v.literal("entry_lower"), v.literal("entry_upper")) },
+  handler: async (ctx, { armId, token, role }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (isArmTerminal(arm.status)) return { ok: false as const };
+    await ctx.db.patch(armId, { filledEntryRole: role, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
+// (JAV-61) reentry_coexist: el short de ARRIBA cerró (TP-final/parciales/SL) y la posición quedó flat,
+// pero entry_lower sigue armada esperando PERFORACIÓN. En vez de cerrar el arm, transiciona a
+// `armed_lower_only` y limpia los datos del fill/SL para que el SIGUIENTE short (entry_lower) arranque
+// limpio. Mantiene reservedNotional/marginReserved (2×: ambas patas siguen reservadas). Bajo fencing.
+export const transitionToArmedLowerOnly = internalMutation({
+  args: { armId: v.id("trigger_arms"), token: v.string() },
+  handler: async (ctx, { armId, token }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm) return { ok: false as const };
+    if (arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (isArmTerminal(arm.status)) return { ok: false as const };
+    const allowed = ALLOWED_ARM[arm.status];
+    if (!allowed || !allowed.has("armed_lower_only")) return { ok: false as const };
+    await ctx.db.patch(armId, {
+      status: "armed_lower_only",
+      filledSize: undefined, entryPrice: undefined, filledAt: undefined, filledEntryRole: undefined,
+      closeConfirmSince: undefined, slAttempts: undefined, slSubmittedAt: undefined, protectDeadline: undefined,
+      updatedAt: Date.now(),
+    });
+    return { ok: true as const };
+  },
+});
+
+// (JAV-61 fix P1#6) Terminaliza un arm en `armed_lower_only` cuya entry_lower murió sin perforar (ya
+// confirmado flat + grace en el motor). Cierre limpio (closeReason "manual": NO es un SL → no cuenta
+// whipsaw) y, si el bot sigue activo + autoRearm, reprograma una generación NUEVA (esquema completo)
+// para no dejar el bot activo sin cobertura. Bajo fencing.
+export const closeArmLowerOnlyExpired = internalMutation({
+  args: { armId: v.id("trigger_arms"), token: v.string() },
+  handler: async (ctx, { armId, token }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm) return { ok: false as const };
+    if (arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (arm.status !== "armed_lower_only") return { ok: false as const };
+    await ctx.db.patch(armId, { status: "closed", closeReason: "manual", updatedAt: Date.now() });
+    // (JAV-61 fix P1#5) Conservar la finalización de pausa del resto del state machine: si había una
+    // pausa pendiente, completarla (desactivar) y NO rearmar.
+    const bot = await ctx.db.get(arm.botId);
+    if (bot?.disarmPending) {
+      await ctx.db.patch(arm.botId, { active: false, disarmPending: false, disarmRequestedAt: undefined });
+      return { ok: true as const, rearmScheduled: false as const };
+    }
+    const rearmScheduled = await rescheduleRearmIfEligible(ctx, arm.botId);
+    return { ok: true as const, rearmScheduled };
   },
 });
 
@@ -667,7 +748,7 @@ export const getArmInternal = internalQuery({
   handler: async (ctx, { armId }) => ctx.db.get(armId),
 });
 
-const ARM_ROLE = v.union(v.literal("entry_lower"), v.literal("entry_upper"), v.literal("sl_upper"));
+const ARM_ROLE = v.union(v.literal("entry_lower"), v.literal("entry_upper"), v.literal("sl_upper"), v.literal("tp_final"));
 
 export const getArmOrderByRole = internalQuery({
   args: { armId: v.id("trigger_arms"), role: ARM_ROLE },
@@ -711,8 +792,9 @@ export const setArmOrderObserved = internalMutation({
       v.literal("pending"), v.literal("open"), v.literal("triggered"), v.literal("filled"),
       v.literal("canceled"), v.literal("rejected"), v.literal("unknown")),
     oid: v.optional(v.string()),
+    markSubmitted: v.optional(v.boolean()),   // (JAV-61) fija submittedAt (grace anti-doble, p.ej. tp_final)
   },
-  handler: async (ctx, { armId, token, role, observedStatus, oid }) => {
+  handler: async (ctx, { armId, token, role, observedStatus, oid, markSubmitted }) => {
     const arm = await ctx.db.get(armId);
     if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
     const order = await ctx.db
@@ -720,8 +802,33 @@ export const setArmOrderObserved = internalMutation({
     if (!order) return { ok: false as const };
     const patch: Record<string, unknown> = { observedStatus, updatedAt: Date.now() };
     if (oid !== undefined) patch.oid = oid;
+    if (markSubmitted) patch.submittedAt = Date.now();
     await ctx.db.patch(order._id, patch);
     return { ok: true as const };
+  },
+});
+
+// (JAV-61) Crea/rota el trigger_order del TP-final (role "tp_final", reduceOnly) para un intento:
+// cloid …|tp_final:<attempt>, observedStatus pending, submittedAt limpio. Bajo claim. Devuelve cloid.
+export const prepareTpFinalOrder = internalMutation({
+  args: { armId: v.id("trigger_arms"), token: v.string(), triggerPx: v.number(), size: v.number() },
+  handler: async (ctx, { armId, token, triggerPx, size }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (isArmTerminal(arm.status)) return { ok: false as const };
+    const existing = await ctx.db.query("trigger_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", "tp_final")).first();
+    const attempt = (existing?.attempt ?? 0) + 1;
+    const cloid = await armCloid(arm.botId, arm.generation, `tp_final:${attempt}`);
+    const now = Date.now();
+    if (existing) {
+      await ctx.db.patch(existing._id, { cloid, oid: undefined, observedStatus: "pending", attempt, submittedAt: undefined, triggerPx, size, updatedAt: now });
+    } else {
+      await ctx.db.insert("trigger_orders", {
+        armId, role: "tp_final", cloid, oid: undefined, triggerPx, size, reduceOnly: true,
+        attempt, observedStatus: "pending", createdAt: now, updatedAt: now,
+      });
+    }
+    return { ok: true as const, cloid };
   },
 });
 
@@ -729,22 +836,26 @@ export const setArmOrderObserved = internalMutation({
 // protectDeadline si falta, y crea el trigger_order(pending) con cloid …|sl|<attempt>. Devuelve el
 // cloid del intento. Bajo claim. Idempotente por (armId, attempt).
 export const prepareSlAttempt = internalMutation({
-  args: { armId: v.id("trigger_arms"), token: v.string(), protectDeadlineMs: v.number() },
-  handler: async (ctx, { armId, token, protectDeadlineMs }) => {
+  // (JAV-61 fix P0) `size`: el tamaño REAL que se enviará a HL (realSize). Debe PERSISTIRSE en el
+  // trigger_order para que el guard de resize (realSize > sl_upper.size·1.02) no vuelva a disparar
+  // en bucle tras recolocar full-size. Opcional → default arm.size (compat con el flujo 1×).
+  args: { armId: v.id("trigger_arms"), token: v.string(), protectDeadlineMs: v.number(), size: v.optional(v.number()) },
+  handler: async (ctx, { armId, token, protectDeadlineMs, size }) => {
     const arm = await ctx.db.get(armId);
     if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
     if (isArmTerminal(arm.status)) return { ok: false as const };
     const attempt = (arm.slAttempts ?? 0) + 1;
     const cloid = await armCloid(arm.botId, arm.generation, `sl:${attempt}`);
     const now = Date.now();
-    // Sustituir el trigger_order sl_upper (un único role sl_upper por arm; se rota su cloid).
+    const slSize = (size != null && size > 0) ? size : arm.size;   // tamaño realmente enviado a HL
+    // Sustituir el trigger_order sl_upper (un único role sl_upper por arm; se rota su cloid + size).
     const existing = await ctx.db
       .query("trigger_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", "sl_upper")).first();
     if (existing) {
-      await ctx.db.patch(existing._id, { cloid, oid: undefined, observedStatus: "pending", updatedAt: now });
+      await ctx.db.patch(existing._id, { cloid, oid: undefined, observedStatus: "pending", size: slSize, updatedAt: now });
     } else {
       await ctx.db.insert("trigger_orders", {
-        armId, role: "sl_upper", cloid, oid: undefined, triggerPx: 0, size: arm.size,
+        armId, role: "sl_upper", cloid, oid: undefined, triggerPx: 0, size: slSize,
         reduceOnly: true, observedStatus: "pending", createdAt: now, updatedAt: now,
       });
     }

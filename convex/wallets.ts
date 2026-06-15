@@ -2,10 +2,12 @@ import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { requireAuth, requireAdmin, requireUser } from "./helpers";
 
+// (JAV-38 #6) Devuelve TODAS las wallets de TODOS los usuarios → restringido a admin. El frontend
+// usa `listMyWallets` (solo las del usuario autenticado); esta queda para uso administrativo.
 export const listWallets = query({
   args: {},
   handler: async (ctx) => {
-    await requireAuth(ctx);
+    await requireAdmin(ctx);
     return await ctx.db.query("wallets").collect();
   },
 });

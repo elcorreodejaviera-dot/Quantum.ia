@@ -30,10 +30,14 @@ export const logAdminAction = mutation({
   },
 });
 
+// (JAV-38 #11) Solo claves PÚBLICAS explícitas: el frontend únicamente necesita el estado de los
+// switches de trading. Cualquier otra clave se rechaza (no exponer config interna por key arbitraria).
+const PUBLIC_CONFIG_KEYS = new Set(["simulationMode", "tradingEnabled"]);
 export const getConfig = query({
   args: { key: v.string() },
   handler: async (ctx, { key }) => {
     await requireAuth(ctx);
+    if (!PUBLIC_CONFIG_KEYS.has(key)) throw new Error("Clave de configuración no pública.");
     return await ctx.db
       .query("system_config")
       .withIndex("by_key", (q) => q.eq("key", key))

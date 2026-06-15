@@ -29,7 +29,8 @@ jobs:
       - name: Build frontend (sin deploy de Convex)
         run: npx vite build
 
-      # (JAV-39 #21/#22) Audit no bloqueante por la vuln conocida de `ws` vía Convex (high):
-      # falla solo ante CRITICAL. Tras JAV-39 #22 (bump de Convex) endurecer a `--audit-level=high`.
+      # (JAV-39 #21/#22) `ws` ya está parcheado vía overrides (^8.21.0). Quedan high de `esbuild`
+      # (build-tooling de vite/convex, no runtime de prod) que solo se arreglan con bumps mayores
+      # riesgosos → audit falla solo ante CRITICAL hasta ese follow-up.
       - name: npm audit
         run: npm audit --audit-level=critical

@@ -6,11 +6,13 @@
 // debe ser SIEMPRE el devuelto aquí, el mismo con el que se dimensiona el margen.
 //
 // Semántica de autoLeverage (función de seguridad acordada con el usuario): proteger al menos el
-// nocional del pool aunque el colateral sea pequeño. Base = 10x; si a 10x no cabe, SUBE solo lo
-// justo hasta el tope de 20x (y nunca por encima del maxLeverage del activo). Si ni al tope cabe
-// → [blocked_margin] (no abre una cobertura infradimensionada en silencio).
+// nocional del pool aunque el colateral sea pequeño. (JAV-68) El PISO es el leverage que eligió el
+// usuario en el slider (manualLeverage); si a ese piso no cabe, SUBE solo lo justo hasta el tope de
+// 20x (y nunca por encima del maxLeverage del activo), nunca baja del valor elegido. STANDARD_AUTO_
+// LEVERAGE (10x) queda como fallback cuando el slider no llega en auto. Si ni al tope cabe →
+// [blocked_margin] (no abre una cobertura infradimensionada en silencio).
 
-export const STANDARD_AUTO_LEVERAGE = 10;   // base cuando autoLeverage está activo
+export const STANDARD_AUTO_LEVERAGE = 10;   // fallback de piso en auto si el slider no llega (JAV-68)
 export const AUTO_LEVERAGE_CAP = 20;        // tope duro de autoLeverage (decisión del usuario)
 export const MANUAL_LEVERAGE_MIN = 1;
 export const MANUAL_LEVERAGE_MAX = 25;      // tope del modo manual (paridad con el gate runtime previo)
@@ -83,7 +85,7 @@ export function resolveLeverage(args: {
     throw new Error("[blocked_config] assetMaxLeverage inválido (metadata del activo no fiable)");
   }
 
-  // Subir solo lo justo desde la base hasta el tope para que el margen quepa.
+  // Subir solo lo justo desde el PISO hasta el tope para que el margen quepa.
   const usableReal = availableCollateral * (1 - MARGIN_SAFETY_BUFFER) - marginCommitted;
   if (!(usableReal > 0)) {
     throw new Error("[blocked_margin] Sin colateral usable para abrir la cobertura (fondea la wallet).");
@@ -95,7 +97,15 @@ export function resolveLeverage(args: {
       `[blocked_margin] El colateral no cubre el pool ni al tope de leverage (${hardCap}x): ` +
       `requiere ${needed}x. Fondea la wallet.`);
   }
-  const appliedLeverage = Math.min(hardCap, Math.max(STANDARD_AUTO_LEVERAGE, needed));
+  // (JAV-68) El PISO del modo auto es el leverage que eligió el usuario en el slider (manualLeverage):
+  // autoLeverage SOLO SUBE desde ahí hacia el tope cuando el colateral no alcanza, nunca baja del valor
+  // elegido. Si el slider no llega (undefined/inválido en auto), se conserva el fallback histórico
+  // STANDARD_AUTO_LEVERAGE (10) para no bloquear el armado por metadata ausente. Un floor mayor que el
+  // tope (slider > AUTO_LEVERAGE_CAP/assetMax) queda acotado por el Math.min(hardCap, …) de abajo.
+  const floor = (Number.isFinite(manualLeverage) && (manualLeverage as number) >= MANUAL_LEVERAGE_MIN)
+    ? Math.round(manualLeverage as number)
+    : STANDARD_AUTO_LEVERAGE;
+  const appliedLeverage = Math.min(hardCap, Math.max(floor, needed));
   const marginRequired = reservedNotional / appliedLeverage;
   return { appliedLeverage, marginRequired };
 }

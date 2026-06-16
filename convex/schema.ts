@@ -362,6 +362,11 @@ export default defineSchema({
     stopLossPct: v.number(),             // snapshot del SL del bot (para armar el SL post-fill)
     bufferPct: v.optional(v.number()),   // snapshot del búfer (% del pool) — TPs solo sobre el búfer
     tps: v.optional(v.array(v.object({ gainPct: v.number(), closePct: v.number() }))),  // snapshot config TPs
+    // (JAV-66) Break-even: snapshot del bot.breakevenPct (% de GANANCIA que activa el movimiento del SL
+    // a entrada). undefined → BE desactivado (comportamiento legacy intacto). beMoved = latch one-way:
+    // el BE ya se activó → el trigger deseado del SL pasa de entry+stopLossPct% a entry (break-even).
+    breakevenPct: v.optional(v.number()),
+    beMoved: v.optional(v.boolean()),
     // SL post-fill
     slAttempts: v.optional(v.number()),  // nº de intentos de colocar el SL (cloid …|sl|attempt)
     slSubmittedAt: v.optional(v.number()),  // SL enviado (resting/pending): grace+prueba negativa antes de rotar cloid (anti-doble-SL)

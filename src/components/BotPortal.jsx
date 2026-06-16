@@ -230,6 +230,18 @@ function CoberturaViva({ bot, arm, pool, accountById, hlBalance }) {
   // (Fase C) Posición HL en vivo del activo del bot (si hay alguna abierta).
   const pos = hlBalance?.openPositions?.find((p) => p.coin === bot.baseAsset) ?? null;
 
+  // (feature BE) SL vigente = la orden SL ABIERTA real. Hoy el único role de SL persistido en
+  // trigger_orders es 'sl_upper' (ver schema.ts: v.union); 'sl' se incluye solo como defensa
+  // forward-compat/legacy y no matchea nada actualmente. Se muestra SIEMPRE el precio de la orden,
+  // nunca inferido desde entryPrice.
+  const slOrder = arm?.orders?.find((o) => (o.role === 'sl' || o.role === 'sl_upper') && o.observedStatus === 'open') ?? null;
+  // Estado BE: el latch beMoved se prende ANTES de rotar el SL (protected→protecting, el SL viejo +%
+  // sigue vivo hasta confirmar). Por eso "BE" (verde) solo si el SL abierto ya está en break-even
+  // (≤ entry·1.001, tolerancia que cubre el offset ~0.05% + redondeo HL); si beMoved pero el SL sigue
+  // arriba → "BE…" (ámbar, rotando). Sin badge si !beMoved.
+  const beState = !arm?.beMoved ? null
+    : (slOrder && arm.entryPrice != null && slOrder.triggerPx <= arm.entryPrice * 1.001) ? 'be' : 'be_pending';
+
   return (
     <div className="cobertura-viva">
       <div className="cobertura-head">
@@ -237,6 +249,19 @@ function CoberturaViva({ bot, arm, pool, accountById, hlBalance }) {
         <span className={`pill ${tone}`}>{estado}</span>
         <span className={`pill ${dentro ? 'green' : 'faint'}`}>{dentro ? 'Dentro' : 'Fuera'}</span>
       </div>
+      {slOrder && pool && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '6px 0', fontSize: 13 }}>
+          <span className="cv-label">Stop Loss</span>
+          <strong>${formatPrice(pool.pair, slOrder.triggerPx)}</strong>
+          {beState === 'be' && <span className="pill green">BE</span>}
+          {beState === 'be_pending' && <span className="pill amber">BE…</span>}
+          {pos && (
+            <strong className={pos.unrealizedPnl >= 0 ? 'positive' : 'negative'} style={{ marginLeft: 'auto' }}>
+              {pos.unrealizedPnl >= 0 ? '+' : ''}{formatUsd2(pos.unrealizedPnl)}
+            </strong>
+          )}
+        </div>
+      )}
       <div className="cobertura-tiles">
         <div className="cv-tile">
           <span className="cv-label">Trigger abajo</span>
@@ -2468,6 +2493,15 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
             <input type="checkbox" checked={autoLeverage} onChange={(e) => setAutoLeverage(e.target.checked)} />
             Permitir auto-ajuste de leverage si el balance es insuficiente
           </label>
+          {/* Margen ESTIMADO (no exacto): reacciona al slider. Con autoLeverage el leverage real nunca
+              baja del slider (JAV-68) → el margen real es igual o MENOR → este número es el máx. El saldo
+              restante solo se estima con una cuenta elegida. La reserva real la valida el backend. */}
+          <div style={{ fontSize: 12, marginTop: 6, color: 'var(--muted)' }}>
+            {autoLeverage ? 'Margen estimado máx. (slider): ' : 'Margen estimado: '}
+            <strong style={{ color: 'var(--text)' }}>{formatUsd(thisBotMargin)}</strong>
+            {' · Te quedaría aprox.: '}
+            <strong style={{ color: 'var(--text)' }}>{selected ? formatUsd(unifiedFree - thisBotMargin) : '—'}</strong>
+          </div>
         </div>
 
         {selected && (

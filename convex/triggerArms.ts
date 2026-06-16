@@ -739,6 +739,8 @@ export const listMyActiveArms = query({
       triggerPx: number; lowerEdge: number; upperEdge: number | undefined;
       appliedLeverage: number; reservedNotional: number; generation: number;
       reservationReduced: boolean; allowReentryFromAbove: boolean;
+      // (feature BE) precio de fill + latch break-even, para que la UI muestre SL real + estado BE.
+      entryPrice: number | undefined; beMoved: boolean;
       orders: Array<{ role: string; oid: string | undefined; cloid: string; triggerPx: number; observedStatus: string }>;
     }> = [];
     for (const bot of bots) {
@@ -761,6 +763,7 @@ export const listMyActiveArms = query({
         triggerPx: live.triggerPx, lowerEdge: live.lowerEdge, upperEdge: live.upperEdge,
         appliedLeverage: live.appliedLeverage, reservedNotional: live.reservedNotional, generation: live.generation,
         reservationReduced: live.reservationReduced ?? false, allowReentryFromAbove: live.allowReentryFromAbove ?? false,
+        entryPrice: live.entryPrice, beMoved: live.beMoved ?? false,
         orders: orders.map((o) => ({
           role: o.role, oid: o.oid, cloid: o.cloid, triggerPx: o.triggerPx, observedStatus: o.observedStatus,
         })),

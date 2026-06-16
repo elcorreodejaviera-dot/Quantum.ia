@@ -38,3 +38,30 @@ export const backfillBotsUserId = internalMutation({
     return { patched, paused, total: bots.length, adminId: admin._id };
   },
 });
+
+// Backfill de autoRearm en bots de protección IL existentes.
+//
+// El motor solo programa el re-armado post-SL si bot.autoRearm === true
+// (triggerArms.ts closeArmAndScheduleRearm). Los bots IL creados antes de exponer el campo lo tienen
+// `undefined` y por eso no reponían la cobertura tras un stop loss. Esta migración los pasa a `true`
+// para honrar "siempre protegido".
+//
+// Acotada y segura: SOLO toca bots kind === "il" con autoRearm === undefined. Un `false` explícito
+// del usuario se respeta (no se pisa). NO modifica estado operacional (rearmStatus/nextRearmAt/arms)
+// ni abre posiciones: solo habilita el re-armado FUTURO. Idempotente (segunda corrida → patched: 0).
+// Llamar una vez desde el Convex dashboard: internal.migrations.backfillIlAutoRearm
+export const backfillIlAutoRearm = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const bots = await ctx.db.query("bots").collect();
+    let patched = 0;
+    let eligible = 0;
+    for (const bot of bots) {
+      if (bot.kind !== "il" || bot.autoRearm !== undefined) continue;
+      eligible++;
+      await ctx.db.patch(bot._id, { autoRearm: true });
+      patched++;
+    }
+    return { patched, eligible, total: bots.length };
+  },
+});

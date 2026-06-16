@@ -291,6 +291,10 @@ export const getOrCreatePoolBot = mutation({
 
     const { poolId, kind, hlAccountId, active, simulationMode, ...config } = args;
     validatePoolBotConfig(kind, config);
+    // Default defensivo: la protección IL es "siempre protegida" → repone tras SL (autoRearm). Solo
+    // se fuerza cuando el cliente OMITIÓ el campo (undefined: bot IL viejo o path que no lo manda).
+    // Un `false` explícito del usuario NUNCA se pisa. No aplica a bots de trading.
+    if (kind === "il" && config.autoRearm === undefined) config.autoRearm = true;
     const baseAsset = deriveBaseAsset(pool.pair);   // derivado backend, nunca del cliente
 
     // Modo de operación: nuevo → simulación por defecto; update → conserva el existente.

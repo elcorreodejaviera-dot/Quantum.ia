@@ -2394,6 +2394,10 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
   // Distinguir tps undefined (crear → defaults) de tps: [] intencional (reconfigurar → vacío).
   const [tps, setTps] = React.useState(bot ? (bot.tps ?? []) : [{ gainPct: 0.5, closePct: 40 }, { gainPct: 1.5, closePct: 60 }]);
   const [noReentryFromAbove, setNoReentryFromAbove] = React.useState(bot?.allowReentryFromAbove === false);
+  // Auto-rearm tras SL. Default ON para protección IL ("siempre protegido"); un `false` explícito
+  // guardado se respeta (?? solo cubre undefined). El backend solo programa el re-armado post-SL si
+  // autoRearm === true (triggerArms.ts closeArmAndScheduleRearm).
+  const [autoRearm, setAutoRearm] = React.useState(bot?.autoRearm ?? true);
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState('');
 
@@ -2425,6 +2429,7 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
         leverage, autoLeverage, bufferPct, stopLossPct, breakevenPct,
         tps: tps.filter((t) => t.gainPct > 0 && t.closePct > 0),
         allowReentryFromAbove: !noReentryFromAbove,
+        autoRearm,
         active: bot ? bot.active : true,   // editar conserva el estado; crear activa
         simulationMode: !(realMode && canTradeLive),   // real solo con permiso
       }));
@@ -2523,6 +2528,11 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
         <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center', margin: '10px 0' }}>
           <input type="checkbox" checked={noReentryFromAbove} onChange={(e) => setNoReentryFromAbove(e.target.checked)} />
           No proteger cuando reentra al rango desde arriba
+        </label>
+
+        <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center', margin: '10px 0' }}>
+          <input type="checkbox" checked={autoRearm} onChange={(e) => setAutoRearm(e.target.checked)} />
+          Auto-rearm — tras un stop loss, repone la cobertura automáticamente (espera ~5 min)
         </label>
 
         <RealModeToggle realMode={realMode} setRealMode={setRealMode} canTradeLive={canTradeLive} />

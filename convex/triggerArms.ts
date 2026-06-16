@@ -144,6 +144,8 @@ export const reserveArm = internalMutation({
     stopLossPct: v.number(),
     bufferPct: v.optional(v.number()),
     tps: v.optional(v.array(v.object({ gainPct: v.number(), closePct: v.number() }))),
+    // (JAV-66) % de ganancia que activa el BE. El caller ya lo valida/desactiva (undefined = BE off).
+    breakevenPct: v.optional(v.number()),
     availableCollateral: v.number(),
     // (Codex #2) Auto-rearm: si viene, la inserción de la generación CONSUME el trabajo de rearm
     // atómicamente (valida token+lease+running y limpia rearmStatus en la misma transacción). Opcional:
@@ -255,6 +257,8 @@ export const reserveArm = internalMutation({
       armMode: args.armMode ?? "oco",
       entryUpperMode: twoEntries ? args.entryUpperMode : undefined,
       stopLossPct: args.stopLossPct, bufferPct: args.bufferPct, tps: args.tps,
+      // (JAV-66) snapshot del break-even (ya validado por el caller; undefined → BE desactivado).
+      breakevenPct: args.breakevenPct,
       // (Codex crítico) hereda la responsabilidad de rearm si viene de un auto-rearm O reemplaza uno
       // pendiente → si falla antes del envío, settleArm/recover devuelven el trabajo (no se pierde).
       fromRearm: inheritsRearm ? true : undefined,
@@ -480,6 +484,30 @@ export const markArmSlSubmitted = internalMutation({
     if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
     if (isArmTerminal(arm.status)) return { ok: false as const };
     await ctx.db.patch(armId, { slSubmittedAt: Date.now(), updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
+// (JAV-66) Activación del break-even bajo el claim (CAS+token). Fija el latch one-way `beMoved` y
+// DEGRADA protected→protecting para que la ROTACIÓN del SL la haga el bloque (3) de reconcileArm
+// —ya auditado: confirma por CLOID, recoloca y, si agota deadline/intentos con la posición sin SL
+// confirmado, ESCALA a cierre de emergencia (el gate de emergencia exige status!=="protected")—.
+// Resetea protectDeadline + slAttempts: la rotación obtiene una ventana de protección FRESCA (4 min/
+// 3 intentos); si no logra el SL de BE a tiempo → emergencia. NO cancela el SL viejo (+1%): sigue vivo
+// hasta que el bloque (3) lo confirme y rote (confirmar-antes-de-rotar). Solo desde `protected`.
+export const activateBreakeven = internalMutation({
+  args: { armId: v.id("trigger_arms"), token: v.string(), protectDeadlineMs: v.number() },
+  handler: async (ctx, { armId, token, protectDeadlineMs }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (arm.status !== "protected") return { ok: false as const };   // solo desde protected
+    if (arm.beMoved === true) return { ok: true as const };          // idempotente
+    const now = Date.now();
+    await ctx.db.patch(armId, {
+      beMoved: true, status: "protecting",
+      protectDeadline: now + protectDeadlineMs, slAttempts: 0, slSubmittedAt: undefined,
+      updatedAt: now,
+    });
     return { ok: true as const };
   },
 });
@@ -839,8 +867,11 @@ export const prepareSlAttempt = internalMutation({
   // (JAV-61 fix P0) `size`: el tamaño REAL que se enviará a HL (realSize). Debe PERSISTIRSE en el
   // trigger_order para que el guard de resize (realSize > sl_upper.size·1.02) no vuelva a disparar
   // en bucle tras recolocar full-size. Opcional → default arm.size (compat con el flujo 1×).
-  args: { armId: v.id("trigger_arms"), token: v.string(), protectDeadlineMs: v.number(), size: v.optional(v.number()) },
-  handler: async (ctx, { armId, token, protectDeadlineMs, size }) => {
+  // (JAV-66) `triggerPx`: el nivel REAL que se enviará a HL (entry+stopLossPct% o break-even). Se
+  // persiste en la fila sl_upper para poder auditar el nivel vigente y detectar un SL desactualizado
+  // (rotación a BE). Opcional → default 0 (compat con el flujo previo, que no lo persistía).
+  args: { armId: v.id("trigger_arms"), token: v.string(), protectDeadlineMs: v.number(), size: v.optional(v.number()), triggerPx: v.optional(v.number()) },
+  handler: async (ctx, { armId, token, protectDeadlineMs, size, triggerPx }) => {
     const arm = await ctx.db.get(armId);
     if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
     if (isArmTerminal(arm.status)) return { ok: false as const };
@@ -848,14 +879,15 @@ export const prepareSlAttempt = internalMutation({
     const cloid = await armCloid(arm.botId, arm.generation, `sl:${attempt}`);
     const now = Date.now();
     const slSize = (size != null && size > 0) ? size : arm.size;   // tamaño realmente enviado a HL
+    const slTrig = (triggerPx != null && triggerPx > 0) ? triggerPx : 0;   // (JAV-66) nivel persistido
     // Sustituir el trigger_order sl_upper (un único role sl_upper por arm; se rota su cloid + size).
     const existing = await ctx.db
       .query("trigger_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", "sl_upper")).first();
     if (existing) {
-      await ctx.db.patch(existing._id, { cloid, oid: undefined, observedStatus: "pending", size: slSize, updatedAt: now });
+      await ctx.db.patch(existing._id, { cloid, oid: undefined, observedStatus: "pending", size: slSize, triggerPx: slTrig, updatedAt: now });
     } else {
       await ctx.db.insert("trigger_orders", {
-        armId, role: "sl_upper", cloid, oid: undefined, triggerPx: 0, size: slSize,
+        armId, role: "sl_upper", cloid, oid: undefined, triggerPx: slTrig, size: slSize,
         reduceOnly: true, observedStatus: "pending", createdAt: now, updatedAt: now,
       });
     }

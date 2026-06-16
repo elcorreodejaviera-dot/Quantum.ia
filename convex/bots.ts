@@ -224,6 +224,11 @@ function validatePoolBotConfig(kind: PoolBotKind, c: PoolBotConfig) {
   ] as const) {
     if (val !== undefined && val < 0) throw new Error(`${name} no puede ser negativo.`);
   }
+  // (JAV-66) Cota superior sana para el break-even (% de ganancia que mueve el SL a entrada). No se
+  // acopla a stopLossPct (son ejes distintos). 0/undefined = BE desactivado (lo decide el snapshot).
+  if (c.breakevenPct !== undefined && c.breakevenPct > 50) {
+    throw new Error("breakevenPct no puede superar 50.");
+  }
   if (c.tps) {
     let sum = 0;
     for (const tp of c.tps) {

@@ -36,6 +36,26 @@ const SL_PROTECT_DEADLINE_MS = 4 * 60_000;
 // Grace tras enviar el SL: antes de rotar el cloid (nuevo intento), confirmar por CLOID que el
 // anterior NO está vivo (igual que JAV-43). Evita doble SL / SL huérfano.
 const SL_SUBMIT_GRACE_MS = 60_000;
+// (JAV-66) Break-even: offset bajo la entrada al que se mueve el SL al alcanzar breakevenPct de
+// ganancia. Para un Short, el SL queda un pelín BAJO la entrada → cubre las ~2 comisiones taker →
+// break-even NETO (o ligeramente positivo). 0 = entrada exacta (BE bruto).
+// INVARIANTE: BE_OFFSET_FRACTION < breakevenPct/100 (si no, el trigger quedaría ≤ mark al activar);
+// con breakevenPct mínimo de UI 0.5% (=0.005), el colchón 0.0005 deja margen de sobra.
+const BE_OFFSET_FRACTION = 0.0005;   // ~0.05% (decisión del usuario: BE neto cubriendo fees)
+// Tolerancia relativa para considerar el SL "en el nivel deseado" (distingue entry+1% de BE, ~1% de
+// separación, tolerando la deriva del entry medio entre ciclos).
+const SL_TRIGGER_MATCH_TOL = 5e-4;
+// (JAV-66) Tamaño de 1 tick de precio de un perp en HL: el MÁS restrictivo entre (a) los decimales
+// permitidos (MAX_DECIMALS=6 para perps → 6−szDecimals) y (b) las 5 cifras significativas. Se usa para
+// el guard anti-auto-disparo del BE (beTrigger > markPx + tick).
+function hlTickSize(price: number, szDecimals: number): number {
+  // (CodeRabbit) clamp del exponente: con szDecimals>6, (6−szDecimals) sería negativo y
+  // Math.pow(10,−neg) inflaría el tick → guard de BE demasiado estricto. maxDecimals nunca < 0.
+  const maxDecimals = Math.max(0, 6 - szDecimals);
+  const decimalsTick = Math.pow(10, -maxDecimals);
+  const sigFigTick = price > 0 ? Math.pow(10, Math.floor(Math.log10(price)) - 4) : decimalsTick;
+  return Math.max(decimalsTick, sigFigTick);
+}
 
 // ¿Hay una orden VIVA con este cloid en el book? (parte de la prueba negativa R3 — no liberar a ciegas).
 async function openByCloid(info: any, user: `0x${string}`, cloid: string): Promise<boolean> {
@@ -246,6 +266,17 @@ export const armBotInternal = internalAction({
       armMode, entryUpperMode: twoEntries ? entryUpperMode : undefined,
       entryLowerTriggerPx: reentryFromAbove ? entryLowerTriggerPx : undefined,
       stopLossPct: bot.stopLossPct, bufferPct, tps, availableCollateral,
+      // (JAV-66) Break-even: validar/desactivar AQUÍ (snapshot). undefined → BE off (legacy intacto).
+      // No bloquea el armado: si está configurado pero es inválido, se desactiva con un warning.
+      breakevenPct: ((): number | undefined => {
+        const be = bot.breakevenPct;
+        if (be == null) return undefined;
+        if (!(be > 0 && be <= 50 && BE_OFFSET_FRACTION < be / 100)) {
+          console.warn(`[JAV-66] breakeven desactivado para bot ${bot._id}: breakevenPct=${be} inválido (>0, ≤50, y BE_OFFSET<be/100).`);
+          return undefined;
+        }
+        return be;
+      })(),
       rearmToken,   // (Codex #2) si es un re-armado, la reserva consume el trabajo atómicamente
     });
     const { armId, cloid, cloidUpper, appliedLeverage } = reservation;
@@ -438,6 +469,16 @@ export const reconcileArm = internalAction({
         const realSize = Math.abs(szi) > 0 ? Math.abs(szi) : filledSize;
         const posEntryPx = (p && Number(p.position?.entryPx) > 0) ? Number(p.position.entryPx) : entryPrice;
 
+        // (JAV-66) Trigger DESEADO del SL (Short): si el BE ya se activó (latch beMoved) → entrada
+        // (break-even); si no → entry + stopLossPct% (comportamiento actual). Todas las colocaciones de
+        // SL de la fase de posición (inicial, resize, BE) usan ESTA fuente única → un solo nivel de
+        // verdad. Sin beMoved el valor es idéntico al de hoy (cero regresión).
+        const markPx = assetMeta.markPx;   // (JAV-66) mark fresco del ciclo (getAssetMeta) para el gate BE
+        const beTrigger = posEntryPx * (1 - BE_OFFSET_FRACTION);
+        const desiredSlTrigger = arm.beMoved
+          ? beTrigger
+          : posEntryPx * (1 + arm.stopLossPct / 100);
+
         // (Codex #1) Reducir reserva 2×→1× SOLO ahora que la posición está abierta: confirmar por CLOID
         // que las entradas hermanas MURIERON (ensureOrdersDead) y que la posición es de 1× (no doble-
         // fill: szi ≈ una sola entrada). Nunca liberar margen con una hermana aún viva.
@@ -557,12 +598,14 @@ export const reconcileArm = internalAction({
           // SL viejo CONFIRMADO muerto (no en book, sin fills): rotar + recolocar full-size YA.
           await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "canceled" });
           if ((arm.slAttempts ?? 0) >= SL_MAX_ATTEMPTS) return { skipped: "sl_resize_max_attempts" };
-          const prepRz = await ctx.runMutation(internal.triggerArms.prepareSlAttempt, { armId, token, protectDeadlineMs: SL_PROTECT_DEADLINE_MS, size: floorToDecimals(realSize, szDecimals) });
+          const prepRz = await ctx.runMutation(internal.triggerArms.prepareSlAttempt, { armId, token, protectDeadlineMs: SL_PROTECT_DEADLINE_MS, size: floorToDecimals(realSize, szDecimals), triggerPx: desiredSlTrigger });
           if (!prepRz.ok) return { skipped: "sl_resize_prep_race" };
           const renewRz2 = await ctx.runMutation(internal.triggerArms.renewArmReconcile, { armId, token });
           if (!renewRz2.ok) return { skipped: "lease_lost" };
           try {
-            const slR = await placeStopLoss(exchange, assetId, szDecimals, "Short", realSize, posEntryPx, arm.stopLossPct, prepRz.cloid as `0x${string}`);
+            // (JAV-66) recolocar al trigger DESEADO: si el BE ya estaba activo, el SL redimensionado
+            // se coloca en break-even (no vuelve a +1%).
+            const slR = await placeStopLoss(exchange, assetId, szDecimals, "Short", realSize, posEntryPx, arm.stopLossPct, prepRz.cloid as `0x${string}`, desiredSlTrigger);
             if (slR.state === "resting") {
               await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "open", oid: slR.oid });
               await ctx.runMutation(internal.triggerArms.markArmSlSubmitted, { armId, token });
@@ -576,6 +619,24 @@ export const reconcileArm = internalAction({
             await ctx.runMutation(internal.triggerArms.markArmSlSubmitted, { armId, token });
             return { skipped: "sl_resized_pending" };
           } catch { return { skipped: "sl_resize_place_error" }; }
+        }
+
+        // (2.45) (JAV-66) BREAK-EVEN — ACTIVACIÓN. Al alcanzar `breakevenPct` de ganancia, marcar el
+        // latch y DEGRADAR a `protecting`: la ROTACIÓN del SL la ejecuta el bloque (3) de abajo (ya
+        // auditado: confirma por CLOID, recoloca al `desiredSlTrigger`=BE y escala a emergencia si no lo
+        // logra a tiempo). Aplica a CUALQUIER arm (ambos bordes Short). Guard anti-auto-disparo SOLO
+        // aquí: `beTrigger > markPx + 1 tick` (el SL inicial/resize NO lo llevan: deben poder devolver
+        // `filled` si el trigger ya está cruzado). NO se cancela el SL viejo (+1%) aquí: sigue vivo hasta
+        // que el bloque (3) lo confirme y rote. Si el CAS falla, el SL viejo protege; se reintenta.
+        if (arm.status === "protected" && slOrder && !arm.beMoved
+            && arm.breakevenPct != null && arm.breakevenPct > 0
+            && markPx <= posEntryPx * (1 - arm.breakevenPct / 100)        // ganancia alcanzada
+            && beTrigger > markPx + hlTickSize(markPx, szDecimals)) {     // guard: BE colocable (> mark+tick)
+          const renewBe = await ctx.runMutation(internal.triggerArms.renewArmReconcile, { armId, token });
+          if (!renewBe.ok) return { skipped: "lease_lost" };
+          const beAct = await ctx.runMutation(internal.triggerArms.activateBreakeven, { armId, token, protectDeadlineMs: SL_PROTECT_DEADLINE_MS });
+          if (!beAct.ok) return { skipped: "be_activate_failed" };   // SL viejo intacto; reintenta
+          return { result: "be_activated" };   // status→protecting; el bloque (3) rota al BE el próximo ciclo
         }
 
         // (2.5) TPs sobre el BÚFER (solo cuando ya hay SL → status protected). Cada TP es Take Profit
@@ -711,6 +772,17 @@ export const reconcileArm = internalAction({
           }
           if (slState === "open" || slOpen) {
             await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "open", oid: slOrder.oid });
+            // (JAV-66) Si el SL vivo está en un nivel DISTINTO al deseado (p. ej. el viejo +1% tras
+            // activar el break-even), ROTARLO: cancelar (confirmar-antes-de-rotar) en vez de re-proteger
+            // en el nivel viejo. `triggerPx > 0` excluye filas legacy (sin triggerPx persistido) → no
+            // rotación espuria. La recolocación al `desiredSlTrigger` la hace el placement de abajo.
+            if (slOrder.triggerPx > 0
+                && Math.abs(slOrder.triggerPx - desiredSlTrigger) > desiredSlTrigger * SL_TRIGGER_MATCH_TOL) {
+              const renewRot = await ctx.runMutation(internal.triggerArms.renewArmReconcile, { armId, token });
+              if (!renewRot.ok) return { skipped: "lease_lost" };
+              try { await exchange.cancelByCloid({ cancels: [{ asset: assetId, cloid: slOrder.cloid as `0x${string}` }] }); } catch { /* el próximo ciclo reintenta */ }
+              return { skipped: "sl_stale_cancel_sent" };   // confirmar muerte antes de recolocar en BE
+            }
             if (arm.status !== "protected") await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "protected" });
             return { result: "protected" };
           }
@@ -728,12 +800,14 @@ export const reconcileArm = internalAction({
         // Colocar un NUEVO intento de SL (no hay order, nunca enviado, o el anterior se confirmó muerto).
         if ((arm.slAttempts ?? 0) >= SL_MAX_ATTEMPTS) return { skipped: "sl_max_attempts" };   // (2) escala a emergencia
         if (arm.status === "filled") await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "protecting" });
-        const prep = await ctx.runMutation(internal.triggerArms.prepareSlAttempt, { armId, token, protectDeadlineMs: SL_PROTECT_DEADLINE_MS, size: floorToDecimals(realSize, szDecimals) });
+        const prep = await ctx.runMutation(internal.triggerArms.prepareSlAttempt, { armId, token, protectDeadlineMs: SL_PROTECT_DEADLINE_MS, size: floorToDecimals(realSize, szDecimals), triggerPx: desiredSlTrigger });
         if (!prep.ok) return { skipped: "sl_prep_race" };
         const renew = await ctx.runMutation(internal.triggerArms.renewArmReconcile, { armId, token });
         if (!renew.ok) return { skipped: "lease_lost" };
         try {
-          const sl = await placeStopLoss(exchange, assetId, szDecimals, "Short", realSize, posEntryPx, arm.stopLossPct, prep.cloid as `0x${string}`);
+          // (JAV-66) desiredSlTrigger aquí es entry+stopLossPct% (beMoved es false en el SL inicial,
+          // pre-protected) → idéntico al comportamiento previo; persiste el triggerPx para auditoría.
+          const sl = await placeStopLoss(exchange, assetId, szDecimals, "Short", realSize, posEntryPx, arm.stopLossPct, prep.cloid as `0x${string}`, desiredSlTrigger);
           if (sl.state === "resting") {
             await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: "sl_upper", observedStatus: "open", oid: sl.oid });
             await ctx.runMutation(internal.triggerArms.markArmSlSubmitted, { armId, token });

@@ -189,8 +189,14 @@ export async function placeStopLoss(
   exchange: ExchangeClient, assetId: number, szDecimals: number,
   side: "Long" | "Short", filledSize: number, entryPx: number,
   stopLossPct: number, slCloidVal: `0x${string}`,
+  // (JAV-66) Si viene, se usa este trigger en vez del derivado de stopLossPct (break-even: ≈ entryPx).
+  // Sin override → byte-idéntico al comportamiento actual. La banda market (SL_MARKET_SLIPPAGE_FRACTION)
+  // y todo lo demás se mantiene igual.
+  triggerPxOverride?: number,
 ): Promise<SlPlaceResult> {
-  const triggerPx = slTriggerPx(side, entryPx, stopLossPct);
+  const triggerPx = (triggerPxOverride != null && triggerPxOverride > 0)
+    ? triggerPxOverride
+    : slTriggerPx(side, entryPx, stopLossPct);
   const isBuy = side === "Short";                  // cerrar un Short = Buy; cerrar un Long = Sell
   // Peor precio aceptable al activarse (banda 1%): cerrar un Short = comprar hasta +1%;
   // cerrar un Long = vender hasta −1%. Banda fina: en un gap > 1% puede NO llenarse.

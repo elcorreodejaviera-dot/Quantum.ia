@@ -113,7 +113,14 @@ function NetworkLiquidity({ pools }) {
   const byNetwork = ['Ethereum', 'Arbitrum', 'Base', 'Optimism'].map((network) => {
     const networkPools = pools.filter((pool) => pool.network === network);
     const liquidity = networkPools.reduce((sum, pool) => sum + pool.liquidity, 0);
-    const fees24h = networkPools.reduce((sum, pool) => sum + pool.fees24h, 0);
+    // Fees diarios = parte PROPORCIONAL del usuario (no el fee pool-wide de Uniswap). Coherente con
+    // "Liquidez monitoreada" y con la Proyección fees de la PoolCard (userFees1d = fees1d · liquidity/tvl).
+    const fees24h = networkPools.reduce((sum, pool) => {
+      const fees1d = pool.fees1d ?? pool.fees24h ?? 0;
+      const tvl = pool.tvl ?? 0;
+      const userShare = tvl > 0 && pool.liquidity > 0 ? pool.liquidity / tvl : 0;
+      return sum + fees1d * userShare;
+    }, 0);
     const avgApy = networkPools.length
       ? networkPools.reduce((sum, pool) => sum + (pool.apy ?? 0), 0) / networkPools.length
       : 0;
@@ -1123,7 +1130,7 @@ function RiskPanel({ pools }) {
           return (
             <div className="risk-row" key={pool.id}>
               <span>{pool.pair} <span className="network">en {pool.network}</span></span>
-              <span className="mono">{pool.exposure.toFixed(2)}</span>
+              <span className="mono">{((pool.exposure ?? 0) * 100).toFixed(0)}%</span>
               <span className={tone}>{risk}</span>
             </div>
           );

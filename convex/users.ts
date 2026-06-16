@@ -256,7 +256,12 @@ export const listUsersWithTradeLive = query({
         .collect();
       const canTradeLive = isPermissionLive(u, perms.filter((p) => p.permission === "canTradeLive"), now);
       const canManageBots = isPermissionLive(u, perms.filter((p) => p.permission === "canManageBots"), now);
-      page.push({ userId: u._id, email: u.email ?? null, name: u.name ?? null, role: u.role, canTradeLive, canManageBots });
+      // JAV-75: plan de cobertura y suspensión (lectura directa del doc users; sin índice nuevo).
+      page.push({
+        userId: u._id, email: u.email ?? null, name: u.name ?? null, role: u.role,
+        canTradeLive, canManageBots,
+        subscriptionPlan: u.subscriptionPlan ?? null, suspended: u.suspended === true,
+      });
     }
     return { ...result, page };
   },

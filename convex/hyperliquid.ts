@@ -538,7 +538,24 @@ export const executePerpMarketOrder = action({
       return { ok: false, status: "aborted", requestId, reason: sub.reason };
     }
 
-    await exchange.updateLeverage({ asset: assetId, isCross: false, leverage: appliedLeverage });
+    // (JAV-53) updateLeverage corre ANTES de exchange.order: si lanza, NUNCA se envió la entrada → sin
+    // posición. Clasificar: TransportError = incierto (reconciliable); resto = determinista (failed ya).
+    try {
+      await exchange.updateLeverage({ asset: assetId, isCross: false, leverage: appliedLeverage });
+    } catch (e) {
+      if (e instanceof TransportError) {
+        // Incierto: dejar reconciliable (el cron por cloid hará prueba negativa → libera la reserva).
+        await ctx.runMutation(internal.executions.settleExecution, {
+          requestId, status: "unknown", error: `updateLeverage transport: ${String((e as Error)?.message ?? e).slice(0, 200)}`,
+        });
+        return { ok: false, status: "unknown", requestId };
+      }
+      // Determinista: leverage no aplicado + sin orden → cerrar failed YA (libera margen).
+      await ctx.runMutation(internal.executions.settleExecution, {
+        requestId, status: "failed", error: `updateLeverage rechazado: ${String((e as Error)?.message ?? e).slice(0, 200)}`,
+      });
+      return { ok: false, status: "failed", requestId };
+    }
 
     // Gate ATÓMICO justo antes del envío (updateLeverage pudo tardar >LEASE_MS y el cron tomar el
     // control). blocked → ya cerrado failed por CAS; state/expired/claimed → no tocar (otro lo maneja).

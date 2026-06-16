@@ -477,11 +477,26 @@ export const executePerpMarketOrder = action({
       .filter((b) => b.coin === "USDC")
       .reduce((s, b) => s + Math.max(0, parseFloat(b.total ?? "0") - parseFloat(b.hold ?? "0")), 0);
 
+    // (JAV-77) Cobertura del pool (liquidez LP cruda, SIN buffer) para el hard-cap por plan (Modelo B).
+    // Lectura on-chain fiable, la MISMA que el motor IL (fetchPositionNotionalStrict). Si el pool no
+    // tiene tokenId o no se puede cuantificar → NO reservar (fail-closed): el cap no debe estimarse.
+    if (pool.tokenId === undefined || pool.tokenId === null) {
+      throw new Error("[blocked_config] Pool sin tokenId: no se puede cuantificar la cobertura para el tope del plan.");
+    }
+    const coverageRead = await ctx.runAction(internal.actions.poolScanner.fetchPositionNotionalStrict, {
+      tokenId: pool.tokenId, network: pool.network, priceUsd: markPx, poolAddress: pool.poolAddress ?? undefined,
+    });
+    if (coverageRead.reason !== "ok" || !Number.isFinite(coverageRead.liquidityUsd) || coverageRead.liquidityUsd <= 0) {
+      throw new Error("[blocked_config] No se puede cuantificar la cobertura del pool para el tope del plan.");
+    }
+    const hedgeNotionalUsd = coverageRead.liquidityUsd;
+
     // (c) Reserva atómica: idempotency + nocional + LEVERAGE + MARGEN por cuenta, ANTES de tocar HL.
     // reserveExecution resuelve el leverage (auto/manual) con el helper y devuelve el applied.
     const reservation = await ctx.runMutation(internal.executions.reserveExecution, {
       userId: user._id, botId: bot._id, idempotencyKey: args.idempotencyKey,
-      hlAccountId: bot.hlAccountId, asset, stopLossPct: bot.stopLossPct,
+      hlAccountId: bot.hlAccountId, poolId: bot.poolId, hedgeNotionalUsd,
+      asset, stopLossPct: bot.stopLossPct,
       requestedAmount: args.tradeAmount,
       notional: actualNotional, availableCollateral,
       autoLeverage: bot.autoLeverage === true, manualLeverage: bot.leverage,

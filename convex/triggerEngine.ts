@@ -264,7 +264,7 @@ export const armBotInternal = internalAction({
       asset, network: hlNetwork(), triggerPx: triggerPxNorm, size,
       autoLeverage: bot.autoLeverage === true, manualLeverage: bot.leverage,
       assetMaxLeverage: maxLeverage,
-      orderNotional, reservedNotional, lowerEdge: pool.minRange,
+      orderNotional, reservedNotional, hedgeNotionalUsd, lowerEdge: pool.minRange,
       upperEdge: twoEntries ? upperEdgeNorm : undefined,
       allowReentryFromAbove: twoEntries ? true : undefined,
       // (JAV-61) modo de coexistencia + semántica del entry_upper + perforación del entry_lower.

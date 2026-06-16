@@ -284,6 +284,10 @@ export default defineSchema({
     // Snapshot inmutable de los parámetros efectivos: la reconciliación NO relee el bot
     // (que puede reconfigurarse). Protege la posición original aunque el bot/cuenta cambien.
     hlAccountId: v.id("hl_api_credentials"),
+    // (JAV-77) Snapshot del pool + liquidez LP (sin buffer) para el hard-cap por plan (Modelo B).
+    // optional/legacy-safe: filas antiguas sin estos campos bloquean fail-closed en coverageUsage.ts.
+    poolId: v.optional(v.id("pools")),
+    hedgeNotionalUsd: v.optional(v.number()), // liquidez LP cruda (unidad de cobertura del plan)
     asset: v.string(),
     stopLossPct: v.number(),
     requestedAmount: v.number(),          // tradeAmount solicitado (base del dedupe)
@@ -349,6 +353,9 @@ export default defineSchema({
     appliedLeverage: v.number(),
     reservedNotional: v.number(),
     marginReserved: v.number(),
+    // (JAV-77) liquidez LP cruda (sin buffer) del pool al armar = unidad de cobertura del plan
+    // (Modelo B). optional/legacy-safe: arms vivos sin este campo bloquean fail-closed en coverageUsage.ts.
+    hedgeNotionalUsd: v.optional(v.number()),
     lowerEdge: v.number(),               // minRange del pool al armar
     upperEdge: v.optional(v.number()),   // maxRange normalizado (entry_upper, si allowReentryFromAbove)
     allowReentryFromAbove: v.optional(v.boolean()),  // 2ª entrada (borde superior) + OCO

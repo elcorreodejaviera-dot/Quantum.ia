@@ -70,16 +70,6 @@ function formatPrice(pair, value) {
   return value.toLocaleString('en-US', { maximumFractionDigits: max });
 }
 
-function aprParts(annual) {
-  return {
-    daily: annual / 365,
-    weekly: annual / 52,
-    monthly: annual / 12,
-    annual,
-  };
-}
-
-
 function Summary({ pools, bots }) {
   const accounts = useQuery(api.hlCredentials.list) ?? [];
   const totalLiquidity = pools.reduce((sum, pool) => sum + pool.liquidity, 0);
@@ -406,10 +396,6 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
   const displayApy = Number.isFinite(uniswapApr) ? uniswapApr
     : Number.isFinite(pool.apy) ? pool.apy
     : 0;
-  const parts = aprParts(displayApy);
-  const apyLabel = uniswapApr != null
-    ? 'APR (Uniswap)'
-    : pool.apyUpdatedAt ? 'APY DeFiLlama' : 'APY estimado';
   const tone = pool.status === 'Fuera de rango' ? 'red' : pool.status === 'Cerca del borde' ? 'amber' : 'green';
   const hasBorrowData = pool.borrowHealth > 0;
   const borrowTone = !hasBorrowData ? 'faint' : pool.borrowHealth < 50 ? 'red' : pool.borrowHealth < 70 ? 'amber' : 'green';
@@ -601,14 +587,6 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
         <CoberturaViva bot={ilBot} arm={ilArm} pool={pool} accountById={accountById} hlBalance={ilHlBal} />
       )}
 
-      <div className="pool-meta">
-        <Metric label="TVL" value={pool.tvl != null ? formatUsdCompact(pool.tvl) : formatUsdCompact(pool.liquidity)} />
-        <Metric label="Vol. 24h" value={pool.volume1d != null ? formatUsdCompact(pool.volume1d) : '—'} />
-        <Metric label="Vol. 7d" value={pool.volume7d != null ? formatUsdCompact(pool.volume7d) : '—'} />
-        <Metric label="Fees 24h" value={formatUsdCompact(pool.fees24h)} />
-        <Metric label={apyLabel} value={`${parts.annual.toFixed(1)}%`} />
-        <Metric label="Funding" value={pool.funding != null ? `${(pool.funding * 100).toFixed(4)}%` : '—'} />
-      </div>
       <div className="pool-info">
         <span><span className="pool-info-label">Chain:</span> {pool.network}</span>
         <span><span className="pool-info-label">DEX:</span> {dexName(pool.defillamaId)}</span>

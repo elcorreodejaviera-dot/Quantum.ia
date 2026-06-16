@@ -71,6 +71,11 @@ export async function assertWithinPlanCoverage(
 ): Promise<void> {
   const user = await ctx.db.get(userId);
   if (!user) throw new Error("[blocked_config] Usuario no encontrado.");
+  // Admin = ACCESO TOTAL, sin tope de cobertura. Espeja la promesa de la UI ("Acceso total (admin)")
+  // y el bypass de admin de assertLiveAdmissible. Necesario porque a un admin NO se le puede asignar
+  // plan (setSubscriptionPlan/loadNonAdminTarget lo rechazan) ni suspender → sin este bypass, todo
+  // admin sin plan quedaría bloqueado por [blocked_config] al armar/ejecutar.
+  if (user.role === "admin") return;
   if (user.suspended === true) throw new Error("[blocked_config] Cuenta suspendida: armado bloqueado.");
   const plan = getPlan(user.subscriptionPlan);
   if (plan === null) throw new Error("[blocked_config] Sin plan de cobertura asignado: armado bloqueado.");

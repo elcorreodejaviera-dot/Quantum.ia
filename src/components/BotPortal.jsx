@@ -3351,28 +3351,37 @@ function PermToggle({ label, granted, busy, onToggle }) {
 function BetaPermissionsPanel() {
   const { results, status, loadMore } = usePaginatedQuery(
     api.users.listUsersWithTradeLive, {}, { initialNumItems: 50 });
+  const plans = useQuery(api.subscriptions.listPlans) ?? [];
   const grantManage = useMutation(api.users.grantManageBots);
   const revokeManage = useMutation(api.users.revokeManageBots);
   const grantTrade = useMutation(api.users.grantTradeLive);
   const revokeTrade = useMutation(api.users.revokeTradeLive);
+  const setPlan = useMutation(api.subscriptions.setSubscriptionPlan);
+  const setSuspended = useMutation(api.subscriptions.setUserSuspended);
   const [msg, setMsg] = React.useState('');
-  // Estado "busy" por {userId, permission} para evitar doble click confuso entre toggles.
+  // Estado "busy" por {userId, acción} para evitar doble click confuso entre toggles.
   const [busy, setBusy] = React.useState({});
   const MUT = {
     canManageBots: { grant: grantManage, revoke: revokeManage },
     canTradeLive: { grant: grantTrade, revoke: revokeTrade },
   };
-  async function toggle(u, permission, granted) {
-    const key = `${u.userId}:${permission}`;
+  async function run(key, fn) {
     setMsg('');
     setBusy((b) => ({ ...b, [key]: true }));
-    try { granted ? await MUT[permission].revoke({ userId: u.userId }) : await MUT[permission].grant({ userId: u.userId }); }
+    try { await fn(); }
     catch (e) { setMsg(e?.message ?? 'Error'); }
     finally { setBusy((b) => ({ ...b, [key]: false })); }
   }
+  const toggle = (u, permission, granted) =>
+    run(`${u.userId}:${permission}`, () =>
+      granted ? MUT[permission].revoke({ userId: u.userId }) : MUT[permission].grant({ userId: u.userId }));
+  const changePlan = (u, value) =>
+    run(`${u.userId}:plan`, () => setPlan({ userId: u.userId, plan: value === '' ? null : value }));
+  const toggleSuspended = (u) =>
+    run(`${u.userId}:suspended`, () => setSuspended({ userId: u.userId, suspended: !u.suspended }));
   return (
     <div className="be-block" style={{ marginTop: 12 }}>
-      <div className="be-head"><span>Permisos por usuario (Manage Bots / Trading real)</span></div>
+      <div className="be-head"><span>Permisos y plan por usuario</span></div>
       {results.map((u) => (
         <div key={u.userId} className="wallet-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '4px 0', flexWrap: 'wrap' }}>
           <span style={{ fontSize: 12 }}>{u.email ?? u.name ?? u.userId.slice(0, 8)}{u.role === 'admin' ? ' (admin)' : ''}</span>
@@ -3384,11 +3393,29 @@ function BetaPermissionsPanel() {
                 onToggle={() => toggle(u, 'canManageBots', u.canManageBots)} />
               <PermToggle label="Trading real" granted={u.canTradeLive} busy={!!busy[`${u.userId}:canTradeLive`]}
                 onToggle={() => toggle(u, 'canTradeLive', u.canTradeLive)} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span className="network" style={{ fontSize: 10 }}>Plan</span>
+                <select className="mini-btn" value={u.subscriptionPlan ?? ''} disabled={!!busy[`${u.userId}:plan`]}
+                  onChange={(e) => changePlan(u, e.target.value)} style={{ fontSize: 10 }}>
+                  <option value="">Sin plan</option>
+                  {plans.map((p) => (
+                    <option key={p.id} value={p.id}>{p.label} (${p.coverageCapUsd.toLocaleString()})</option>
+                  ))}
+                </select>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span className="network" style={{ fontSize: 10 }} title="El bloqueo operativo llega con el enforcement (JAV-77)">Suspensión*</span>
+                <span className={`pill ${u.suspended ? 'red' : 'faint'}`} style={{ fontSize: 10 }}>{u.suspended ? 'SÍ' : 'NO'}</span>
+                <button className="mini-btn" disabled={!!busy[`${u.userId}:suspended`]} onClick={() => toggleSuspended(u)}>
+                  {busy[`${u.userId}:suspended`] ? '…' : (u.suspended ? 'Reactivar' : 'Suspender')}
+                </button>
+              </div>
             </div>
           )}
         </div>
       ))}
       {status === 'CanLoadMore' && <button className="mini-btn" style={{ marginTop: 6 }} onClick={() => loadMore(50)}>Cargar más</button>}
+      <span className="network" style={{ fontSize: 10, display: 'block', marginTop: 4 }}>* Suspensión: pendiente de enforcement (JAV-77) — hoy solo registra el estado.</span>
       {msg && <span style={{ fontSize: 11, color: 'var(--red)' }}>{msg}</span>}
     </div>
   );

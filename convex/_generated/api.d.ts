@@ -27,6 +27,7 @@ import type * as migrations from "../migrations.js";
 import type * as pools from "../pools.js";
 import type * as seed from "../seed.js";
 import type * as spot_positions from "../spot_positions.js";
+import type * as subscriptions from "../subscriptions.js";
 import type * as systemConfig from "../systemConfig.js";
 import type * as tradesHistory from "../tradesHistory.js";
 import type * as triggerArms from "../triggerArms.js";
@@ -61,6 +62,7 @@ declare const fullApi: ApiFromModules<{
   pools: typeof pools;
   seed: typeof seed;
   spot_positions: typeof spot_positions;
+  subscriptions: typeof subscriptions;
   systemConfig: typeof systemConfig;
   tradesHistory: typeof tradesHistory;
   triggerArms: typeof triggerArms;

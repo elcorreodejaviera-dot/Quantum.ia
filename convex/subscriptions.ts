@@ -1,5 +1,8 @@
-import { internalQuery, query } from "./_generated/server";
+import { internalQuery, mutation, query } from "./_generated/server";
+import type { MutationCtx } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 import { v } from "convex/values";
+import { requireAdmin } from "./helpers";
 
 // --- Planes de cobertura (JAV-73) — FUENTE ÚNICA de verdad ---
 //
@@ -94,5 +97,51 @@ export const getSubscriptionForUserInternal = internalQuery({
     const user = await ctx.db.get(userId);
     if (!user) return null;
     return viewFor(user);
+  },
+});
+
+// --- Asignación admin (JAV-75) — manual; Stripe la automatizará en JAV-78 ---
+// Validator de plan: literales del catálogo + null (= quitar plan). Debe reflejar PLAN_IDS.
+const planArg = v.union(
+  v.null(),
+  v.literal("betatester"), v.literal("starter"), v.literal("growth"),
+  v.literal("pro"), v.literal("prime"), v.literal("vault"), v.literal("institutional"),
+);
+
+// (Codex P1) Rechaza modificar a un admin: el admin tiene bypass total (su acceso no depende de un
+// plan ni de un flag de suspensión), así que asignarle plan/suspensión no tiene sentido y podría
+// crear estados confusos. No basta ocultarlo en la UI — se protege en el backend.
+async function loadNonAdminTarget(ctx: MutationCtx, userId: Id<"users">) {
+  const target = await ctx.db.get(userId);
+  if (!target) throw new Error("Usuario no encontrado");
+  if (target.role === "admin") {
+    throw new Error("No se puede modificar la suscripción/suspensión de un admin (acceso total).");
+  }
+  return target;
+}
+
+// Asigna (o quita, con null) el plan de cobertura de un usuario. Admin-only.
+export const setSubscriptionPlan = mutation({
+  args: { userId: v.id("users"), plan: planArg },
+  handler: async (ctx, { userId, plan }) => {
+    await requireAdmin(ctx);
+    await loadNonAdminTarget(ctx, userId);
+    // Defensa extra: si viene un plan no-null, debe existir en el catálogo (getPlan).
+    if (plan !== null && getPlan(plan) === null) {
+      throw new Error(`Plan inválido: ${plan}`);
+    }
+    await ctx.db.patch(userId, { subscriptionPlan: plan === null ? undefined : plan });
+  },
+});
+
+// Suspende o reactiva a un usuario. Admin-only.
+// NOTA: en JAV-75 esto SOLO guarda el flag; el efecto operativo (bloquear armado / detener bots)
+// llega con el enforcement de JAV-77. La UI lo etiqueta "pendiente de enforcement" para no engañar.
+export const setUserSuspended = mutation({
+  args: { userId: v.id("users"), suspended: v.boolean() },
+  handler: async (ctx, { userId, suspended }) => {
+    await requireAdmin(ctx);
+    await loadNonAdminTarget(ctx, userId);
+    await ctx.db.patch(userId, { suspended });
   },
 });

@@ -1,4 +1,5 @@
 import { internalMutation, internalQuery, query } from "./_generated/server";
+import { internal } from "./_generated/api";
 import { v } from "convex/values";
 import type { MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
@@ -105,8 +106,17 @@ export async function requestDisarmAndDeactivateImpl(ctx: MutationCtx, botId: Id
   }
   // (Codex) NO reiniciar el contador: setear disarmRequestedAt solo en la PRIMERA solicitud
   // (disarmPending pasa de no-true a true). Una llamada repetida mientras ya se está pausando lo conserva.
-  const anchor = bot.disarmPending === true ? {} : { disarmRequestedAt: Date.now() };
+  const firstTransition = bot.disarmPending !== true;
+  const anchor = firstTransition ? { disarmRequestedAt: Date.now() } : {};
   await ctx.db.patch(botId, { disarmPending: true, ...anchor, ...clearRearm });
+  // (JAV-70) Kick inmediato: reconciliar YA en vez de esperar el tick del cron (hasta ~60s). Mismo patrón
+  // que el armado (processRearms). SOLO en la primera transición a disarmPending → no encola reconciles
+  // redundantes ante clicks repetidos; el cron de 1 min queda como red de seguridad si esta corrida muere.
+  // reconcileStaleArms es lease/CAS-protegido (claimArmReconcile) → una corrida extra no duplica
+  // cancelaciones/cierres. runAfter(0) corre DESPUÉS del commit → ve disarmPending=true/desiredState=disarmed.
+  if (firstTransition) {
+    await ctx.scheduler.runAfter(0, internal.triggerEngine.reconcileStaleArms, {});
+  }
   return { deactivated: false };
 }
 

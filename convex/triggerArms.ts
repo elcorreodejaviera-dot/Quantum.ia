@@ -162,7 +162,10 @@ export const reserveArm = internalMutation({
     // el armado MANUAL no lo pasa.
     rearmToken: v.optional(v.string()),
   },
-  handler: async (ctx, args) => {
+  // Promise<any>: corta el ciclo de inferencia TS2589 (el handler llama a coverageUsage, que recorre
+  // el grafo de tipos del DataModel/api; sin anotar, su retorno inferido desborda el presupuesto y
+  // revienta en cascada por todo el backend). El cuerpo se sigue type-checkeando.
+  handler: async (ctx, args): Promise<any> => {
     // throws con prefijo [kind] (auto-rearm): el cron los mapea a la política de Codex. Config inválida
     // → [blocked_config]; falta de margen/volumen → [blocked_margin]; colisión de generación → [transient].
     if (args.network !== "testnet" && args.network !== "mainnet") throw new Error("[blocked_config] network inválida.");
@@ -303,7 +306,8 @@ export const reserveArm = internalMutation({
 // --- CAS pre-envío (N1/N5): arming → submitting, fija submittedAt, valida intención y gates ---
 export const markArmSubmitting = internalMutation({
   args: { armId: v.id("trigger_arms") },
-  handler: async (ctx, { armId }) => {
+  // Promise<any>: corta el ciclo TS2589 (llama a coverageAdmissible). El cuerpo se sigue chequeando.
+  handler: async (ctx, { armId }): Promise<any> => {
     const arm = await ctx.db.get(armId);
     if (!arm) return { ok: false as const, reason: "not_found" as const };
     if (arm.status !== "arming") return { ok: false as const, reason: "state" as const };
@@ -345,7 +349,8 @@ export const markArmSubmitting = internalMutation({
 // antes del envío, y renueva el lease para cubrir el RPC. Si falla → NO enviar.
 export const gateArmBeforeOrder = internalMutation({
   args: { armId: v.id("trigger_arms"), token: v.string() },
-  handler: async (ctx, { armId, token }) => {
+  // Promise<any>: corta el ciclo TS2589 (llama a coverageAdmissible). El cuerpo se sigue chequeando.
+  handler: async (ctx, { armId, token }): Promise<any> => {
     const arm = await ctx.db.get(armId);
     if (!arm) return { ok: false as const };
     if (arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };

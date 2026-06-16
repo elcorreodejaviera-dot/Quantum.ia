@@ -133,7 +133,10 @@ export const reserveExecution = internalMutation({
     entryCloid: v.string(),
     slCloid: v.string(),
   },
-  handler: async (ctx, args) => {
+  // Promise<any>: corta el ciclo de inferencia TS2589 (el handler llama a coverageUsage, que recorre
+  // el grafo de tipos del DataModel; sin anotar, el retorno inferido desborda el presupuesto y revienta
+  // en cascada por todo el backend). El cuerpo se sigue type-checkeando.
+  handler: async (ctx, args): Promise<any> => {
     if (!Number.isFinite(args.notional) || args.notional <= 0) {
       throw new Error("notional debe ser un número finito > 0");
     }
@@ -280,7 +283,8 @@ export const prepareSlRetry = internalMutation({
 // Marca `submitting` con timestamp de lease, justo antes de enviar la entrada a HL.
 export const markSubmitting = internalMutation({
   args: { requestId: v.id("execution_requests") },
-  handler: async (ctx, { requestId }) => {
+  // Promise<any>: corta el ciclo TS2589 (llama a coverageAdmissible). El cuerpo se sigue chequeando.
+  handler: async (ctx, { requestId }): Promise<any> => {
     const req = await ctx.db.get(requestId);
     if (!req) return { ok: false as const, reason: "not_found" as const };
     // CAS: solo desde `pending`. Si otro proceso (cron) ya avanzó/cerró la solicitud, NO re-enviar
@@ -429,7 +433,8 @@ export const markSlSubmitted = internalMutation({
 //    cerrar failed por CAS en la MISMA mutation (no compite con el reconciliador).
 export const gateBeforeOrder = internalMutation({
   args: { requestId: v.id("execution_requests") },
-  handler: async (ctx, { requestId }) => {
+  // Promise<any>: corta el ciclo TS2589 (llama a coverageAdmissible). El cuerpo se sigue chequeando.
+  handler: async (ctx, { requestId }): Promise<any> => {
     const req = await ctx.db.get(requestId);
     if (!req || req.status !== "submitting") return { ok: false as const, reason: "state" as const };
     if (Date.now() - req.updatedAt >= LEASE_MS) return { ok: false as const, reason: "expired" as const };

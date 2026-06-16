@@ -6,44 +6,19 @@ import { requireAdmin } from "./helpers";
 
 // --- Planes de cobertura (JAV-73) — FUENTE ÚNICA de verdad ---
 //
-// El tope de cobertura (coverageCapUsd) limita el nocional TOTAL de cobertura del usuario: la suma
-// de `totalNotional` (= liquidez_pool × (1 + bufferPct/100)) de todos sus bots activos. El enforcement
-// (JAV-77) bloquea armar un bot que haga superar este tope. La UI (JAV-76) lee este mismo catálogo, no
-// uno hardcodeado. `priceUsd` queda registrado para el cobro vía Stripe (JAV-78); Betatester es gratis.
+// El tope de cobertura (coverageCapUsd) limita la COBERTURA DE POOLS del usuario (Modelo B): la suma
+// de `hedgeNotionalUsd` (= liquidez_pool cruda, SIN buffer) de los pools DISTINTOS que cubre con bots
+// activos. NO acota el nocional con buffer (`totalNotional` puede llegar a ~2× la liquidez del pool con
+// buffer 100%). El enforcement (JAV-77, `coverageUsage.ts`) bloquea armar/ejecutar si la cobertura de
+// pools supera este tope. La UI (JAV-76) lee este mismo catálogo, no uno hardcodeado. `priceUsd` queda
+// registrado para el cobro vía Stripe (JAV-78); Betatester es gratis.
 
-// Identificadores de plan reutilizables (schema, queries y enforcement comparten estos literales).
-// El union de `users.subscriptionPlan` en schema.ts DEBE reflejar esta misma lista.
-export const PLAN_IDS = [
-  "betatester", "starter", "growth", "pro", "prime", "vault", "institutional",
-] as const;
-export type PlanId = (typeof PLAN_IDS)[number];
-
-export type Plan = { id: PlanId; label: string; coverageCapUsd: number; priceUsd: number };
-
-// Orden ascendente por tope (lo respeta la UI para mostrar la escalera de planes).
-// NOTA: priceUsd es PLACEHOLDER (0 = precio aún sin definir, no "gratis") salvo Betatester, que SÍ es
-// gratis por diseño. Definir los precios reales antes de mostrarlos en UI (JAV-76) / cobrar (JAV-78).
-export const PLANS: readonly Plan[] = [
-  { id: "betatester",    label: "Betatester",    coverageCapUsd: 5_000,     priceUsd: 0 },
-  { id: "starter",       label: "Starter",       coverageCapUsd: 10_000,    priceUsd: 0 },
-  { id: "growth",        label: "Growth",        coverageCapUsd: 20_000,    priceUsd: 0 },
-  { id: "pro",           label: "Pro",           coverageCapUsd: 50_000,    priceUsd: 0 },
-  { id: "prime",         label: "Prime",         coverageCapUsd: 100_000,   priceUsd: 0 },
-  { id: "vault",         label: "Vault",         coverageCapUsd: 500_000,   priceUsd: 0 },
-  { id: "institutional", label: "Institutional", coverageCapUsd: 1_000_000, priceUsd: 0 },
-] as const;
-
-const PLAN_BY_ID: Record<PlanId, Plan> = Object.fromEntries(
-  PLANS.map((p) => [p.id, p]),
-) as Record<PlanId, Plan>;
-
-// Devuelve el plan por id, o null si no es un plan válido (incluye undefined = sin plan).
-// hasOwnProperty (no `in`) para no aceptar claves del prototipo ("toString", "constructor"…).
-// Object.hasOwn requeriría lib es2022; el tsconfig de Convex es anterior, así que usamos .call.
-export function getPlan(id: string | undefined): Plan | null {
-  return id !== undefined && Object.prototype.hasOwnProperty.call(PLAN_BY_ID, id)
-    ? PLAN_BY_ID[id as PlanId] : null;
-}
+// El catálogo de planes (PLAN_IDS/PLANS/getPlan) vive en el módulo HOJA `plans.ts` (sin funciones
+// Convex) para que el enforcement lo importe sin arrastrar el grafo `api` (TS2589). Se importa para uso
+// interno y se re-exporta para no romper importadores existentes.
+import { PLAN_IDS, PLANS, getPlan, type PlanId, type Plan } from "./plans";
+export { PLAN_IDS, PLANS, getPlan };
+export type { PlanId, Plan };
 
 // Vista normalizada de la suscripción de un usuario para la UI / el enforcement.
 // IMPORTANTE (Codex P2): "usuario autenticado SIN plan" NO es null — es { plan: null, cap: 0 }.

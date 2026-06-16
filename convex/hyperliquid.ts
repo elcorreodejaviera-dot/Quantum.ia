@@ -375,7 +375,11 @@ export const executePerpMarketOrder = action({
     expectedNetwork: v.string(),
     confirmLive: v.boolean(),
   },
-  handler: async (ctx, args) => {
+  // Promise<any>: corta el ciclo de inferencia TS2589. Esta action encadena varias llamadas
+  // ctx.runAction/runMutation(internal.*) (incl. poolScanner.fetchPositionNotionalStrict de JAV-77);
+  // sin anotar, el tipo de retorno inferido desborda el límite de profundidad y revienta en cascada
+  // por todo el backend. El cuerpo se sigue type-checkeando (caza referencias indefinidas).
+  handler: async (ctx, args): Promise<any> => {
     const user = await ctx.runQuery(internal.users.getCurrentUserInternal, {});
     const [tradingConfig, simConfig] = await Promise.all([
       ctx.runQuery(internal.systemConfig.getConfigInternal, { key: "tradingEnabled" }),
@@ -589,7 +593,8 @@ export const executePerpMarketOrder = action({
 // Reconciliación por cloid (recuperación). Claim exclusivo (anti-carrera) + idempotente.
 export const reconcileExecution = internalAction({
   args: { requestId: v.id("execution_requests") },
-  handler: async (ctx, { requestId }) => {
+  // Promise<any>: corta el ciclo de inferencia TS2589 (encadena ctx.runAction/runMutation internos).
+  handler: async (ctx, { requestId }): Promise<any> => {
     // Claim exclusivo: serializa reconciliaciones; respeta el lease de la action que envía y los finales.
     const claim = await ctx.runMutation(internal.executions.claimReconcile, { requestId });
     if (!claim.claimed) return { skipped: claim.reason };

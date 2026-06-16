@@ -1,6 +1,13 @@
-import type { MutationCtx } from "./_generated/server";
+import type { DatabaseReader } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
-import { getPlan } from "./subscriptions";
+import { getPlan } from "./plans";
+
+// (JAV-77 fix TS2589) Estos helpers SOLO LEEN (ctx.db.get/query). Tipamos el ctx con el tipo ligero
+// `{ db: DatabaseReader }` en vez de `MutationCtx`: este último arrastra runQuery/runMutation/scheduler
+// tipados contra todo el grafo generado `api`, y reinstanciarlo en cada call-site (6 handlers de
+// triggerArms/executions) reventaba el presupuesto de inferencia → cascada "type instantiation
+// excessively deep" en todo el backend. Un MutationCtx encaja estructuralmente con `{ db: ... }`.
+type ReadCtx = { db: DatabaseReader };
 
 // (JAV-77) Hard-cap por plan de cobertura — Modelo B: el tope del plan (coverageCapUsd) acota la
 // COBERTURA DE POOLS = Σ liquidez de pool (sin buffer) de los pools con compromiso vivo, dedupe por
@@ -17,7 +24,7 @@ const EXEC_TERMINAL = new Set(["closed", "failed"]);
 // hedgeNotionalUsd/poolId fiables: SIN estimaciones en money-path → bloquea toda nueva reserva del
 // usuario hasta backfill/drain (plan §6).
 export async function consumedCoverageByPool(
-  ctx: MutationCtx, userId: Id<"users">,
+  ctx: ReadCtx, userId: Id<"users">,
 ): Promise<Map<string, number>> {
   const map = new Map<string, number>();
 
@@ -60,7 +67,7 @@ export async function consumedCoverageByPool(
 // ya está viva y contada → max(existente, hedge) es idempotente, no doble cuenta). Pasar el poolId +
 // hedgeNotionalUsd del compromiso. Throws [blocked_config]/[blocked_margin] (prefijos para triggerRearm).
 export async function assertWithinPlanCoverage(
-  ctx: MutationCtx, userId: Id<"users">, poolId: Id<"pools">, hedge: number,
+  ctx: ReadCtx, userId: Id<"users">, poolId: Id<"pools">, hedge: number,
 ): Promise<void> {
   const user = await ctx.db.get(userId);
   if (!user) throw new Error("[blocked_config] Usuario no encontrado.");
@@ -86,7 +93,7 @@ export async function assertWithinPlanCoverage(
 // gateArmBeforeOrder): cualquier excepción (cap, sin plan, suspendido, fila no cuantificable) → false
 // = bloquear/terminalizar. Mantiene fail-closed sin propagar el throw fuera del gate.
 export async function coverageAdmissible(
-  ctx: MutationCtx, userId: Id<"users">, poolId: Id<"pools"> | undefined, hedge: number | undefined,
+  ctx: ReadCtx, userId: Id<"users">, poolId: Id<"pools"> | undefined, hedge: number | undefined,
 ): Promise<boolean> {
   if (!poolId || hedge === undefined) return false;   // fila in-flight sin datos fiables → fail-closed
   try {

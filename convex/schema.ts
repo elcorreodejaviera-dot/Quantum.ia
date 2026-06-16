@@ -13,7 +13,7 @@ export default defineSchema({
   // Permisos dinámicos por usuario — cada fila es un permiso individual.
   // Permite añadir, revocar o expirar permisos sin tocar el registro de usuario.
   // Keys válidas: canViewPools, canViewBots, canViewWallets, canViewPositions,
-  //               canManageBots, subscriptionBasic, subscriptionPro
+  //               canManageBots, canTradeLive, subscriptionBasic, subscriptionPro
   user_permissions: defineTable({
     userId: v.id("users"),
     permission: v.string(),

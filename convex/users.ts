@@ -1,4 +1,6 @@
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
+import type { MutationCtx } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 import { v } from "convex/values";
 import { paginationOptsValidator } from "convex/server";
 import { requireAdmin, requireAuth, requireUser, requireTradeLive, hasPermission } from "./helpers";
@@ -157,43 +159,89 @@ export const hasTradeLiveForUserInternal = internalQuery({
   },
 });
 
-// Concede canTradeLive consolidando en UNA fila canónica granted:true (resto a false).
+// JAV-72 (P0): gate de gestión de bots por id de usuario, para revalidar canManageBots en el
+// armado manual (armPoolBotEntry) sin depender de la identidad. NO se usa en el auto-rearm del cron
+// (armBotInternal): el auto-rearm es la mecánica central que todos usan y no debe bloquearse al revocar.
+export const hasManageBotsForUserInternal = internalQuery({
+  args: { userId: v.id("users") },
+  handler: async (ctx, { userId }) => {
+    const user = await ctx.db.get(userId);
+    if (!user) return false;
+    return await hasPermission(ctx, user, "canManageBots");
+  },
+});
+
+// --- Conceder/revocar permisos por usuario — admin-only (JAV-72) ---
+
+// Permisos que el admin puede otorgar/revocar desde el portal. Whitelist explícita: evita que un
+// caller futuro conceda strings arbitrarios sobre la tabla genérica user_permissions.
+const ADMIN_GRANTABLE = ["canTradeLive", "canManageBots"] as const;
+type GrantablePermission = (typeof ADMIN_GRANTABLE)[number];
+
+// Concede un permiso consolidando en UNA fila canónica granted:true (resto a false). Admin-only.
+async function grantPermission(
+  ctx: MutationCtx, userId: Id<"users">, permission: GrantablePermission,
+) {
+  const admin = await requireAdmin(ctx);
+  const rows = await ctx.db
+    .query("user_permissions")
+    .withIndex("by_user_permission", (q) =>
+      q.eq("userId", userId).eq("permission", permission))
+    .collect();
+  const now = Date.now();
+  if (rows.length === 0) {
+    await ctx.db.insert("user_permissions", {
+      userId, permission, granted: true, grantedAt: now, grantedBy: admin._id,
+    });
+  } else {
+    await ctx.db.patch(rows[0]._id, { granted: true, grantedAt: now, grantedBy: admin._id, expiresAt: undefined });
+    for (const r of rows.slice(1)) if (r.granted) await ctx.db.patch(r._id, { granted: false });
+  }
+}
+
+// Revoca un permiso en TODAS las filas del usuario (el esquema permite duplicados). Admin-only.
+async function revokePermission(
+  ctx: MutationCtx, userId: Id<"users">, permission: GrantablePermission,
+) {
+  await requireAdmin(ctx);
+  const rows = await ctx.db
+    .query("user_permissions")
+    .withIndex("by_user_permission", (q) =>
+      q.eq("userId", userId).eq("permission", permission))
+    .collect();
+  for (const r of rows) if (r.granted) await ctx.db.patch(r._id, { granted: false });
+}
+
+// ¿permission vigente para u? (admin → siempre true). Helper de listUsersWithTradeLive.
+function isPermissionLive(
+  u: { role: string }, rows: { granted: boolean; expiresAt?: number }[], now: number,
+): boolean {
+  return u.role === "admin"
+    || rows.some((r) => r.granted && (r.expiresAt === undefined || r.expiresAt > now));
+}
+
 export const grantTradeLive = mutation({
   args: { userId: v.id("users") },
-  handler: async (ctx, { userId }) => {
-    const admin = await requireAdmin(ctx);
-    const rows = await ctx.db
-      .query("user_permissions")
-      .withIndex("by_user_permission", (q) =>
-        q.eq("userId", userId).eq("permission", "canTradeLive"))
-      .collect();
-    const now = Date.now();
-    if (rows.length === 0) {
-      await ctx.db.insert("user_permissions", {
-        userId, permission: "canTradeLive", granted: true, grantedAt: now, grantedBy: admin._id,
-      });
-    } else {
-      await ctx.db.patch(rows[0]._id, { granted: true, grantedAt: now, grantedBy: admin._id, expiresAt: undefined });
-      for (const r of rows.slice(1)) if (r.granted) await ctx.db.patch(r._id, { granted: false });
-    }
-  },
+  handler: async (ctx, { userId }) => { await grantPermission(ctx, userId, "canTradeLive"); },
 });
 
-// Revoca canTradeLive en TODAS las filas del usuario (el esquema permite duplicados).
 export const revokeTradeLive = mutation({
   args: { userId: v.id("users") },
-  handler: async (ctx, { userId }) => {
-    await requireAdmin(ctx);
-    const rows = await ctx.db
-      .query("user_permissions")
-      .withIndex("by_user_permission", (q) =>
-        q.eq("userId", userId).eq("permission", "canTradeLive"))
-      .collect();
-    for (const r of rows) if (r.granted) await ctx.db.patch(r._id, { granted: false });
-  },
+  handler: async (ctx, { userId }) => { await revokePermission(ctx, userId, "canTradeLive"); },
 });
 
-// Lista usuarios + estado canTradeLive para el panel admin (paginado).
+export const grantManageBots = mutation({
+  args: { userId: v.id("users") },
+  handler: async (ctx, { userId }) => { await grantPermission(ctx, userId, "canManageBots"); },
+});
+
+export const revokeManageBots = mutation({
+  args: { userId: v.id("users") },
+  handler: async (ctx, { userId }) => { await revokePermission(ctx, userId, "canManageBots"); },
+});
+
+// Lista usuarios + estado canTradeLive y canManageBots para el panel admin (paginado).
+// (JAV-72: se conserva el nombre/export y se AMPLÍA el payload para no romper callers.)
 export const listUsersWithTradeLive = query({
   args: { paginationOpts: paginationOptsValidator },
   handler: async (ctx, { paginationOpts }) => {
@@ -202,14 +250,13 @@ export const listUsersWithTradeLive = query({
     const now = Date.now();
     const page = [];
     for (const u of result.page) {
-      const rows = await ctx.db
+      const perms = await ctx.db
         .query("user_permissions")
-        .withIndex("by_user_permission", (q) =>
-          q.eq("userId", u._id).eq("permission", "canTradeLive"))
+        .withIndex("by_user", (q) => q.eq("userId", u._id))
         .collect();
-      const canTradeLive = u.role === "admin"
-        || rows.some((r) => r.granted && (r.expiresAt === undefined || r.expiresAt > now));
-      page.push({ userId: u._id, email: u.email ?? null, name: u.name ?? null, role: u.role, canTradeLive });
+      const canTradeLive = isPermissionLive(u, perms.filter((p) => p.permission === "canTradeLive"), now);
+      const canManageBots = isPermissionLive(u, perms.filter((p) => p.permission === "canManageBots"), now);
+      page.push({ userId: u._id, email: u.email ?? null, name: u.name ?? null, role: u.role, canTradeLive, canManageBots });
     }
     return { ...result, page };
   },

@@ -18,15 +18,6 @@ const POOLS = [
   { id: 6, pair: 'ETH/USDC', network: 'Optimism', min: 3860, max: 4240, liquidity: 24560, fees24h: 22, apr: 24.9, exposure: 0.88, status: 'Fuera de rango' },
 ];
 
-const SUBSCRIPTIONS = [
-  { type: 'Starter', coverage: 10000 },
-  { type: 'Growth', coverage: 20000 },
-  { type: 'Pro', coverage: 50000 },
-  { type: 'Prime', coverage: 100000 },
-  { type: 'Vault', coverage: 500000 },
-  { type: 'Institutional', coverage: 1000000 },
-];
-
 const ALERT_COOLDOWN_MS = 60 * 60 * 1000;
 
 const ALERT_TYPE_LABELS = {
@@ -672,32 +663,93 @@ function Metric({ label, value, title }) {
   );
 }
 
-function SubscriptionBar({ pools = [] }) {
-  const current = SUBSCRIPTIONS[2]; // Pro $50,000
+// (JAV-76) Barra de suscripción REAL: lee el plan del usuario vía getMySubscription (no hardcodeado).
+// Semántica (decisión del usuario): el cap del plan (coverageCapUsd) mide la COBERTURA DE POOLS
+// (Σ liquidez de pools con bot activo), NO el nocional de los bots. El nocional con buffer (hasta 2×)
+// se muestra como métrica informativa aparte. La reconciliación del ENFORCEMENT con el comentario del
+// backend (subscriptions.ts) se trata en JAV-77; aquí es solo display, no bloquea nada.
+function SubscriptionBar({ pools = [], bots = [], loading = false }) {
+  const sub = useQuery(api.subscriptions.getMySubscription);
   const [mobileOpen, setMobileOpen] = React.useState(false);
-  // Cobertura usada = liquidez real monitoreada en los pools del usuario.
-  const used = pools.reduce((sum, p) => sum + (p.liquidity ?? 0), 0);
-  const pct = current.coverage > 0 ? Math.min(100, (used / current.coverage) * 100) : 0;
+
+  // Liquidez por pool (id = pool._id, expuesto como `id` en el array normalizado del padre).
+  const liquidityByPool = React.useMemo(() => {
+    const m = new Map();
+    for (const p of pools) m.set(p.id, p.liquidity ?? 0);
+    return m;
+  }, [pools]);
+
+  // Cobertura de POOLS usada (la métrica acotada por el plan): liquidez de cada pool con ≥1 bot
+  // activo, contada UNA sola vez (set de poolId) para no duplicar con il + trading sobre el mismo pool.
+  const poolCoverage = React.useMemo(() => {
+    const covered = new Set();
+    for (const b of bots) if (b.active === true) covered.add(b.poolId);
+    let sum = 0;
+    for (const poolId of covered) sum += liquidityByPool.get(poolId) ?? 0;
+    return sum;
+  }, [bots, liquidityByPool]);
+
+  // Nocional en BOTS (informativo, el "doble"): Σ liquidez × (1 + buffer/100) de bots activos.
+  // buffer normalizado robustamente (un solo NaN/Infinity contaminaría el total).
+  const botNotional = React.useMemo(() => {
+    let sum = 0;
+    for (const b of bots) {
+      if (b.active !== true) continue;
+      const n = Number(b.bufferPct);
+      const buffer = Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 0;
+      sum += (liquidityByPool.get(b.poolId) ?? 0) * (1 + buffer / 100);
+    }
+    return sum;
+  }, [bots, liquidityByPool]);
+
+  // Placeholder neutro mientras no tengamos sub + bots + pools: NUNCA mostrar uso 0 engañoso.
+  if (loading || sub === undefined) {
+    return (
+      <div className="sub-bar-inline">
+        <span className="sub-plan-badge" style={{ opacity: 0.6 }}>Cargando…</span>
+      </div>
+    );
+  }
+  // No autenticado / usuario inexistente: el portal no debería verse, render mínimo.
+  if (sub === null) return null;
+
+  const suspended = sub.suspended === true;
+  const hasPlan = sub.plan !== null && !suspended;
+  const cap = hasPlan ? sub.coverageCapUsd : 0;
+  const pct = cap > 0 ? Math.min(100, (poolCoverage / cap) * 100) : 0;
   const pctStr = `${pct.toFixed(pct < 10 ? 1 : 0)}%`;
+
+  // Badge: "{plan} Online" / "Suspendido" / "Sin plan".
+  const noPlan = !suspended && sub.plan === null;
+  const badgeLabel = suspended ? 'Suspendido' : (sub.plan !== null ? `${sub.label} Online` : 'Sin plan');
+  const badgeTitle = noPlan ? 'Pídele al admin que te asigne un plan' : undefined;
 
   return (
     <div className={`sub-bar-inline${mobileOpen ? ' sub-mobile-open' : ''}`}>
-      <button className="sub-plan-badge" onClick={() => setMobileOpen(v => !v)}>
-        {current.type} Online <span className="sub-badge-chevron">{mobileOpen ? '▲' : '▼'}</span>
+      <button className="sub-plan-badge" title={badgeTitle} onClick={() => setMobileOpen(v => !v)}>
+        {badgeLabel} <span className="sub-badge-chevron">{mobileOpen ? '▲' : '▼'}</span>
       </button>
-      <div className="sub-stat">
-        <span className="sub-stat-label">Cobertura: {formatUsdCompact(used)} / {formatUsdCompact(current.coverage)}</span>
-        <div className="sub-progress-track">
-          <div className="sub-progress-fill active" style={{ width: pctStr }} />
+      {suspended ? (
+        <div className="sub-stat">
+          <span className="sub-stat-label">Cuenta suspendida — sin cobertura disponible</span>
+          <div className="sub-progress-track">
+            <div className="sub-progress-fill" style={{ width: '0%' }} />
+          </div>
         </div>
-      </div>
-      <div className="sub-stat">
-        <span className="sub-stat-label">Cobertura de pools: {formatUsdCompact(used)} / {formatUsdCompact(current.coverage)}</span>
-        <div className="sub-progress-track">
-          <div className="sub-progress-fill" style={{ width: pctStr }} />
-        </div>
-      </div>
-      <button className="sub-upgrade-btn">Upgrade</button>
+      ) : (
+        <>
+          <div className="sub-stat">
+            <span className="sub-stat-label">Cobertura de pools: {formatUsdCompact(poolCoverage)} / {hasPlan ? formatUsdCompact(cap) : '—'}</span>
+            <div className="sub-progress-track">
+              <div className="sub-progress-fill active" style={{ width: pctStr }} />
+            </div>
+          </div>
+          <div className="sub-stat">
+            <span className="sub-stat-label">Nocional en bots: {formatUsdCompact(botNotional)}</span>
+          </div>
+        </>
+      )}
+      <button className="sub-upgrade-btn" disabled>Upgrade</button>
     </div>
   );
 }
@@ -3924,7 +3976,7 @@ function Dashboard({ user, onLogout, userId }) {
           <span className="status-dot"></span>
           <div className="brand">Quantum<em>.ia</em></div>
           <span className="pill">Liquidity Hedge</span>
-          <SubscriptionBar pools={pools} />
+          <SubscriptionBar pools={pools} bots={bots} loading={botsFromDb === undefined || poolsFromDb === undefined} />
         </div>
         <div className="top-actions">
           <button className="ghost-btn" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>

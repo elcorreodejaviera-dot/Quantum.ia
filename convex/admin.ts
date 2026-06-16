@@ -153,7 +153,7 @@ export const listActivity = query({
   args: { limit: v.optional(v.number()) },
   handler: async (ctx, { limit }): Promise<any> => {
     await requireAdmin(ctx);
-    const cap = Math.min(limit ?? 50, 100);
+    const cap = Math.max(1, Math.min(limit ?? 50, 100));   // clamp inferior: limit negativo → take() válido
     type Ev = { at: number; type: string; userId: Id<"users"> | null; text: string; meta: any };
     const events: Ev[] = [];
 

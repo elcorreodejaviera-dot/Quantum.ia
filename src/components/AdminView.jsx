@@ -56,7 +56,9 @@ function UserRow({ u }) {
     : <span className="av-st block">◌ sin plan</span>;
   return (
     <div className={`av-urow${open ? ' open' : ''}`}>
-      <div className="av-main" onClick={() => setOpen((v) => !v)}>
+      <div className="av-main" role="button" tabIndex={0} aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen((v) => !v); } }}>
         <div className="av-uname"><span className="av-chev">▶</span>{u.email ?? u.name ?? u.userId.slice(0, 8)}</div>
         <div className="av-plan">{u.role === 'admin' ? 'Admin · ∞' : u.plan ? `${u.plan.label} · ${usd(u.plan.cap)}` : 'Sin plan'}</div>
         <div className="av-cov">
@@ -80,13 +82,16 @@ function UserRow({ u }) {
 
 export default function AdminView() {
   const me = useQuery(api.users.getUser, {});
-  const stats = useQuery(api.admin.getSystemStats, {});
-  const activity = useQuery(api.admin.listActivity, { limit: 40 });
-  const users = usePaginatedQuery(api.admin.listUsersOverview, {}, { initialNumItems: 25 });
+  // (CodeRabbit) Gatear las queries admin con 'skip' hasta confirmar rol admin: un no-admin NO debe
+  // disparar consultas admin (que el servidor rechazaría con Forbidden) antes del redirect.
+  const isAdmin = me?.role === 'admin';
+  const stats = useQuery(api.admin.getSystemStats, isAdmin ? {} : 'skip');
+  const activity = useQuery(api.admin.listActivity, isAdmin ? { limit: 40 } : 'skip');
+  const users = usePaginatedQuery(api.admin.listUsersOverview, isAdmin ? {} : 'skip', { initialNumItems: 25 });
   const [bugFilter, setBugFilter] = React.useState('');
   const bugs = usePaginatedQuery(api.bugReports.listBugReports,
-    bugFilter ? { status: bugFilter } : {}, { initialNumItems: 20 });
-  const bugCounts = useQuery(api.bugReports.countBugReportsByStatus, {});
+    isAdmin ? (bugFilter ? { status: bugFilter } : {}) : 'skip', { initialNumItems: 20 });
+  const bugCounts = useQuery(api.bugReports.countBugReportsByStatus, isAdmin ? {} : 'skip');
   const setBugStatus = useMutation(api.bugReports.setBugStatus);
 
   const simConfig = useQuery(api.systemConfig.getConfig, { key: 'simulationMode' });

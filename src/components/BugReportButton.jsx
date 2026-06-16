@@ -22,8 +22,9 @@ export default function BugReportButton() {
 
   function pick(e) {
     const fs = Array.from(e.target.files || []).slice(0, 4);
-    const bad = fs.find((f) => f.size > MAX_BYTES);
-    if (bad) { setErr('Cada archivo debe pesar ≤ 8 MB.'); return; }
+    const allowed = new Set(ACCEPT.split(','));
+    if (fs.some((f) => !allowed.has(f.type))) { setErr('Solo se permiten JPG, PNG o PDF.'); return; }
+    if (fs.some((f) => f.size > MAX_BYTES)) { setErr('Cada archivo debe pesar ≤ 8 MB.'); return; }
     setErr(''); setFiles(fs);
   }
 

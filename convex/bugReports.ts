@@ -72,13 +72,15 @@ export const reportBug = mutation({
     const now = Date.now();
     const validated: typeof ids = [];
     for (const storageId of ids) {
-      const up = await ctx.db
+      // collect() (no .first()): si hubiera filas duplicadas para el mismo storageId (reintentos de
+      // registro), elegir una VÁLIDA en vez de descartar por azar la primera.
+      const candidates = await ctx.db
         .query("bug_uploads")
         .withIndex("by_storage", (q) => q.eq("storageId", storageId))
-        .first();
-      if (!up || up.userId !== user._id) continue;        // ajeno o inexistente → ignorar
-      if (up.consumedAt !== undefined) continue;           // ya usado
-      if (now - up.createdAt > UPLOAD_TTL_MS) continue;     // expirado
+        .collect();
+      const up = candidates.find((c) =>
+        c.userId === user._id && c.consumedAt === undefined && (now - c.createdAt) <= UPLOAD_TTL_MS);
+      if (!up) continue;   // ajeno, inexistente, ya consumido o expirado → ignorar
       await ctx.db.patch(up._id, { consumedAt: now });
       validated.push(storageId);
     }
@@ -134,7 +136,7 @@ export const countBugReportsByStatus = query({
       const rows = await ctx.db
         .query("bug_reports")
         .withIndex("by_status_created", (q) => q.eq("status", status))
-        .take(500);
+        .collect();   // conteo exacto (no truncar a 500); beta-scale, optimizar si crece
       counts[status] = rows.length;
     }
     return counts;

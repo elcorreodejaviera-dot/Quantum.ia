@@ -8,6 +8,15 @@ export default defineSchema({
     email: v.optional(v.string()),
     role: v.union(v.literal("admin"), v.literal("viewer")),
     walletAddress: v.optional(v.string()),
+    // JAV-73 (planes de cobertura). Plan de suscripción del usuario: define el tope de cobertura
+    // total (catálogo único en convex/subscriptions.ts). Ausente/undefined = sin plan (cap 0: no puede
+    // armar bots reales). Los literales DEBEN coincidir con PLAN_IDS de convex/subscriptions.ts.
+    subscriptionPlan: v.optional(v.union(
+      v.literal("betatester"), v.literal("starter"), v.literal("growth"),
+      v.literal("pro"), v.literal("prime"), v.literal("vault"), v.literal("institutional"))),
+    // El admin puede suspender a un usuario (lo detiene aunque tenga plan). El enforcement (JAV-77)
+    // bloquea el armado si suspended === true.
+    suspended: v.optional(v.boolean()),
   }).index("by_clerk_id", ["clerkId"]),
 
   // Permisos dinámicos por usuario — cada fila es un permiso individual.

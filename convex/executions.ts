@@ -2,13 +2,12 @@ import { internalMutation, internalQuery, query } from "./_generated/server";
 import { v } from "convex/values";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
-import { getLimit } from "./executionLimits";
 import { hasPermission, requireAdmin } from "./helpers";
+import { assertWithinPlanCoverage, coverageAdmissible } from "./coverageUsage";
 import { resolveLeverage, MARGIN_SAFETY_BUFFER } from "./leverage";
 
 // Lease anti-carrera: la reconciliación no toca pending/submitting con updatedAt más reciente.
 export const LEASE_MS = 90_000;
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 // Revalidación autoritativa de la admisión: master switch global + permiso canTradeLive (bypass
 // admin) + estado del bot (ownership, activo, real, misma cuenta). Si algo cambió durante la
@@ -30,10 +29,6 @@ export async function assertLiveAdmissible(
   return true;
 }
 
-// Estados que cuentan como volumen operado (todos menos `failed`).
-const VOLUME_STATES = new Set([
-  "pending", "submitting", "entry_filled", "protected", "sl_failed", "closed", "unknown",
-]);
 // Estados FINALES inmutables (con o sin posición resuelta). `protected` NO es final:
 // el cron lo reconcilia para detectar que el SL se ejecutó (→ closed) y liberar la cuenta.
 const FINAL_STATES = new Set(["closed", "failed"]);
@@ -101,28 +96,6 @@ export async function hasOpenExecutionForBot(
   return exec.some((r) => !["closed", "failed"].includes(r.status));
 }
 
-// Nocional usado en las últimas 24h por un usuario sumando AMBOS motores (límite diario compartido).
-export async function dailyNotionalUsed(
-  ctx: MutationCtx, userId: Id<"users">, since: number,
-): Promise<number> {
-  const recent = await ctx.db
-    .query("execution_requests")
-    .withIndex("by_user_created", (q) => q.eq("userId", userId).gte("createdAt", since))
-    .collect();
-  const execUsed = recent
-    .filter((r) => VOLUME_STATES.has(r.status))
-    .reduce((sum, r) => sum + r.notional, 0);
-  const recentArms = await ctx.db
-    .query("trigger_arms")
-    .withIndex("by_user_created", (q) => q.eq("userId", userId).gte("createdAt", since))
-    // cuenta el nocional de arms vivos o llenos (no los liberados sin efecto: disarmed/failed)
-    .collect();
-  const armUsed = recentArms
-    .filter((a) => a.status !== "disarmed" && a.status !== "failed")
-    .reduce((sum, a) => sum + a.reservedNotional, 0);
-  return execUsed + armUsed;
-}
-
 // Dedupe-check ligero ANTES de los gates de modo/margen (evita que un reintento de una
 // solicitud existente falle por saldo/modo actuales antes de poder reconciliarse).
 export const findByIdempotency = internalQuery({
@@ -141,6 +114,10 @@ export const reserveExecution = internalMutation({
     botId: v.id("bots"),
     idempotencyKey: v.string(),
     hlAccountId: v.id("hl_api_credentials"),
+    // (JAV-77) pool + liquidez LP (sin buffer) para el hard-cap por plan (Modelo B). El caller los
+    // obtiene fiables on-chain (fetchPositionNotionalStrict) ANTES de reservar; si no puede, NO reserva.
+    poolId: v.id("pools"),
+    hedgeNotionalUsd: v.number(),
     asset: v.string(),
     stopLossPct: v.number(),
     requestedAmount: v.number(),
@@ -156,7 +133,10 @@ export const reserveExecution = internalMutation({
     entryCloid: v.string(),
     slCloid: v.string(),
   },
-  handler: async (ctx, args) => {
+  // Promise<any>: corta el ciclo de inferencia TS2589 (el handler llama a coverageUsage, que recorre
+  // el grafo de tipos del DataModel; sin anotar, el retorno inferido desborda el presupuesto y revienta
+  // en cascada por todo el backend). El cuerpo se sigue type-checkeando.
+  handler: async (ctx, args): Promise<any> => {
     if (!Number.isFinite(args.notional) || args.notional <= 0) {
       throw new Error("notional debe ser un número finito > 0");
     }
@@ -183,18 +163,13 @@ export const reserveExecution = internalMutation({
       // Una fila legacy puede no tener appliedLeverage (undefined); el caller no re-ejecuta updateLeverage.
       return { requestId: existing._id, status: existing.status, alreadyExists: true as const, appliedLeverage: existing.appliedLeverage };
     }
-    // (2) Límites: por orden y volumen diario (rolling 24h, estados no-`failed`).
-    const maxPerOrder = await getLimit(ctx, "maxNotionalPerOrder");
-    const maxDaily = await getLimit(ctx, "maxNotionalPerUserDaily");
-    if (args.notional > maxPerOrder) {
-      throw new Error(`Nocional ${args.notional} supera el máximo por orden (${maxPerOrder}).`);
+    // (2) Hard-cap por plan (JAV-77, Modelo B): la cobertura de POOLS del usuario (Σ hedgeNotionalUsd
+    // sin buffer, dedupe por pool) + este pool no puede superar el tope del plan. Sin plan/suspendido →
+    // bloquea. LANZA [blocked_config]/[blocked_margin] en la misma OCC. Reemplaza los límites beta $500/$2k.
+    if (!(args.hedgeNotionalUsd > 0) || !Number.isFinite(args.hedgeNotionalUsd)) {
+      throw new Error("[blocked_config] hedgeNotionalUsd inválido (cobertura del pool no cuantificable).");
     }
-    const since = Date.now() - DAY_MS;
-    // Límite diario COMPARTIDO entre ambos motores (IOC manual + triggers automáticos JAV-44).
-    const dailyUsed = await dailyNotionalUsed(ctx, args.userId, since);
-    if (dailyUsed + args.notional > maxDaily) {
-      throw new Error(`Volumen diario excedido: ${dailyUsed} + ${args.notional} > ${maxDaily}.`);
-    }
+    await assertWithinPlanCoverage(ctx, args.userId, args.poolId, args.hedgeNotionalUsd);
     // (2b) Reserva de margen ATÓMICA por cuenta (anti-carrera). Esta mutation serializa, así que
     // dos ejecuciones concurrentes de la misma cuenta se contabilizan una tras otra. Se suma el
     // margen ya comprometido por AMBOS motores en la cuenta + el de esta; debe caber en el
@@ -222,6 +197,8 @@ export const reserveExecution = internalMutation({
       botId: args.botId,
       idempotencyKey: args.idempotencyKey,
       hlAccountId: args.hlAccountId,
+      poolId: args.poolId,
+      hedgeNotionalUsd: args.hedgeNotionalUsd,
       asset: args.asset,
       stopLossPct: args.stopLossPct,
       requestedAmount: args.requestedAmount,
@@ -306,7 +283,8 @@ export const prepareSlRetry = internalMutation({
 // Marca `submitting` con timestamp de lease, justo antes de enviar la entrada a HL.
 export const markSubmitting = internalMutation({
   args: { requestId: v.id("execution_requests") },
-  handler: async (ctx, { requestId }) => {
+  // Promise<any>: corta el ciclo TS2589 (llama a coverageAdmissible). El cuerpo se sigue chequeando.
+  handler: async (ctx, { requestId }): Promise<any> => {
     const req = await ctx.db.get(requestId);
     if (!req) return { ok: false as const, reason: "not_found" as const };
     // CAS: solo desde `pending`. Si otro proceso (cron) ya avanzó/cerró la solicitud, NO re-enviar
@@ -314,6 +292,11 @@ export const markSubmitting = internalMutation({
     if (req.status !== "pending") return { ok: false as const, reason: "state" as const };
     // Último gate antes del envío: switch/permiso/estado del bot. Si cambió → no marcar.
     if (!(await assertLiveAdmissible(ctx, req.userId, req.botId, req.hlAccountId))) {
+      return { ok: false as const, reason: "blocked" as const };
+    }
+    // (JAV-77) Revalidar hard-cap/plan/suspensión (ventana reserva→CAS). Bloqueado → `blocked`: el
+    // caller (executePerpMarketOrder) lo terminaliza a `failed` sin envío (libera margen/cap).
+    if (!(await coverageAdmissible(ctx, req.userId, req.poolId, req.hedgeNotionalUsd))) {
       return { ok: false as const, reason: "blocked" as const };
     }
     const now = Date.now();
@@ -450,13 +433,20 @@ export const markSlSubmitted = internalMutation({
 //    cerrar failed por CAS en la MISMA mutation (no compite con el reconciliador).
 export const gateBeforeOrder = internalMutation({
   args: { requestId: v.id("execution_requests") },
-  handler: async (ctx, { requestId }) => {
+  // Promise<any>: corta el ciclo TS2589 (llama a coverageAdmissible). El cuerpo se sigue chequeando.
+  handler: async (ctx, { requestId }): Promise<any> => {
     const req = await ctx.db.get(requestId);
     if (!req || req.status !== "submitting") return { ok: false as const, reason: "state" as const };
     if (Date.now() - req.updatedAt >= LEASE_MS) return { ok: false as const, reason: "expired" as const };
     if (req.reconcileLeaseUntil && req.reconcileLeaseUntil > Date.now()) return { ok: false as const, reason: "claimed" as const };
     if (!(await assertLiveAdmissible(ctx, req.userId, req.botId, req.hlAccountId))) {
       await applyTransition(ctx, { requestId, status: "failed", error: "blocked before order (switch/permiso/estado bot)" });
+      return { ok: false as const, reason: "blocked" as const };
+    }
+    // (JAV-77) Último gate antes de exchange.order: revalidar hard-cap/plan/suspensión. Bloqueado →
+    // terminalizar a `failed` inline (no se envió nada, libera margen/cap), como el bloqueo de admisión.
+    if (!(await coverageAdmissible(ctx, req.userId, req.poolId, req.hedgeNotionalUsd))) {
+      await applyTransition(ctx, { requestId, status: "failed", error: "[blocked_margin] cap/plan/suspensión (gateBeforeOrder)" });
       return { ok: false as const, reason: "blocked" as const };
     }
     // Renovar el lease del submitting: el cron no debe reclamar mientras exchange.order está en

@@ -4,8 +4,8 @@ import { v } from "convex/values";
 import type { MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { requireUser } from "./helpers";
-import { getLimit } from "./executionLimits";
-import { committedMarginForAccount, dailyNotionalUsed, assertLiveAdmissible } from "./executions";
+import { committedMarginForAccount, assertLiveAdmissible } from "./executions";
+import { assertWithinPlanCoverage, coverageAdmissible } from "./coverageUsage";
 import { resolveLeverage, MARGIN_SAFETY_BUFFER } from "./leverage";
 import { hlNetwork } from "./hlNetwork";
 import { REARM_COOLDOWN_MS } from "./triggerRearm";
@@ -32,7 +32,6 @@ async function rescheduleRearmIfEligible(ctx: MutationCtx, botId: Id<"bots">): P
 
 // --- JAV-44 Etapa 1: máquina de estados del trigger_arm (lease/fencing como reconcileExecution) ---
 
-const DAY_MS = 24 * 60 * 60 * 1000;
 export const ARM_RECONCILE_LEASE_MS = 60_000;
 // Cuarentena N5/N6: desde el CAS (submittedAt) hasta el momento máximo en que una petición en vuelo
 // puede aceptarse/hacerse visible en HL. Holgura generosa (vida máx. de action Convex + transporte),
@@ -135,8 +134,9 @@ export const reserveArm = internalMutation({
     botId: v.id("bots"), userId: v.id("users"), hlAccountId: v.id("hl_api_credentials"),
     poolId: v.id("pools"), asset: v.string(), network: v.string(),
     triggerPx: v.number(), size: v.number(),
-    orderNotional: v.number(),    // nocional de UNA entrada (para el límite por orden)
-    reservedNotional: v.number(), // worst-case para daily/margen (2× si dos entradas)
+    orderNotional: v.number(),    // nocional de UNA entrada (límite por orden histórico; se conserva el campo)
+    reservedNotional: v.number(), // worst-case para margen (2× si dos entradas)
+    hedgeNotionalUsd: v.number(), // (JAV-77) liquidez LP cruda (sin buffer) = unidad de cobertura del plan
     // Leverage: reserveArm lo resuelve (auto/manual) con el helper compartido, atómico con el
     // margen comprometido. El marginReserved se deriva de reservedNotional/appliedLeverage.
     autoLeverage: v.boolean(),
@@ -162,7 +162,10 @@ export const reserveArm = internalMutation({
     // el armado MANUAL no lo pasa.
     rearmToken: v.optional(v.string()),
   },
-  handler: async (ctx, args) => {
+  // Promise<any>: corta el ciclo de inferencia TS2589 (el handler llama a coverageUsage, que recorre
+  // el grafo de tipos del DataModel/api; sin anotar, su retorno inferido desborda el presupuesto y
+  // revienta en cascada por todo el backend). El cuerpo se sigue type-checkeando.
+  handler: async (ctx, args): Promise<any> => {
     // throws con prefijo [kind] (auto-rearm): el cron los mapea a la política de Codex. Config inválida
     // → [blocked_config]; falta de margen/volumen → [blocked_margin]; colisión de generación → [transient].
     if (args.network !== "testnet" && args.network !== "mainnet") throw new Error("[blocked_config] network inválida.");
@@ -212,17 +215,15 @@ export const reserveArm = internalMutation({
     // (2) generation = max+1 (backend).
     const generation = arms.reduce((m, a) => Math.max(m, a.generation), 0) + 1;
 
-    // (3) Límites compartidos con JAV-43: por orden + diario + margen por cuenta (misma OCC).
-    const maxPerOrder = await getLimit(ctx, "maxNotionalPerOrder");
-    const maxDaily = await getLimit(ctx, "maxNotionalPerUserDaily");
-    // Límite POR ORDEN sobre el nocional de UNA entrada (cada trigger es una orden de ese tamaño).
-    if (args.orderNotional > maxPerOrder) {
-      throw new Error(`[blocked_config] Nocional ${args.orderNotional} supera el máximo por orden (${maxPerOrder}).`);
+    // (3) Hard-cap por plan (JAV-77, Modelo B): la cobertura de POOLS (Σ hedgeNotionalUsd sin buffer,
+    // dedupe por pool) del usuario + este pool no puede superar el tope del plan. Sin plan/suspendido →
+    // bloquea. LANZA [blocked_config]/[blocked_margin] dentro de la misma OCC (lecturas registradas →
+    // dos armados concurrentes del mismo presupuesto: uno aborta). Reemplaza los límites beta $500/$2k.
+    if (!(args.hedgeNotionalUsd > 0) || !Number.isFinite(args.hedgeNotionalUsd)) {
+      throw new Error("[blocked_config] hedgeNotionalUsd inválido (cobertura del pool no cuantificable).");
     }
-    const dailyUsed = await dailyNotionalUsed(ctx, args.userId, Date.now() - DAY_MS);
-    if (dailyUsed + args.reservedNotional > maxDaily) {
-      throw new Error(`[blocked_margin] Volumen diario excedido: ${dailyUsed} + ${args.reservedNotional} > ${maxDaily}.`);
-    }
+    await assertWithinPlanCoverage(ctx, args.userId, args.poolId, args.hedgeNotionalUsd);
+    // (4) Margen por cuenta (misma OCC).
     const marginCommitted = await committedMarginForAccount(ctx, args.hlAccountId);
     // Resolver leverage + margen JUNTOS (helper único, mismo que JAV-43). autoLeverage sube hasta el
     // tope para que el nocional (worst-case 2× en OCO) quepa; si ni al tope cabe → [blocked_margin].
@@ -260,7 +261,8 @@ export const reserveArm = internalMutation({
       botId: args.botId, userId: args.userId, hlAccountId: args.hlAccountId, poolId: args.poolId,
       asset: args.asset, network: args.network, generation, status: "arming", desiredState: "armed",
       side: "Short", triggerPx: args.triggerPx, size: args.size, appliedLeverage,
-      reservedNotional: args.reservedNotional, marginReserved, lowerEdge: args.lowerEdge,
+      reservedNotional: args.reservedNotional, marginReserved, hedgeNotionalUsd: args.hedgeNotionalUsd,
+      lowerEdge: args.lowerEdge,
       upperEdge: twoEntries ? args.upperEdge : undefined,
       allowReentryFromAbove: twoEntries ? true : undefined,
       // (JAV-61) Persistir el modo (default "oco") y, si dos entradas, la semántica del entry_upper.
@@ -304,7 +306,8 @@ export const reserveArm = internalMutation({
 // --- CAS pre-envío (N1/N5): arming → submitting, fija submittedAt, valida intención y gates ---
 export const markArmSubmitting = internalMutation({
   args: { armId: v.id("trigger_arms") },
-  handler: async (ctx, { armId }) => {
+  // Promise<any>: corta el ciclo TS2589 (llama a coverageAdmissible). El cuerpo se sigue chequeando.
+  handler: async (ctx, { armId }): Promise<any> => {
     const arm = await ctx.db.get(armId);
     if (!arm) return { ok: false as const, reason: "not_found" as const };
     if (arm.status !== "arming") return { ok: false as const, reason: "state" as const };
@@ -322,6 +325,14 @@ export const markArmSubmitting = internalMutation({
     const pool = await ctx.db.get(arm.poolId);
     if (!pool || pool.closed) return { ok: false as const, reason: "blocked" as const };
     if (arm.network !== hlNetwork()) return { ok: false as const, reason: "blocked" as const };  // deploy cambió de red
+    // (JAV-77) Revalidar el hard-cap/plan/suspensión también aquí (ventana reserva→CAS). Si ya no es
+    // admisible (cap consumido por otro compromiso, plan revocado, suspensión) → TERMINALIZAR a failed:
+    // no se ha enviado nada, libera margen/cap, no se deja en `arming` reteniendo. Sin rearm (condición
+    // durable hasta que el admin actúe).
+    if (!(await coverageAdmissible(ctx, arm.userId, arm.poolId, arm.hedgeNotionalUsd))) {
+      await ctx.db.patch(armId, { status: "failed", error: "[blocked_margin] cap/plan/suspensión (markArmSubmitting)", updatedAt: Date.now() });
+      return { ok: false as const, reason: "blocked" as const };
+    }
     const now = Date.now();
     const token = crypto.randomUUID();
     await ctx.db.patch(armId, {
@@ -338,7 +349,8 @@ export const markArmSubmitting = internalMutation({
 // antes del envío, y renueva el lease para cubrir el RPC. Si falla → NO enviar.
 export const gateArmBeforeOrder = internalMutation({
   args: { armId: v.id("trigger_arms"), token: v.string() },
-  handler: async (ctx, { armId, token }) => {
+  // Promise<any>: corta el ciclo TS2589 (llama a coverageAdmissible). El cuerpo se sigue chequeando.
+  handler: async (ctx, { armId, token }): Promise<any> => {
     const arm = await ctx.db.get(armId);
     if (!arm) return { ok: false as const };
     if (arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
@@ -351,6 +363,16 @@ export const gateArmBeforeOrder = internalMutation({
     if (!(await assertLiveAdmissible(ctx, arm.userId, arm.botId, arm.hlAccountId))) return { ok: false as const };
     const pool = await ctx.db.get(arm.poolId);
     if (!pool || pool.closed) return { ok: false as const };
+    // (JAV-77) Último gate antes de exchange.order: revalidar hard-cap/plan/suspensión. Bloqueado →
+    // TERMINALIZAR a failed (aún no se envió nada) + liberar el lease; el caller hace releaseArmReconcile
+    // (no-op por token ya limpiado). Libera margen/cap, sin orden viva.
+    if (!(await coverageAdmissible(ctx, arm.userId, arm.poolId, arm.hedgeNotionalUsd))) {
+      await ctx.db.patch(armId, {
+        status: "failed", error: "[blocked_margin] cap/plan/suspensión (gateArmBeforeOrder)",
+        reconcileLeaseUntil: 0, reconcileLeaseToken: undefined, updatedAt: Date.now(),
+      });
+      return { ok: false as const };
+    }
     await ctx.db.patch(armId, { reconcileLeaseUntil: Date.now() + ARM_RECONCILE_LEASE_MS, updatedAt: Date.now() });
     return { ok: true as const };
   },

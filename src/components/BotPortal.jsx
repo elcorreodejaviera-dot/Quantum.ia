@@ -3343,49 +3343,6 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulation
 }
 
 // Límites de ejecución (valores efectivos) — admin.
-function ExecutionLimitsPanel() {
-  const limits = useQuery(api.systemConfig.getExecutionLimits, {});
-  const setPerOrder = useMutation(api.systemConfig.setMaxNotionalPerOrder);
-  const setDaily = useMutation(api.systemConfig.setMaxNotionalPerUserDaily);
-  const [perOrder, setPerOrderV] = React.useState('');
-  const [daily, setDailyV] = React.useState('');
-  const [msg, setMsg] = React.useState('');
-  React.useEffect(() => {
-    if (limits) {
-      setPerOrderV(String(limits.maxNotionalPerOrder));
-      setDailyV(String(limits.maxNotionalPerUserDaily));
-    }
-  }, [limits]);
-  async function apply(fn, val) {
-    setMsg('');
-    try { await fn({ value: Number(val) }); setMsg('Guardado.'); }
-    catch (e) { setMsg(e?.message ?? 'Error'); }
-  }
-  const Row = ({ label, val, set, fn, step, allowZero }) => {
-    const n = Number(val);
-    const valid = Number.isFinite(n) && (allowZero ? n >= 0 : n > 0);
-    return (
-      <label className="config-field" style={{ marginTop: 6 }}><span>{label}</span>
-        <div style={{ display: 'flex', gap: 6 }}>
-          <input type="number" step={step ?? '1'} value={val} onChange={(e) => set(e.target.value)} />
-          <button className="mini-btn" onClick={() => apply(fn, val)} disabled={!valid}>Set</button>
-        </div></label>
-    );
-  };
-  return (
-    <div className="be-block" style={{ marginTop: 12 }}>
-      <div className="be-head"><span>Límites de ejecución (efectivos)</span></div>
-      <Row label="Máx nocional por orden (USDC)" val={perOrder} set={setPerOrderV} fn={setPerOrder} />
-      <Row label="Máx nocional diario / usuario (USDC)" val={daily} set={setDailyV} fn={setDaily} />
-      <p style={{ fontSize: 11, opacity: 0.7, marginTop: 6 }}>
-        El SL es una orden trigger <b>stop-market</b> con banda de slippage fija (1%); puede no
-        ejecutarse si el mercado atraviesa la banda en un gap. No es configurable.
-      </p>
-      {msg && <span style={{ fontSize: 11 }}>{msg}</span>}
-    </div>
-  );
-}
-
 // Concesión/revocación de permisos por usuario — admin (paginado). Dos permisos independientes:
 // canManageBots (crear/activar/armar bots) y canTradeLive (operar con dinero real). JAV-72.
 function PermToggle({ label, granted, busy, onToggle }) {
@@ -3620,7 +3577,6 @@ function AdminPanel({ simulationMode, tradingEnabled, onSetSimulation, onSetTrad
       </div>
 
       <BetaPermissionsPanel />
-      <ExecutionLimitsPanel />
       <ExecutionsObservabilityPanel />
     </section>
   );

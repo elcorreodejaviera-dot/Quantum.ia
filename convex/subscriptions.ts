@@ -18,6 +18,8 @@ export type PlanId = (typeof PLAN_IDS)[number];
 export type Plan = { id: PlanId; label: string; coverageCapUsd: number; priceUsd: number };
 
 // Orden ascendente por tope (lo respeta la UI para mostrar la escalera de planes).
+// NOTA: priceUsd es PLACEHOLDER (0 = precio aún sin definir, no "gratis") salvo Betatester, que SÍ es
+// gratis por diseño. Definir los precios reales antes de mostrarlos en UI (JAV-76) / cobrar (JAV-78).
 export const PLANS: readonly Plan[] = [
   { id: "betatester",    label: "Betatester",    coverageCapUsd: 5_000,     priceUsd: 0 },
   { id: "starter",       label: "Starter",       coverageCapUsd: 10_000,    priceUsd: 0 },
@@ -33,8 +35,11 @@ const PLAN_BY_ID: Record<PlanId, Plan> = Object.fromEntries(
 ) as Record<PlanId, Plan>;
 
 // Devuelve el plan por id, o null si no es un plan válido (incluye undefined = sin plan).
+// hasOwnProperty (no `in`) para no aceptar claves del prototipo ("toString", "constructor"…).
+// Object.hasOwn requeriría lib es2022; el tsconfig de Convex es anterior, así que usamos .call.
 export function getPlan(id: string | undefined): Plan | null {
-  return id !== undefined && id in PLAN_BY_ID ? PLAN_BY_ID[id as PlanId] : null;
+  return id !== undefined && Object.prototype.hasOwnProperty.call(PLAN_BY_ID, id)
+    ? PLAN_BY_ID[id as PlanId] : null;
 }
 
 // Vista normalizada de la suscripción de un usuario para la UI / el enforcement.

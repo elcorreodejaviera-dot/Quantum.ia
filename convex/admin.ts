@@ -1,0 +1,188 @@
+import { query } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
+import { v } from "convex/values";
+import { paginationOptsValidator } from "convex/server";
+import { requireAdmin, hasPermission } from "./helpers";
+import { getPlan } from "./plans";
+import { consumedCoverageByPool } from "./coverageUsage";
+
+// (JAV-80) Queries de la pestaña de Administración. TODAS admin-only (requireAdmin) y ACOTADAS.
+// NO money-path: solo lectura/cache (la lógica de trading no se toca). Estado HL en vivo NO va aquí
+// (una query no hace red): se expone bajo demanda en una acción aparte (futuro getUserHLState).
+
+// Estados que mantienen capital/margen comprometido (copias LOCALES de solo lectura para no importar
+// del money-path executions.ts; coherentes con OPEN_MARGIN_STATES / ARM_OPEN_MARGIN_STATES de allí).
+const EXEC_OPEN = ["pending", "submitting", "entry_filled", "protected", "sl_failed", "unknown"] as const;
+const ARM_OPEN = ["arming", "submitting", "armed", "disarming", "filled", "protecting", "protected", "armed_lower_only", "unknown"] as const;
+const ARM_TERMINAL = new Set(["disarmed", "closed", "failed"]);
+const SCAN_CAP = 1000;   // (Codex #2) tope duro por lectura — beta. Materializar si el volumen crece (JAV-79).
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// KPIs globales del sistema (acotados por SCAN_CAP).
+export const getSystemStats = query({
+  args: {},
+  handler: async (ctx): Promise<any> => {
+    await requireAdmin(ctx);
+
+    let capitalExec = 0, marginExec = 0, openExec = 0;
+    for (const status of EXEC_OPEN) {
+      const rows = await ctx.db.query("execution_requests")
+        .withIndex("by_status_created", (q) => q.eq("status", status)).take(SCAN_CAP);
+      for (const r of rows) { capitalExec += r.notional; marginExec += (r.marginReserved ?? r.notional); openExec++; }
+    }
+
+    let capitalArm = 0, marginArm = 0, liveArm = 0;
+    for (const status of ARM_OPEN) {
+      const rows = await ctx.db.query("trigger_arms")
+        .withIndex("by_status_updated", (q) => q.eq("status", status)).take(SCAN_CAP);
+      for (const a of rows) { capitalArm += a.reservedNotional; marginArm += a.marginReserved; liveArm++; }
+    }
+
+    const pools = await ctx.db.query("pools").take(SCAN_CAP);
+    let tvlPools = 0;
+    for (const p of pools) { if (p.closed) continue; tvlPools += (p.tvl ?? p.subgraphTvlUsd ?? 0); }
+
+    const since = Date.now() - DAY_MS;
+    const trades = await ctx.db.query("trades_history")
+      .withIndex("by_timestamp", (q) => q.gte("timestamp", since)).take(SCAN_CAP);
+    let volume24h = 0;
+    for (const t of trades) volume24h += Math.abs((t.amount ?? 0) * (t.price ?? 0));
+
+    const bots = await ctx.db.query("bots").take(SCAN_CAP);
+    const activeBots = bots.filter((b) => b.active === true);
+    const activeUsers = new Set(activeBots.map((b) => b.userId).filter(Boolean) as string[]);
+    const totalUsers = (await ctx.db.query("users").take(SCAN_CAP)).length;
+
+    return {
+      capitalInHL: capitalArm + capitalExec,    // armado + ejecutándose
+      marginCommitted: marginArm + marginExec,  // margen comprometido (en movimiento)
+      tvlPools,                                  // Σ TVL cacheado de pools abiertos
+      volume24h,
+      activeBots: activeBots.length,
+      activeUsers: activeUsers.size,
+      totalUsers,
+      liveCommitments: liveArm + openExec,
+    };
+  },
+});
+
+// Listado de usuarios (paginado). SOLO campos baratos (sin coberturas con collect, sin on-chain).
+export const listUsersOverview = query({
+  args: { paginationOpts: paginationOptsValidator },
+  handler: async (ctx, { paginationOpts }): Promise<any> => {
+    await requireAdmin(ctx);
+    const result = await ctx.db.query("users").paginate(paginationOpts);
+    const page = [];
+    for (const u of result.page) {
+      const plan = getPlan(u.subscriptionPlan);
+      const bots = await ctx.db.query("bots").withIndex("by_user", (q) => q.eq("userId", u._id)).collect();
+      const activeBots = bots.filter((b) => b.active === true).length;
+      const hlAcct = await ctx.db.query("hl_api_credentials").withIndex("by_user", (q) => q.eq("userId", u._id)).first();
+      page.push({
+        userId: u._id, email: u.email ?? null, name: u.name ?? null, role: u.role,
+        plan: plan ? { id: plan.id, label: plan.label, cap: plan.coverageCapUsd } : null,
+        suspended: u.suspended === true,
+        activeBots, hasHlAccount: !!hlAcct,
+        canManageBots: await hasPermission(ctx, u, "canManageBots"),
+        canTradeLive: await hasPermission(ctx, u, "canTradeLive"),
+      });
+    }
+    return { ...result, page };
+  },
+});
+
+// Detalle de UN usuario (solo DB/cache). La cobertura usa consumedCoverageByPool (un solo usuario).
+export const getUserDetail = query({
+  args: { userId: v.id("users") },
+  handler: async (ctx, { userId }): Promise<any> => {
+    await requireAdmin(ctx);
+    const u = await ctx.db.get(userId);
+    if (!u) throw new Error("Usuario no encontrado");
+    const plan = getPlan(u.subscriptionPlan);
+
+    // consumedCoverageByPool puede lanzar [blocked_config] si una fila viva no es cuantificable:
+    // en una vista admin de lectura no debe romper → lo tratamos como "desconocido".
+    let coverageUsed: number | null = 0;
+    try {
+      const byPool = await consumedCoverageByPool(ctx, userId);
+      coverageUsed = 0;
+      for (const val of byPool.values()) coverageUsed += val;
+    } catch {
+      coverageUsed = null;
+    }
+
+    const bots = await ctx.db.query("bots").withIndex("by_user", (q) => q.eq("userId", userId)).collect();
+    const positions = [];
+    for (const b of bots) {
+      if (b.active !== true) continue;
+      let pool = null;
+      if (b.poolId) {
+        const p = await ctx.db.get(b.poolId);
+        if (p) pool = {
+          poolId: p._id, pair: p.pair, network: p.network, tokenId: p.tokenId ?? null,
+          minRange: p.minRange, maxRange: p.maxRange,
+          tvl: p.tvl ?? p.subgraphTvlUsd ?? null,
+          fees1d: p.fees1d ?? p.subgraphFeesUsd1d ?? null,
+          closed: p.closed === true,
+        };
+      }
+      let armStatus: string | null = null;
+      const arms = await ctx.db.query("trigger_arms")
+        .withIndex("by_bot_generation", (q) => q.eq("botId", b._id)).order("desc").take(1);
+      if (arms[0] && !ARM_TERMINAL.has(arms[0].status)) armStatus = arms[0].status;
+      positions.push({
+        botId: b._id, kind: b.kind ?? null, leverage: b.leverage ?? null, direction: b.direction ?? null,
+        stopLossPct: b.stopLossPct ?? null, hedgeNotionalUsd: b.hedgeNotionalUsd ?? null,
+        pool, armStatus,
+      });
+    }
+
+    return {
+      userId: u._id, email: u.email ?? null, name: u.name ?? null, role: u.role,
+      plan: plan ? { id: plan.id, label: plan.label, cap: plan.coverageCapUsd } : null,
+      suspended: u.suspended === true,
+      coverageUsed,
+      coverageCap: u.role === "admin" ? null : (plan ? plan.coverageCapUsd : 0),  // admin = ilimitado
+      positions,
+    };
+  },
+});
+
+// Feed de actividad: merge de fuentes indexadas por tiempo (Codex #5: sin tabla activity_log en v1).
+export const listActivity = query({
+  args: { limit: v.optional(v.number()) },
+  handler: async (ctx, { limit }): Promise<any> => {
+    await requireAdmin(ctx);
+    const cap = Math.min(limit ?? 50, 100);
+    type Ev = { at: number; type: string; userId: Id<"users"> | null; text: string; meta: any };
+    const events: Ev[] = [];
+
+    const trades = await ctx.db.query("trades_history").withIndex("by_timestamp").order("desc").take(cap);
+    for (const t of trades) events.push({ at: t.timestamp, type: "trade", userId: t.userId, text: `${t.action} ${t.asset}`, meta: { amount: t.amount, simulated: t.simulated } });
+
+    const logs = await ctx.db.query("admin_logs").withIndex("by_timestamp").order("desc").take(cap);
+    for (const l of logs) events.push({ at: l.timestamp, type: "admin", userId: null, text: l.action, meta: l.meta ?? null });
+
+    const execs = await ctx.db.query("execution_requests").withIndex("by_created").order("desc").take(cap);
+    for (const e of execs) events.push({ at: e.createdAt, type: "execution", userId: e.userId, text: `${e.side} ${e.asset} · ${e.status}`, meta: { notional: e.notional } });
+
+    const arms = await ctx.db.query("trigger_arms").withIndex("by_updated").order("desc").take(cap);
+    for (const a of arms) events.push({ at: a.updatedAt, type: "arm", userId: a.userId, text: `arm ${a.asset} · ${a.status}`, meta: { reservedNotional: a.reservedNotional } });
+
+    events.sort((a, b) => b.at - a.at);
+    const top = events.slice(0, cap);
+
+    const cache = new Map<string, string | null>();
+    const out = [];
+    for (const ev of top) {
+      let who: string | null = null;
+      if (ev.userId) {
+        const key = String(ev.userId);
+        if (cache.has(key)) who = cache.get(key) ?? null;
+        else { const u = await ctx.db.get(ev.userId); who = u?.email ?? u?.name ?? null; cache.set(key, who); }
+      }
+      out.push({ at: ev.at, type: ev.type, text: ev.text, meta: ev.meta, who });
+    }
+    return out;
+  },
+});

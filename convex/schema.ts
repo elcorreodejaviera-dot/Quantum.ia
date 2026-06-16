@@ -275,6 +275,34 @@ export default defineSchema({
     value: v.any(),
   }).index("by_key", ["key"]),
 
+  // (JAV-81) Reportes de bug enviados por usuarios desde su Portal. El admin los gestiona en JAV-80.
+  bug_reports: defineTable({
+    userId: v.id("users"),
+    message: v.string(),
+    status: v.union(v.literal("new"), v.literal("in_review"), v.literal("resolved")),
+    context: v.optional(v.object({ url: v.optional(v.string()), userAgent: v.optional(v.string()) })),
+    attachments: v.array(v.id("_storage")),   // capturas validadas (ownership probado vía bug_uploads)
+    adminNote: v.optional(v.string()),
+    createdAt: v.number(),
+    resolvedAt: v.optional(v.number()),
+  })
+    .index("by_status_created", ["status", "createdAt"])   // filtro por estado + orden por fecha
+    .index("by_user_created", ["userId", "createdAt"])     // rate-limit + reportes del usuario
+    .index("by_created", ["createdAt"]),
+
+  // (JAV-81, Codex #1) Registro de subidas para PROBAR ownership del adjunto antes de aceptarlo en
+  // reportBug: el archivo debe estar registrado por ESE usuario, no consumido y dentro de TTL.
+  bug_uploads: defineTable({
+    userId: v.id("users"),
+    storageId: v.id("_storage"),
+    contentType: v.string(),       // validado contra la metadata de sistema en registerBugUpload
+    size: v.number(),
+    createdAt: v.number(),
+    consumedAt: v.optional(v.number()),   // se fija al adjuntarse a un bug_report (un solo uso)
+  })
+    .index("by_user", ["userId"])
+    .index("by_storage", ["storageId"]),
+
   // Ciclo de vida de una ejecución real en HL (JAV-37). Modela idempotency, reserva de
   // nocional y recuperación por cloid. trades_history queda como log final.
   execution_requests: defineTable({

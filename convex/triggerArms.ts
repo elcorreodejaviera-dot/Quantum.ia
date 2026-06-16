@@ -8,7 +8,7 @@ import { committedMarginForAccount, assertLiveAdmissible } from "./executions";
 import { assertWithinPlanCoverage, coverageAdmissible } from "./coverageUsage";
 import { resolveLeverage, MARGIN_SAFETY_BUFFER } from "./leverage";
 import { hlNetwork } from "./hlNetwork";
-import { REARM_COOLDOWN_MS } from "./triggerRearm";
+import { REARM_COOLDOWN_MS, REARM_BLOCKED_RECHECK_MS, armErrorKind } from "./triggerRearm";
 
 // (Codex #1) Reprograma un auto-rearm en el BOT atómicamente (dentro de la mutation que lo invoca).
 // Solo si la config sigue siendo válida: activo, autoRearm, sin pausa, pool abierto y SIN otro rearm en
@@ -25,6 +25,31 @@ async function rescheduleRearmIfEligible(ctx: MutationCtx, botId: Id<"bots">): P
   await ctx.db.patch(botId, {
     rearmStatus: "pending", nextRearmAt: Date.now() + REARM_COOLDOWN_MS, rearmAttempts: 0,
     lastRearmError: undefined, lastRearmErrorKind: undefined,
+    rearmLeaseToken: undefined, rearmLeaseUntil: undefined,
+  });
+  return true;
+}
+
+// (JAV-53) Marca el auto-rearm de un bot como `blocked` REEVALUABLE con el error/kind del fallo
+// determinista de updateLeverage. Mismo contrato durable que el cron (recordRearmOutcome "blocked"),
+// pero invocado dentro de failArmPreOrder porque el rearmToken ya fue consumido por reserveArm y el cron
+// ya no puede registrar el outcome. Elegibilidad idéntica a rescheduleRearmIfEligible (no pisa pausa,
+// pool cerrado ni otro rearm en curso). El cron reevaluará el bloqueo cada REARM_BLOCKED_RECHECK_MS.
+async function markRearmBlockedIfEligible(
+  ctx: MutationCtx, botId: Id<"bots">, error: string, kind: string,
+): Promise<boolean> {
+  const bot = await ctx.db.get(botId);
+  if (!bot) return false;
+  if (bot.active !== true || bot.autoRearm !== true || bot.disarmPending === true) return false;
+  if (bot.rearmStatus != null) return false;
+  if (!bot.poolId) return false;
+  const pool = await ctx.db.get(bot.poolId);
+  if (!pool || pool.closed) return false;
+  const k = (kind === "blocked_margin" || kind === "blocked_config") ? kind : "blocked_config";
+  await ctx.db.patch(botId, {
+    rearmStatus: "blocked", nextRearmAt: Date.now() + REARM_BLOCKED_RECHECK_MS,
+    rearmAttempts: (bot.rearmAttempts ?? 0) + 1,
+    lastRearmError: error, lastRearmErrorKind: k,
     rearmLeaseToken: undefined, rearmLeaseUntil: undefined,
   });
   return true;
@@ -761,11 +786,18 @@ export const failArmPreOrder = internalMutation({
     }
     const now = Date.now();
     await ctx.db.patch(armId, { status: "failed", error: error.slice(0, 300), updatedAt: now });
-    // N2: completar la pausa si estaba pendiente (igual que settleArm). El bookkeeping del auto-rearm
-    // (rearmStatus/lastRearmErrorKind) lo hace el cron al mapear el throw [kind] de armBotInternal.
+    // N2: completar la pausa si estaba pendiente (igual que settleArm).
     const bot = await ctx.db.get(arm.botId);
     if (bot?.disarmPending) {
       await ctx.db.patch(arm.botId, { active: false, disarmPending: false, disarmRequestedAt: undefined });
+    }
+    // (Codex JAV-53 ALTO) Si el armado venía de auto-rearm, reserveArm YA consumió/limpió el rearmToken
+    // → el cron NO puede registrar el outcome con el throw de armBotInternal (recordRearmOutcome sería
+    // no-op por token vencido). Hacer el bookkeeping durable AQUÍ: marcar el rearm `blocked` reevaluable
+    // (nunca dejar el bot active sin cobertura ni rearm). markRearmBlockedIfEligible se auto-gatea
+    // (no pisa pausa/pool cerrado/otro rearm en curso).
+    if (arm.fromRearm === true) {
+      await markRearmBlockedIfEligible(ctx, arm.botId, error.slice(0, 300), armErrorKind(error));
     }
     return { ok: true as const };
   },

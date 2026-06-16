@@ -63,7 +63,7 @@ introduzca regresión en el flujo actual.** Devuelve GO / NO-GO con hallazgos nu
    cierre de emergencia por `protectDeadline`/`SL_MAX_ATTEMPTS` sigue como red, y (c) la posición
    está en ganancia ≥ breakevenPct cuando esto ocurre? ¿Propondrías un orden que reduzca la ventana?
 
-3. **Latch one-way `beMoved`.** ¿`markArmBeMoved` (CAS + token) se fija ANTES de colocar el SL de BE
+3. **Latch one-way `beMoved`.** ¿`activateBreakeven` (CAS + token) se fija ANTES de colocar el SL de BE
    (como `markEmergencyClosing`), y se aborta si la mutación falla? ¿Puede quedar `beMoved=true` con
    el SL de BE NO colocado (posición protegida solo por el viejo ya cancelado)? ¿Puede oscilar
    (volver a +1%)? ¿Qué pasa si se pierde el lease entre fijar el latch y colocar?

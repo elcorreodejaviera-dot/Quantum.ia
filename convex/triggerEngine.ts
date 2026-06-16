@@ -49,7 +49,10 @@ const SL_TRIGGER_MATCH_TOL = 5e-4;
 // permitidos (MAX_DECIMALS=6 para perps → 6−szDecimals) y (b) las 5 cifras significativas. Se usa para
 // el guard anti-auto-disparo del BE (beTrigger > markPx + tick).
 function hlTickSize(price: number, szDecimals: number): number {
-  const decimalsTick = Math.pow(10, -(6 - szDecimals));
+  // (CodeRabbit) clamp del exponente: con szDecimals>6, (6−szDecimals) sería negativo y
+  // Math.pow(10,−neg) inflaría el tick → guard de BE demasiado estricto. maxDecimals nunca < 0.
+  const maxDecimals = Math.max(0, 6 - szDecimals);
+  const decimalsTick = Math.pow(10, -maxDecimals);
   const sigFigTick = price > 0 ? Math.pow(10, Math.floor(Math.log10(price)) - 4) : decimalsTick;
   return Math.max(decimalsTick, sigFigTick);
 }

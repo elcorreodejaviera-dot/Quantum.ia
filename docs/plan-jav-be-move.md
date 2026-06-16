@@ -60,10 +60,10 @@ Requiere `deploy`. Legacy sin estos campos → BE desactivado (comportamiento ac
 ### 3.3 Trigger deseado del SL (helper único) + guard anti-auto-disparo (acotado)
 ```ts
 const BE_TICK = tickFromSzDecimals(szDecimals);   // 1 tick HL
-const beTrigger = roundHlPrice(posEntryPx * (1 - BE_OFFSET_FRACTION), szDecimals, "nearest");
+const beTrigger = roundHlPrice(posEntryPx * (1 - BE_OFFSET_FRACTION), szDecimals, "floor");
 const desiredTrigger = arm.beMoved
   ? beTrigger
-  : roundHlPrice(posEntryPx * (1 + arm.stopLossPct / 100), szDecimals, "nearest");
+  : roundHlPrice(posEntryPx * (1 + arm.stopLossPct / 100), szDecimals, "floor");
 ```
 - `BE_OFFSET_FRACTION` (constante): 0 = entrada exacta; pequeño colchón (≈0.0005–0.001) para fees.
   Restricción: `BE_OFFSET_FRACTION < breakevenPct/100`.
@@ -78,7 +78,7 @@ const desiredTrigger = arm.beMoved
 Con `status ∈ {filled, protecting, protected}`, **no flat**, **no** emergencia:
 
 **A) Activación del BE (solo flip del latch, no cancela nada):**
-```
+```text
 si status==="protected" && !beMoved && breakevenPct válido
    && markPx <= posEntryPx*(1 - breakevenPct/100)        // ganancia alcanzada
    && beTrigger > markPx + BE_TICK:                       // guard H4 (SL viejo aún vivo)
@@ -87,7 +87,7 @@ si status==="protected" && !beMoved && breakevenPct válido
 Tras esto `desiredTrigger` ya es el de BE; el SL viejo (+1%) sigue vivo y se rota abajo.
 
 **B) Salud del SL y (re)colocación unificada.** `slOrder = getArmOrderByRole(sl_upper)`:
-```
+```text
 slHealthy = slOrder existe
             && slOrder.observedStatus ∈ {open}           // vivo en book
             && slOrder.size >= realSize*0.99              // cubre el tamaño real (resize)

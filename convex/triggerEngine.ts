@@ -93,6 +93,11 @@ export const armPoolBotEntry = action({
     if (!args.confirm) throw new Error("Armado requiere confirmación explícita.");
     const user = await ctx.runQuery(internal.users.getCurrentUserInternal, {});
     await ctx.runQuery(internal.users.assertTradeLiveInternal, {});
+    // JAV-72 (P0): el armado MANUAL exige también canManageBots (espeja requireBotManager de
+    // getOrCreatePoolBot). Sin esto, un usuario con canTradeLive pero canManageBots revocado podría
+    // armar un bot suyo ya existente saltándose el gate. El auto-rearm (armBotInternal) NO lo exige.
+    const canManage = await ctx.runQuery(internal.users.hasManageBotsForUserInternal, { userId: user._id });
+    if (!canManage) throw new Error("Forbidden: requiere permiso canManageBots");
     const bot0 = await ctx.runQuery(internal.bots.getBotByIdInternal, { id: args.botId });
     if (!bot0) throw new Error("Bot not found");
     if (bot0.userId !== user._id) throw new Error("Bot does not belong to this user");

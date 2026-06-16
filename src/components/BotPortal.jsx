@@ -3334,28 +3334,58 @@ function ExecutionLimitsPanel() {
   );
 }
 
-// Concesión/revocación de canTradeLive — admin (paginado).
+// Concesión/revocación de permisos por usuario — admin (paginado). Dos permisos independientes:
+// canManageBots (crear/activar/armar bots) y canTradeLive (operar con dinero real). JAV-72.
+function PermToggle({ label, granted, busy, onToggle }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      <span className="network" style={{ fontSize: 10 }}>{label}</span>
+      <span className={`pill ${granted ? 'green' : 'faint'}`} style={{ fontSize: 10 }}>{granted ? 'SÍ' : 'NO'}</span>
+      <button className="mini-btn" disabled={busy} onClick={onToggle}>
+        {busy ? '…' : (granted ? 'Revocar' : 'Conceder')}
+      </button>
+    </div>
+  );
+}
+
 function BetaPermissionsPanel() {
   const { results, status, loadMore } = usePaginatedQuery(
     api.users.listUsersWithTradeLive, {}, { initialNumItems: 50 });
-  const grant = useMutation(api.users.grantTradeLive);
-  const revoke = useMutation(api.users.revokeTradeLive);
+  const grantManage = useMutation(api.users.grantManageBots);
+  const revokeManage = useMutation(api.users.revokeManageBots);
+  const grantTrade = useMutation(api.users.grantTradeLive);
+  const revokeTrade = useMutation(api.users.revokeTradeLive);
   const [msg, setMsg] = React.useState('');
-  async function toggle(u) {
+  // Estado "busy" por {userId, permission} para evitar doble click confuso entre toggles.
+  const [busy, setBusy] = React.useState({});
+  const MUT = {
+    canManageBots: { grant: grantManage, revoke: revokeManage },
+    canTradeLive: { grant: grantTrade, revoke: revokeTrade },
+  };
+  async function toggle(u, permission, granted) {
+    const key = `${u.userId}:${permission}`;
     setMsg('');
-    try { u.canTradeLive ? await revoke({ userId: u.userId }) : await grant({ userId: u.userId }); }
+    setBusy((b) => ({ ...b, [key]: true }));
+    try { granted ? await MUT[permission].revoke({ userId: u.userId }) : await MUT[permission].grant({ userId: u.userId }); }
     catch (e) { setMsg(e?.message ?? 'Error'); }
+    finally { setBusy((b) => ({ ...b, [key]: false })); }
   }
   return (
     <div className="be-block" style={{ marginTop: 12 }}>
-      <div className="be-head"><span>Trading real (canTradeLive)</span></div>
+      <div className="be-head"><span>Permisos por usuario (Manage Bots / Trading real)</span></div>
       {results.map((u) => (
-        <div key={u.userId} className="wallet-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '4px 0' }}>
+        <div key={u.userId} className="wallet-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '4px 0', flexWrap: 'wrap' }}>
           <span style={{ fontSize: 12 }}>{u.email ?? u.name ?? u.userId.slice(0, 8)}{u.role === 'admin' ? ' (admin)' : ''}</span>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span className={`pill ${u.canTradeLive ? 'green' : 'faint'}`} style={{ fontSize: 10 }}>{u.canTradeLive ? 'SÍ' : 'NO'}</span>
-            {u.role !== 'admin' && <button className="mini-btn" onClick={() => toggle(u)}>{u.canTradeLive ? 'Revocar' : 'Conceder'}</button>}
-          </div>
+          {u.role === 'admin' ? (
+            <span className="pill green" style={{ fontSize: 10 }}>Acceso total (admin)</span>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+              <PermToggle label="Manage Bots" granted={u.canManageBots} busy={!!busy[`${u.userId}:canManageBots`]}
+                onToggle={() => toggle(u, 'canManageBots', u.canManageBots)} />
+              <PermToggle label="Trading real" granted={u.canTradeLive} busy={!!busy[`${u.userId}:canTradeLive`]}
+                onToggle={() => toggle(u, 'canTradeLive', u.canTradeLive)} />
+            </div>
+          )}
         </div>
       ))}
       {status === 'CanLoadMore' && <button className="mini-btn" style={{ marginTop: 6 }} onClick={() => loadMore(50)}>Cargar más</button>}

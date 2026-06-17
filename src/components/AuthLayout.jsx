@@ -35,10 +35,6 @@ export default function AuthLayout({ children }) {
           <span className="pill">Acceso privado</span>
         </div>
         {children}
-        {/* Contenedor donde Clerk monta el CAPTCHA/bot-challenge (Smart CAPTCHA / Turnstile). Sin este
-            elemento, si a un usuario se le dispara el challenge durante el sign-in (verificación/reset),
-            el flujo puede quedarse colgado antes de llegar a la contraseña. */}
-        <div id="clerk-captcha" />
       </div>
     </div>
   )

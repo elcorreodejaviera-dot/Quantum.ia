@@ -586,6 +586,11 @@ export const fetchPositionLiquidity = action({
     let amountToRepay = 0;
     let liquidationThreshold = 0;
     let availableToBorrow = 0;
+    // (revertVaultActive) NFT pertenece al vault de Revert. (revertLoanKnown) loanInfo se decodificó con
+    // éxito (true aunque debt=0 = deuda conocida 0). Sirven para distinguir en la UI "en Revert sin deuda"
+    // de "deuda desconocida (loanInfo falló)" y de "LP spot (no en vault)". Solo display; no afectan cálculos.
+    let revertVaultActive = false;
+    let revertLoanKnown = false;
     const vaultAddr = REVERT_VAULT[network];
     if (vaultAddr) {
       try {
@@ -593,13 +598,19 @@ export const fetchPositionLiquidity = action({
         const ownerRaw = (await rpcCallWithFallback(rpcs, nft, "0x6352211e" + pad(BigInt(tokenId)))).slice(2);
         const owner = "0x" + ownerRaw.slice(24).toLowerCase();
         if (owner === vaultAddr.toLowerCase()) {
+          revertVaultActive = true;
           // loanInfo(uint256) = 0x8349d6be → (debt, fullValue, collateralValue, liquidationCost, liquidationValue)
           const loanRaw = (await rpcCallWithFallback(rpcs, vaultAddr, "0x8349d6be" + pad(BigInt(tokenId)))).slice(2);
           if (loanRaw.length >= 64 * 3) {
             const debt       = uintAt(loanRaw, 0);
             const fullValue  = uintAt(loanRaw, 1);
             const collateral = uintAt(loanRaw, 2);
-            if (debt > 0n && collateral > 0n && fullValue > 0n) {
+            // revertLoanKnown SOLO si la deuda es interpretable: debt===0 (sin préstamo) o debt>0 con
+            // collateral/fullValue válidos. Si debt>0 pero faltan → no fiable → false ("deuda: —"), no "sin deuda".
+            if (debt === 0n) {
+              revertLoanKnown = true;
+            } else if (debt > 0n && collateral > 0n && fullValue > 0n) {
+              revertLoanKnown = true;
               const hf = Number(collateral) / Number(debt);
               borrowHealth   = Math.max(0, Math.min(100, Math.round((hf - 1) * 100)));
               healthFactor   = Math.round(hf * 100) / 100;
@@ -631,6 +642,8 @@ export const fetchPositionLiquidity = action({
       amountToRepay,
       liquidationThreshold,
       availableToBorrow,
+      revertVaultActive,
+      revertLoanKnown,
     };
   },
 });

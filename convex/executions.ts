@@ -56,8 +56,11 @@ const OPEN_MARGIN_STATES = new Set([
 ]);
 // JAV-44: estados de un trigger_arm que mantienen margen comprometido (todos menos ARM_TERMINAL).
 // ARM_TERMINAL = { disarmed, closed, failed }.
+// (JAV-85 #1) armed_lower_only INCLUIDO: en reentry_coexist la reserva NO se reduce y
+// transitionToArmedLowerOnly no la libera → entry_lower sigue armada con margen vivo. Omitirlo
+// infra-contaba el margen comprometido y permitía sobre-asignar el mismo colateral.
 const ARM_OPEN_MARGIN_STATES = new Set([
-  "arming", "submitting", "armed", "disarming", "filled", "protecting", "protected", "unknown",
+  "arming", "submitting", "armed", "disarming", "filled", "protecting", "protected", "armed_lower_only", "unknown",
 ]);
 
 // Margen comprometido en una cuenta HL sumando AMBOS motores (IOC manual + triggers automáticos),

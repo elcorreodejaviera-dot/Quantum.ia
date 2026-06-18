@@ -1,0 +1,282 @@
+import React from 'react';
+import { Link, Navigate } from 'react-router-dom';
+import { useQuery, useMutation, usePaginatedQuery } from 'convex/react';
+import { api } from '../../convex/_generated/api';
+
+// (JAV-80) Pestaña de Administración: KPIs del sistema + usuarios (con desglose por posición) +
+// flujo de actividad + gestión de bugs. Solo admin. Reutiliza la paleta del portal (var(--green)…).
+
+function usd(n) {
+  if (n === null || n === undefined || !Number.isFinite(n)) return '—';
+  const a = Math.abs(n);
+  if (a >= 1000) return '$' + (n / 1000).toFixed(a >= 100000 ? 0 : 1) + 'k';
+  return '$' + n.toFixed(0);
+}
+function timeShort(ms) {
+  try { return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+  catch { return ''; }
+}
+
+function PositionCard({ pos }) {
+  const p = pos.pool;
+  const lev = pos.kind === 'il' ? `IL short ${pos.leverage ?? '?'}×` : `${pos.direction ?? ''} ${pos.leverage ?? '?'}×`;
+  return (
+    <div className="av-pos">
+      <div className="av-pos-top">
+        <div className="av-nft"><span>UNI<br />v3</span></div>
+        <div className="av-pos-title">{p ? p.pair : '—'}
+          <small>{p ? `Uniswap v3 · ${p.network}` : 'sin pool'}</small></div>
+        {p?.tokenId != null && <span className="av-nftid">NFT #{p.tokenId}</span>}
+        {pos.armStatus && <span className="av-range in">{pos.armStatus}</span>}
+      </div>
+      <div className="av-pos-grid">
+        <div className="av-cell"><div className="k">Liquidez / TVL</div><div className="vv">{usd(p?.tvl)}</div></div>
+        <div className="av-cell"><div className="k">Rango</div><div className="vv">{p ? `${p.minRange}–${p.maxRange}` : '—'}</div></div>
+        <div className="av-cell"><div className="k">Fees 1d</div><div className="vv">{usd(p?.fees1d)}</div></div>
+        <div className="av-cell"><div className="k">Cobertura</div><div className="vv">{usd(pos.hedgeNotionalUsd)}</div></div>
+      </div>
+      <div className="av-pos-foot">
+        <span className="av-tag norevert">Revert: — (integración pendiente)</span>
+        <span className="av-tag il">Cobertura HL: {lev}</span>
+        {pos.armStatus && <span className="av-tag ok">{pos.armStatus}</span>}
+      </div>
+    </div>
+  );
+}
+
+function UserRow({ u }) {
+  const [open, setOpen] = React.useState(false);
+  const detail = useQuery(api.admin.getUserDetail, open ? { userId: u.userId } : 'skip');
+  const pct = u.plan && u.plan.cap > 0 && detail?.coverageUsed != null
+    ? Math.min(100, (detail.coverageUsed / u.plan.cap) * 100) : 0;
+  const statusEl = u.role === 'admin'
+    ? <span className="av-st admin">● admin</span>
+    : u.suspended ? <span className="av-st block">suspendido</span>
+    : u.plan ? <span className="av-st on">● activo</span>
+    : <span className="av-st block">◌ sin plan</span>;
+  return (
+    <div className={`av-urow${open ? ' open' : ''}`}>
+      <div className="av-main" role="button" tabIndex={0} aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen((v) => !v); } }}>
+        <div className="av-uname"><span className="av-chev">▶</span>{u.email ?? u.name ?? u.userId.slice(0, 8)}</div>
+        <div className="av-plan">{u.role === 'admin' ? 'Admin · ∞' : u.plan ? `${u.plan.label} · ${usd(u.plan.cap)}` : 'Sin plan'}</div>
+        <div className="av-cov">
+          {u.plan ? (<><div className="av-bar"><i style={{ width: `${pct}%` }} /></div>
+            <small>{detail ? usd(detail.coverageUsed) : '…'} / {usd(u.plan.cap)}</small></>) : <small className="faint">—</small>}
+        </div>
+        <div className="num">{u.activeBots}</div>
+        <div>{u.hasHlAccount ? <span className="faint" style={{ fontSize: 11 }}>HL ✓</span> : <span className="faint" style={{ fontSize: 11 }}>—</span>}</div>
+        <div>{statusEl}</div>
+      </div>
+      {open && (
+        <div className="av-detail">
+          {detail === undefined && <div className="faint" style={{ padding: 8 }}>Cargando…</div>}
+          {detail && detail.positions.length === 0 && <div className="faint" style={{ padding: 8 }}>Sin bots activos.</div>}
+          {detail && detail.positions.map((pos) => <PositionCard key={pos.botId} pos={pos} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function AdminView() {
+  const me = useQuery(api.users.getUser, {});
+  // (CodeRabbit) Gatear las queries admin con 'skip' hasta confirmar rol admin: un no-admin NO debe
+  // disparar consultas admin (que el servidor rechazaría con Forbidden) antes del redirect.
+  const isAdmin = me?.role === 'admin';
+  const stats = useQuery(api.admin.getSystemStats, isAdmin ? {} : 'skip');
+  const activity = useQuery(api.admin.listActivity, isAdmin ? { limit: 40 } : 'skip');
+  const users = usePaginatedQuery(api.admin.listUsersOverview, isAdmin ? {} : 'skip', { initialNumItems: 25 });
+  const [bugFilter, setBugFilter] = React.useState('');
+  const bugs = usePaginatedQuery(api.bugReports.listBugReports,
+    isAdmin ? (bugFilter ? { status: bugFilter } : {}) : 'skip', { initialNumItems: 20 });
+  const bugCounts = useQuery(api.bugReports.countBugReportsByStatus, isAdmin ? {} : 'skip');
+  const setBugStatus = useMutation(api.bugReports.setBugStatus);
+
+  const simConfig = useQuery(api.systemConfig.getConfig, { key: 'simulationMode' });
+  const tradingConfig = useQuery(api.systemConfig.getConfig, { key: 'tradingEnabled' });
+  const setSim = useMutation(api.systemConfig.setSimulationMode);
+  const setTrading = useMutation(api.systemConfig.setTradingEnabled);
+  const simOn = simConfig?.value === true;
+  const tradingOn = tradingConfig?.value === true;
+
+  if (me === undefined) return <div className="av-wrap"><p className="faint">Cargando…</p></div>;
+  if (!me || me.role !== 'admin') return <Navigate to="/dashboard" replace />;
+
+  return (
+    <div className="av-wrap">
+      <AdminStyles />
+      <div className="av-top">
+        <div className="av-brand"><b>Quantum</b>.ia</div>
+        <div className="av-tabs">
+          <Link to="/dashboard" className="av-tab">Portal</Link>
+          <span className="av-tab active">Admin ●</span>
+        </div>
+        <div className="av-who">{me.email ?? 'admin'} <b>(admin)</b></div>
+      </div>
+
+      <div className="av-head">
+        <h1>Panel de Administración</h1>
+        <span className={`av-pill ${tradingOn ? 'green' : 'faint'}`}>{tradingOn ? 'Trading LIVE' : 'Trading OFF'}</span>
+        <span className={`av-pill ${simOn ? 'amber' : 'faint'}`}>{simOn ? 'SIM ON' : 'SIM OFF'}</span>
+        <div className="av-actions">
+          <button className="av-mini" onClick={() => setSim({ enabled: !simOn })}>{simOn ? 'Desactivar SIM' : 'Activar SIM'}</button>
+          <button className="av-mini" disabled={simOn} onClick={() => setTrading({ enabled: !tradingOn })}>{tradingOn ? 'Desactivar LIVE' : 'Activar LIVE'}</button>
+          <button className="av-kill" onClick={() => setTrading({ enabled: false })}>🛑 DETENER TODO</button>
+        </div>
+      </div>
+
+      {/* KPIs */}
+      <div className="av-kpis">
+        <Kpi label="Capital en HL ahora" val={usd(stats?.capitalInHL)} sub="armado + ejecutándose" accent />
+        <Kpi label="En movimiento" val={usd(stats?.marginCommitted)} sub="margen comprometido" />
+        <Kpi label="TVL en pools" val={usd(stats?.tvlPools)} sub="Σ posiciones" />
+        <Kpi label="Volumen 24h" val={usd(stats?.volume24h)} sub="trades" />
+        <Kpi label="Bots activos" val={stats?.activeBots ?? '—'} sub={`${stats?.activeUsers ?? '–'} / ${stats?.totalUsers ?? '–'} usuarios`} />
+      </div>
+
+      {/* Usuarios */}
+      <div className="av-section">
+        <div className="av-shead"><h2>USUARIOS</h2></div>
+        <div className="av-uhead">
+          <span>Usuario</span><span>Plan</span><span>Cobertura</span><span>Bots</span><span>HL</span><span>Estado</span>
+        </div>
+        {users.results.map((u) => <UserRow key={u.userId} u={u} />)}
+        {users.status === 'CanLoadMore' && <button className="av-more" onClick={() => users.loadMore(25)}>Cargar más</button>}
+      </div>
+
+      <div className="av-cols">
+        {/* Actividad */}
+        <div className="av-section">
+          <div className="av-shead"><h2>FLUJO DE ACTIVIDAD</h2><span className="av-pill green">● en vivo</span></div>
+          {(activity ?? []).map((e, i) => (
+            <div className="av-feed" key={i}>
+              <span className="t">{timeShort(e.at)}</span>
+              <span className="who2">{e.who ?? (e.type === 'admin' ? 'admin' : '—')}</span>
+              <span className="ev">{e.text}</span>
+            </div>
+          ))}
+          {activity && activity.length === 0 && <div className="faint" style={{ padding: 12 }}>Sin actividad reciente.</div>}
+        </div>
+
+        {/* Bugs */}
+        <div className="av-section">
+          <div className="av-shead"><h2>🐛 BUGS</h2>
+            {bugCounts && <span className="av-pill red">{bugCounts.new} nuevos</span>}
+            <select className="av-mini" value={bugFilter} onChange={(e) => setBugFilter(e.target.value)}>
+              <option value="">todos</option><option value="new">nuevos</option>
+              <option value="in_review">en revisión</option><option value="resolved">resueltos</option>
+            </select>
+          </div>
+          {bugs.results.map((b) => (
+            <div className="av-bug" key={b.id}>
+              <span className={`av-bst ${b.status}`}>{b.status === 'new' ? 'NUEVO' : b.status === 'in_review' ? 'REVISIÓN' : 'RESUELTO'}</span>
+              <div className="av-bugtxt">
+                <b>{b.userEmail ?? b.userName ?? '—'}</b> — {b.message}
+                {b.attachments.map((a, i) => a.url && <a key={i} className="av-clip" href={a.url} target="_blank" rel="noreferrer"> 📎 ver</a>)}
+                <div className="faint" style={{ fontSize: 11 }}>{timeShort(b.createdAt)}{b.context?.url ? ` · ${b.context.url}` : ''}</div>
+              </div>
+              <div className="av-bugact">
+                {b.status !== 'in_review' && <button className="av-mini" onClick={() => setBugStatus({ id: b.id, status: 'in_review' })}>revisión</button>}
+                {b.status !== 'resolved' && <button className="av-mini" onClick={() => setBugStatus({ id: b.id, status: 'resolved' })}>✓</button>}
+              </div>
+            </div>
+          ))}
+          {bugs.results.length === 0 && <div className="faint" style={{ padding: 12 }}>Sin bugs.</div>}
+          {bugs.status === 'CanLoadMore' && <button className="av-more" onClick={() => bugs.loadMore(20)}>Cargar más</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Kpi({ label, val, sub, accent }) {
+  return (
+    <div className={`av-card${accent ? ' accent' : ''}`}>
+      <div className="k">{label}</div>
+      <div className="vbig">{val}</div>
+      <div className="s">{sub}</div>
+    </div>
+  );
+}
+
+// Estilos scoped de la vista admin — usan los tokens globales del portal (var(--green)…).
+function AdminStyles() {
+  return (<style>{`
+  .av-wrap{max-width:1180px;margin:0 auto;padding:0 20px 60px;color:var(--text);font-family:var(--font)}
+  .av-top{display:flex;align-items:center;gap:20px;padding:16px 0;border-bottom:1px solid var(--line)}
+  .av-brand{font-weight:700}.av-brand b{color:var(--green)}
+  .av-tabs{display:flex;gap:6px}.av-tab{padding:7px 16px;border-radius:10px;color:var(--muted);font-weight:600;text-decoration:none}
+  .av-tab.active{background:var(--panel);color:var(--text);box-shadow:inset 0 0 0 1px var(--line)}
+  .av-who{margin-left:auto;color:var(--muted);font-size:13px}.av-who b{color:var(--text)}
+  .av-head{display:flex;align-items:center;gap:12px;margin:24px 0 16px;flex-wrap:wrap}
+  .av-head h1{font-size:20px;margin:0}
+  .av-pill{font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px}
+  .av-pill.green{background:rgba(0,200,5,.14);color:var(--green)}
+  .av-pill.amber{background:rgba(255,220,0,.16);color:var(--amber)}
+  .av-pill.red{background:rgba(255,80,0,.16);color:var(--red)}
+  .av-pill.faint{background:#1a1a1a;color:var(--faint)}
+  .av-actions{margin-left:auto;display:flex;gap:8px}
+  .av-mini{background:var(--panel-2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer}
+  .av-mini:hover{border-color:var(--green)}.av-mini:disabled{opacity:.4;cursor:not-allowed}
+  .av-kill{background:var(--red);color:#fff;border:none;padding:8px 14px;border-radius:9px;font-weight:700;cursor:pointer}
+  .av-kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:18px}
+  .av-card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}
+  .av-card.accent{border-left:3px solid var(--green)}
+  .av-card .k{color:var(--muted);font-size:12px;font-weight:600}
+  .av-card .vbig{font-size:23px;font-weight:750;margin-top:8px}
+  .av-card .s{font-size:11px;color:var(--faint);margin-top:4px}
+  .av-section{background:var(--panel);border:1px solid var(--line);border-radius:14px;margin-bottom:18px;overflow:hidden}
+  .av-shead{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--line)}
+  .av-shead h2{font-size:14px;margin:0;font-weight:700}
+  .av-shead select{margin-left:auto}
+  .av-uhead,.av-main{display:grid;grid-template-columns:1.6fr 1.1fr 1.5fr .5fr .5fr .9fr;gap:10px;align-items:center}
+  .av-uhead{padding:8px 18px;color:var(--faint);font-size:11px;text-transform:uppercase;border-bottom:1px solid var(--line)}
+  .av-urow{border-bottom:1px solid var(--line)}
+  .av-main{padding:12px 18px;cursor:pointer}.av-main:hover{background:var(--panel-2)}
+  .av-uname{font-weight:600;display:flex;align-items:center;gap:8px}
+  .av-chev{color:var(--faint);font-size:11px;transition:transform .15s}.av-urow.open .av-chev{transform:rotate(90deg)}
+  .av-plan{font-size:12px;color:var(--muted)}
+  .av-cov{display:flex;align-items:center;gap:8px}
+  .av-bar{flex:1;height:6px;background:#1a1a1a;border-radius:99px;overflow:hidden;min-width:50px}
+  .av-bar>i{display:block;height:100%;background:var(--green)}
+  .av-cov small{color:var(--faint);font-size:11px}
+  .num{font-variant-numeric:tabular-nums}.faint{color:var(--faint)}
+  .av-st{font-size:12px;font-weight:600}.av-st.on{color:var(--green)}.av-st.block{color:var(--amber)}.av-st.admin{color:var(--green)}
+  .av-detail{background:#0c0c0c;padding:12px 18px 14px 38px}
+  .av-pos{background:var(--panel-2);border:1px solid var(--line);border-radius:12px;margin-bottom:10px;overflow:hidden}
+  .av-pos:last-child{margin-bottom:0}
+  .av-pos-top{display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid var(--line)}
+  .av-nft{width:32px;height:32px;border-radius:9px;flex:none;background:conic-gradient(from 200deg,#ff007a,#fc72ff,#ff007a,#d633ff,#ff007a);position:relative}
+  .av-nft span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:800;color:#fff;text-align:center;line-height:1}
+  .av-pos-title{font-weight:700}.av-pos-title small{color:var(--faint);font-weight:500;font-size:11px;margin-left:6px}
+  .av-nftid{font-size:11px;color:#fc72ff;background:rgba(252,114,255,.13);padding:2px 8px;border-radius:6px}
+  .av-range{margin-left:auto;font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px}
+  .av-range.in{background:rgba(0,200,5,.14);color:var(--green)}
+  .av-pos-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line)}
+  .av-cell{background:var(--panel-2);padding:10px 14px}
+  .av-cell .k{font-size:10px;color:var(--faint);text-transform:uppercase}
+  .av-cell .vv{font-size:14px;font-weight:700;margin-top:3px}
+  .av-pos-foot{display:flex;gap:8px;padding:10px 14px;border-top:1px solid var(--line);flex-wrap:wrap}
+  .av-tag{font-size:10px;font-weight:700;padding:3px 9px;border-radius:6px;background:rgba(255,255,255,.06);color:var(--muted)}
+  .av-tag.ok{background:rgba(0,200,5,.14);color:var(--green)}
+  .av-tag.norevert{background:#1a1a1a;color:var(--faint)}
+  .av-cols{display:grid;grid-template-columns:1.4fr 1fr;gap:18px}
+  .av-feed{display:flex;gap:10px;padding:10px 18px;border-bottom:1px solid var(--line);font-size:13px;align-items:baseline}
+  .av-feed .t{color:var(--faint);width:42px;flex:none;font-variant-numeric:tabular-nums}
+  .av-feed .who2{font-weight:600;width:90px;flex:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .av-feed .ev{color:var(--muted)}
+  .av-bug{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:start;padding:11px 18px;border-bottom:1px solid var(--line);font-size:13px}
+  .av-bst{font-size:10px;font-weight:700;padding:3px 8px;border-radius:6px;white-space:nowrap;margin-top:2px}
+  .av-bst.new{background:rgba(255,80,0,.16);color:var(--red)}
+  .av-bst.in_review{background:rgba(255,220,0,.16);color:var(--amber)}
+  .av-bst.resolved{background:rgba(0,200,5,.14);color:var(--green)}
+  .av-bugtxt{color:var(--muted)}.av-bugtxt b{color:var(--text)}
+  .av-clip{color:var(--green);font-size:11px;text-decoration:none}
+  .av-bugact{display:flex;gap:6px}
+  .av-more{width:100%;background:transparent;color:var(--green);border:none;border-top:1px solid var(--line);padding:10px;cursor:pointer;font-size:12px}
+  @media(max-width:900px){.av-kpis{grid-template-columns:repeat(2,1fr)}.av-cols{grid-template-columns:1fr}
+    .av-uhead,.av-main{grid-template-columns:1.4fr 1fr .6fr}.av-uhead span:nth-child(n+4),.av-main>*:nth-child(n+4){display:none}}
+  `}</style>);
+}

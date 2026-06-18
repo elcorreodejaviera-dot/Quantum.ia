@@ -1,5 +1,7 @@
 import React from 'react'
+import { Link } from 'react-router-dom'
 import { useUser, useClerk } from '@clerk/clerk-react'
+import BugReportButton from './BugReportButton'
 import { useConvexAuth, useQuery, useMutation, useAction, usePaginatedQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState, useWalletBalances, useHLAccountBalance, useHLAccountsBalances, useHLAgentExpiry, useMetaMaskSigner, executeHLTestnetOrder } from '../hooks/useHyperliquid'
@@ -3966,10 +3968,13 @@ function Dashboard({ user, onLogout, userId }) {
             {theme === 'dark' ? 'Modo blanco' : 'Modo oscuro'}
           </button>
           {userLoaded && !isAdmin && <span className="pill faint">Solo lectura</span>}
+          {isAdmin && <Link to="/admin" className="ghost-btn" style={{ textDecoration: 'none' }}>Admin</Link>}
           <span className="pill">{user.name}</span>
           <button className="ghost-btn" onClick={onLogout}>Salir</button>
         </div>
       </header>
+
+      <BugReportButton />
 
       {IS_TESTNET && (
         <div className="testnet-banner">

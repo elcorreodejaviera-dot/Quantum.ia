@@ -11,8 +11,10 @@
 import type * as actions_defillama from "../actions/defillama.js";
 import type * as actions_poolScanner from "../actions/poolScanner.js";
 import type * as actions_uniswap from "../actions/uniswap.js";
+import type * as admin from "../admin.js";
 import type * as alerts from "../alerts.js";
 import type * as bots from "../bots.js";
+import type * as bugReports from "../bugReports.js";
 import type * as coverageUsage from "../coverageUsage.js";
 import type * as crons from "../crons.js";
 import type * as executions from "../executions.js";
@@ -47,8 +49,10 @@ declare const fullApi: ApiFromModules<{
   "actions/defillama": typeof actions_defillama;
   "actions/poolScanner": typeof actions_poolScanner;
   "actions/uniswap": typeof actions_uniswap;
+  admin: typeof admin;
   alerts: typeof alerts;
   bots: typeof bots;
+  bugReports: typeof bugReports;
   coverageUsage: typeof coverageUsage;
   crons: typeof crons;
   executions: typeof executions;

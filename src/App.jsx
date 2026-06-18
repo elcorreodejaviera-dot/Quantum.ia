@@ -2,6 +2,7 @@ import React from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { SignIn, SignUp, SignedIn, SignedOut } from '@clerk/clerk-react'
 import BotPortal from './components/BotPortal'
+import AdminView from './components/AdminView'
 import AuthLayout from './components/AuthLayout'
 
 function ProtectedRoute({ children }) {
@@ -32,6 +33,14 @@ export default function App() {
         element={
           <ProtectedRoute>
             <BotPortal />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/admin"
+        element={
+          <ProtectedRoute>
+            <AdminView />
           </ProtectedRoute>
         }
       />

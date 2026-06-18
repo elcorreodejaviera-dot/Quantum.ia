@@ -82,6 +82,9 @@ export const getUserAdminLiveSnapshot = action({
     // referenciadas por las posiciones visibles).
     const hlAccounts: any[] = [];
     const pnlByAccountCoin: Record<string, Record<string, number>> = {};
+    // (Fix Cobertura) Nocional REAL de la posición HL por cuenta+coin = cobertura activa. bot.hedgeNotionalUsd
+    // es null por diseño (el motor dimensiona on-chain), así que la "Cobertura (cap)" se lee de aquí.
+    const coverageByAccountCoin: Record<string, Record<string, number>> = {};
     let hlPartial = false;
     for (const acct of targets.hlAccounts) {
       const ch = await fetchClearinghouse(acct.tradingAccountAddress);
@@ -97,16 +100,22 @@ export const getUserAdminLiveSnapshot = action({
         collateralUsd: Number.isFinite(accountValue) ? accountValue : null,
       });
       const perCoin: Record<string, number> = {};
+      const covCoin: Record<string, number> = {};
       for (const ap of ch?.assetPositions ?? []) {
         const coin = ap?.position?.coin;
         const upnl = Number(ap?.position?.unrealizedPnl);
         if (typeof coin === "string" && Number.isFinite(upnl)) {
           perCoin[coin] = (perCoin[coin] ?? 0) + upnl;
         }
+        const posValue = Math.abs(Number(ap?.position?.positionValue));
+        if (typeof coin === "string" && Number.isFinite(posValue) && posValue > 0) {
+          covCoin[coin] = (covCoin[coin] ?? 0) + posValue;
+        }
       }
       pnlByAccountCoin[String(acct.id)] = perCoin;
+      coverageByAccountCoin[String(acct.id)] = covCoin;
     }
 
-    return { network, positions, hlAccounts, pnlByAccountCoin, partial: { positions: positionsPartial, hl: hlPartial } };
+    return { network, positions, hlAccounts, pnlByAccountCoin, coverageByAccountCoin, partial: { positions: positionsPartial, hl: hlPartial } };
   },
 });

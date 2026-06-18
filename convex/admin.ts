@@ -60,17 +60,34 @@ export const getSystemStats = query({
       else unknownLiquidityCount++;
     }
 
+    // Volumen 24h = nocional negociado por AMBOS motores. trades_history NO captura el motor automático
+    // (trigger_arms, JAV-44) — solo el IOC legacy — por eso antes salía ~$0 con bots IL. Fuentes:
+    //  - execution_requests (motor IOC): notional, por índice by_created.
+    //  - trigger_arms (motor automático): nocional REAL del fill (filledSize×entryPrice). Sin índice global
+    //    by_created → escaneo acotado por by_updated (SCAN_CAP) y se filtra por createdAt.
+    // Sin doble conteo: cada motor tiene su tabla. Ventana actual [since,now) y previa [prevSince,since).
     const since = Date.now() - DAY_MS;
-    const trades = await ctx.db.query("trades_history")
-      .withIndex("by_timestamp", (q) => q.gte("timestamp", since)).take(SCAN_CAP);
-    let volume24h = 0;
-    for (const t of trades) volume24h += Math.abs((t.amount ?? 0) * (t.price ?? 0));
-
-    // % vs las 24h anteriores (ventana [since-1d, since)). null si no hay base previa (evita /0).
-    const prevTrades = await ctx.db.query("trades_history")
-      .withIndex("by_timestamp", (q) => q.gte("timestamp", since - DAY_MS).lt("timestamp", since)).take(SCAN_CAP);
-    let volumePrev24h = 0;
-    for (const t of prevTrades) volumePrev24h += Math.abs((t.amount ?? 0) * (t.price ?? 0));
+    const prevSince = since - DAY_MS;
+    let volume24h = 0, volumePrev24h = 0;
+    const addVol = (notional: number, ts: number) => {
+      if (!Number.isFinite(notional) || notional <= 0) return;
+      if (ts >= since) volume24h += notional;
+      else if (ts >= prevSince) volumePrev24h += notional;
+    };
+    const execs24 = await ctx.db.query("execution_requests")
+      .withIndex("by_created", (q) => q.gte("createdAt", prevSince)).take(SCAN_CAP);
+    for (const e of execs24) addVol(e.notional, e.createdAt);
+    const armsScan = await ctx.db.query("trigger_arms").withIndex("by_updated").order("desc").take(SCAN_CAP);
+    for (const a of armsScan) {
+      const filledNotional = (a.filledSize && a.entryPrice) ? a.filledSize * a.entryPrice : 0;
+      if (filledNotional <= 0) continue;
+      // Imputar por el MOMENTO DEL FILL (filledAt), no por createdAt: un arm creado hace días pero llenado
+      // hoy debe contar hoy. updatedAt solo como fallback legacy (settleArm fija filledAt al confirmar el fill).
+      const ts = a.filledAt ?? a.updatedAt;
+      if (ts < prevSince) continue;
+      addVol(filledNotional, ts);
+    }
+    // % vs 24h previas. null si no hay base previa (evita /0).
     const volume24hDelta = volumePrev24h > 0 ? ((volume24h - volumePrev24h) / volumePrev24h) * 100 : null;
 
     // Red efectiva = fuente de verdad del backend (no asumir desde el front). Defensivo: nunca rompe la vista.

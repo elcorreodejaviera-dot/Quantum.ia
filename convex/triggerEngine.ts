@@ -108,6 +108,17 @@ export const armPoolBotEntry = action({
 // Núcleo del armado SIN auth de usuario (lo invocan armPoolBotEntry y el auto-rearm del cron). Revalida
 // TODOS los gates contra userId (no la identidad): permiso live, switches, ownership, kind/dirección,
 // pool, cuenta, sizing, reserva OCC y colocación. Coloca el trigger inferior (+ superior si aplica).
+// (JAV-53) Clasifica un rechazo DETERMINISTA de updateLeverage en un [kind] de auto-rearm y lo
+// prefija al mensaje persistido. Default [blocked_config] (config/leverage/activo/credencial corregible);
+// [blocked_margin] si el rechazo expresa margen. NUNCA [cancel] (eso es pausa/kill/pool cerrado).
+function classifyLeverageError(e: unknown): string {
+  const msg = String((e as Error)?.message ?? e);
+  const low = msg.toLowerCase();
+  const kind = (low.includes("margin") || low.includes("margen") || low.includes("insufficient"))
+    ? "blocked_margin" : "blocked_config";
+  return `[${kind}] updateLeverage rechazado: ${msg.slice(0, 200)}`;
+}
+
 export const armBotInternal = internalAction({
   args: { botId: v.id("bots"), userId: v.id("users"), rearmToken: v.optional(v.string()) },
   handler: async (ctx, { botId, userId, rearmToken }): Promise<any> => {
@@ -291,8 +302,33 @@ export const armBotInternal = internalAction({
     if (!sub.ok) return { ok: false, status: "aborted", armId, reason: sub.reason };
     const token = sub.token;
 
-    // Apalancamiento entero en HL (isolated).
-    await exchange.updateLeverage({ asset: assetId, isCross: false, leverage: appliedLeverage });
+    // Apalancamiento entero en HL (isolated). (JAV-53) updateLeverage corre ANTES de colocar entradas:
+    // si lanza, NUNCA se envió la orden → no hay posición.
+    try {
+      await exchange.updateLeverage({ asset: assetId, isCross: false, leverage: appliedLeverage });
+    } catch (e) {
+      if (e instanceof TransportError) {
+        // INCIERTO (timeout/red/5xx): HL pudo aplicar el leverage, pero no hay entrada enviada. NO
+        // terminalizar a failed: liberar el lease y dejar reconciliable (el cron: unknownOid → prueba
+        // negativa → failed tras cuarentena). Mismo patrón que el gate fallido.
+        await ctx.runMutation(internal.triggerArms.releaseArmReconcile, { armId, token });
+        return { ok: false, status: "gated", armId, reason: "updateLeverage_transport" };
+      }
+      // DETERMINISTA: cerrar el arm YA (libera margen sin esperar la cuarentena) probando sin-envío.
+      const prefixed = classifyLeverageError(e);
+      const res = await ctx.runMutation(internal.triggerArms.failArmPreOrder, {
+        armId, token, reason: "update_leverage_rejected", error: prefixed,
+      });
+      // (Codex rev.2, BAJO) Si algún guard NO se cumplió (cron tomó el lease, o —defensivo— una entrada
+      // ya salió) → NO reportar failed: liberar lease (best-effort) y abortar para el camino normal.
+      if (!res.ok) {
+        await ctx.runMutation(internal.triggerArms.releaseArmReconcile, { armId, token });
+        return { ok: false, status: "aborted", armId, reason: "updateLeverage_failed_guard" };
+      }
+      // Terminalizado: lanzar el error [kind] → el cron de auto-rearm lo mapea (blocked reevaluable) y
+      // el armado MANUAL lo surfacea al usuario. (invariante 5 del plan.)
+      throw new Error(prefixed);
+    }
 
     // (Fix #1) Gate ATÓMICO justo antes del envío: updateLeverage pudo tardar y un kill switch/pausa/
     // revocación ocurrir en esa ventana (desiredState no lo refleja). Revalidar TODO bajo el lease.

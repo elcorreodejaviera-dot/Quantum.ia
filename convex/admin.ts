@@ -6,15 +6,14 @@ import { requireAdmin, hasPermission } from "./helpers";
 import { getPlan } from "./plans";
 import { consumedCoverageByPool } from "./coverageUsage";
 import { hlNetwork } from "./hlNetwork";
+// (JAV-85 #7) Fuente ÚNICA de los estados con margen comprometido (antes copiados a mano aquí, lo que
+// causó la divergencia del bug #1). Son const Set sin lógica money-path → seguro importarlos.
+import { OPEN_MARGIN_STATES, ARM_OPEN_MARGIN_STATES } from "./executions";
 
 // (JAV-80) Queries de la pestaña de Administración. TODAS admin-only (requireAdmin) y ACOTADAS.
 // NO money-path: solo lectura/cache (la lógica de trading no se toca). Estado HL en vivo NO va aquí
 // (una query no hace red): se expone bajo demanda en una acción aparte (futuro getUserHLState).
 
-// Estados que mantienen capital/margen comprometido (copias LOCALES de solo lectura para no importar
-// del money-path executions.ts; coherentes con OPEN_MARGIN_STATES / ARM_OPEN_MARGIN_STATES de allí).
-const EXEC_OPEN = ["pending", "submitting", "entry_filled", "protected", "sl_failed", "unknown"] as const;
-const ARM_OPEN = ["arming", "submitting", "armed", "disarming", "filled", "protecting", "protected", "armed_lower_only", "unknown"] as const;
 const ARM_TERMINAL = new Set(["disarmed", "closed", "failed"]);
 const SCAN_CAP = 1000;   // (Codex #2) tope duro por lectura — beta. Materializar si el volumen crece (JAV-79).
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -25,19 +24,16 @@ export const getSystemStats = query({
   handler: async (ctx): Promise<any> => {
     await requireAdmin(ctx);
 
+    // (JAV-85 #8) Escaneos por-estado en paralelo (son independientes) en vez de secuenciales.
     let capitalExec = 0, marginExec = 0, openExec = 0;
-    for (const status of EXEC_OPEN) {
-      const rows = await ctx.db.query("execution_requests")
-        .withIndex("by_status_created", (q) => q.eq("status", status)).take(SCAN_CAP);
-      for (const r of rows) { capitalExec += r.notional; marginExec += (r.marginReserved ?? r.notional); openExec++; }
-    }
+    const execScans = await Promise.all([...OPEN_MARGIN_STATES].map((status) =>
+      ctx.db.query("execution_requests").withIndex("by_status_created", (q) => q.eq("status", status as any)).take(SCAN_CAP)));
+    for (const rows of execScans) for (const r of rows) { capitalExec += r.notional; marginExec += (r.marginReserved ?? r.notional); openExec++; }
 
     let capitalArm = 0, marginArm = 0, liveArm = 0;
-    for (const status of ARM_OPEN) {
-      const rows = await ctx.db.query("trigger_arms")
-        .withIndex("by_status_updated", (q) => q.eq("status", status)).take(SCAN_CAP);
-      for (const a of rows) { capitalArm += a.reservedNotional; marginArm += a.marginReserved; liveArm++; }
-    }
+    const armScans = await Promise.all([...ARM_OPEN_MARGIN_STATES].map((status) =>
+      ctx.db.query("trigger_arms").withIndex("by_status_updated", (q) => q.eq("status", status as any)).take(SCAN_CAP)));
+    for (const rows of armScans) for (const a of rows) { capitalArm += a.reservedNotional; marginArm += a.marginReserved; liveArm++; }
 
     const bots = await ctx.db.query("bots").take(SCAN_CAP);
     const activeBots = bots.filter((b) => b.active === true);
@@ -79,15 +75,15 @@ export const getSystemStats = query({
     const execs24 = await ctx.db.query("execution_requests")
       .withIndex("by_created", (q) => q.gte("createdAt", prevSince)).order("desc").take(SCAN_CAP);
     for (const e of execs24) addVol(e.notional, e.createdAt);
-    const armsScan = await ctx.db.query("trigger_arms").withIndex("by_updated").order("desc").take(SCAN_CAP);
+    // (JAV-85 #5) Índice by_filledAt: la ventana del escaneo (filledAt) coincide con la clave de imputación
+    // → ya no se pierden arms llenados en la ventana por estar fuera del top-SCAN_CAP de by_updated.
+    const armsScan = await ctx.db.query("trigger_arms")
+      .withIndex("by_filledAt", (q) => q.gte("filledAt", prevSince)).order("desc").take(SCAN_CAP);
     for (const a of armsScan) {
+      if (a.filledAt == null) continue;
       const filledNotional = (a.filledSize && a.entryPrice) ? a.filledSize * a.entryPrice : 0;
       if (filledNotional <= 0) continue;
-      // Imputar por el MOMENTO DEL FILL (filledAt), no por createdAt: un arm creado hace días pero llenado
-      // hoy debe contar hoy. updatedAt solo como fallback legacy (settleArm fija filledAt al confirmar el fill).
-      const ts = a.filledAt ?? a.updatedAt;
-      if (ts < prevSince) continue;
-      addVol(filledNotional, ts);
+      addVol(filledNotional, a.filledAt);
     }
     // % vs 24h previas. null si no hay base previa (evita /0).
     const volume24hDelta = volumePrev24h > 0 ? ((volume24h - volumePrev24h) / volumePrev24h) * 100 : null;

@@ -1,6 +1,6 @@
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
-import { requireUser } from "./helpers";
+import { getUserOrNull, requireUser } from "./helpers";
 import { hasNonTerminalArmForAccount } from "./triggerArms";
 
 // Legacy de cuenta única eliminado (status/revoke/getForUserInternal/save): usaban `.first()`
@@ -12,7 +12,8 @@ import { hasNonTerminalArmForAccount } from "./triggerArms";
 export const list = query({
   args: {},
   handler: async (ctx) => {
-    const user = await requireUser(ctx);
+    const user = await getUserOrNull(ctx);
+    if (!user) return []; // (JAV-82) race de primer login: aún sin doc Convex
     const creds = await ctx.db
       .query("hl_api_credentials")
       .withIndex("by_user", (q) => q.eq("userId", user._id))

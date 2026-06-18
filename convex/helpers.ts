@@ -17,6 +17,19 @@ export async function requireAuth(ctx: QueryCtx | MutationCtx | ActionCtx) {
   return identity;
 }
 
+// (JAV-82) Para LECTURAS por-usuario que montan en el primer login: si hay sesión Clerk pero el
+// doc de Convex aún no existe (race con getOrCreateUser, que corre en un useEffect posterior),
+// devuelve null en vez de lanzar "User not found". Sigue exigiendo identidad (sin sesión →
+// "Not authenticated", error legítimo). SOLO QueryCtx: imposible de usar en mutations/money-path
+// por tipo (ahí requireUser DEBE fallar). NO añadir MutationCtx a esta firma.
+export async function getUserOrNull(ctx: QueryCtx) {
+  const identity = await requireAuth(ctx);
+  return await ctx.db
+    .query("users")
+    .withIndex("by_clerk_id", (q) => q.eq("clerkId", identity.subject))
+    .first();
+}
+
 export async function requireUser(ctx: QueryCtx | MutationCtx) {
   const identity = await requireAuth(ctx);
   const user = await ctx.db

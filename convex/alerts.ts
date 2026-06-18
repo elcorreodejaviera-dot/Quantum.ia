@@ -1,11 +1,12 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
-import { requireUser } from "./helpers";
+import { getUserOrNull, requireUser } from "./helpers";
 
 export const listAlerts = query({
   args: {},
   handler: async (ctx) => {
-    const user = await requireUser(ctx);
+    const user = await getUserOrNull(ctx);
+    if (!user) return []; // (JAV-82) race de primer login: aún sin doc Convex
     return ctx.db
       .query("alerts")
       .withIndex("by_userId", (q) => q.eq("userId", user._id))
@@ -59,7 +60,8 @@ export const recordAlertTrigger = mutation({
 export const listAlertHistory = query({
   args: {},
   handler: async (ctx) => {
-    const user = await requireUser(ctx);
+    const user = await getUserOrNull(ctx);
+    if (!user) return []; // (JAV-82) race de primer login: aún sin doc Convex
     return ctx.db
       .query("alert_history")
       .withIndex("by_user_timestamp", (q) => q.eq("userId", user._id))

@@ -51,7 +51,9 @@ const ALLOWED: Record<string, Set<string>> = {
 // Reserva atómica (OCC) de idempotency + nocional, ANTES de tocar HL.
 // Margen de seguridad: FUENTE ÚNICA en leverage.ts (compartida con el dimensionado de autoleverage).
 // Estados que mantienen margen comprometido en la cuenta (todos menos los finales).
-const OPEN_MARGIN_STATES = new Set([
+// EXPORTADOS (JAV-85 #7): fuente ÚNICA. admin.ts los importa en vez de copiarlos a mano (evita la
+// divergencia que causó el bug JAV-85 #1). Son const Set sin lógica → seguro importarlos.
+export const OPEN_MARGIN_STATES = new Set([
   "pending", "submitting", "entry_filled", "protected", "sl_failed", "unknown",
 ]);
 // JAV-44: estados de un trigger_arm que mantienen margen comprometido (todos menos ARM_TERMINAL).
@@ -59,7 +61,7 @@ const OPEN_MARGIN_STATES = new Set([
 // (JAV-85 #1) armed_lower_only INCLUIDO: en reentry_coexist la reserva NO se reduce y
 // transitionToArmedLowerOnly no la libera → entry_lower sigue armada con margen vivo. Omitirlo
 // infra-contaba el margen comprometido y permitía sobre-asignar el mismo colateral.
-const ARM_OPEN_MARGIN_STATES = new Set([
+export const ARM_OPEN_MARGIN_STATES = new Set([
   "arming", "submitting", "armed", "disarming", "filled", "protecting", "protected", "armed_lower_only", "unknown",
 ]);
 

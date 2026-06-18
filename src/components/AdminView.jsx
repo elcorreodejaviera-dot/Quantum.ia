@@ -9,10 +9,13 @@ import { api } from '../../convex/_generated/api';
 function usd(n) {
   if (n === null || n === undefined || !Number.isFinite(n)) return '—';
   const a = Math.abs(n);
-  if (a >= 1_000_000) return '$' + (n / 1_000_000).toFixed(a >= 100_000_000 ? 0 : 1) + 'M';
-  if (a >= 1000) return '$' + (n / 1000).toFixed(a >= 100_000 ? 0 : 1) + 'k';
-  return '$' + n.toFixed(0);
+  const sign = n < 0 ? '-' : '';   // (JAV-85 #10a) signo ANTES del $: "-$1.5k", no "$-1.5k"
+  if (a >= 1_000_000) return sign + '$' + (a / 1_000_000).toFixed(a >= 100_000_000 ? 0 : 1) + 'M';
+  if (a >= 1000) return sign + '$' + (a / 1000).toFixed(a >= 100_000 ? 0 : 1) + 'k';
+  return sign + '$' + a.toFixed(0);
 }
+// (JAV-85 #6) baseAsset del bot ↔ símbolo de coin en HL (HL usa ETH/BTC, no WETH/WBTC).
+function hlCoin(s) { return s === 'WETH' ? 'ETH' : s === 'WBTC' ? 'BTC' : s; }
 // "$ monitoreado" con señal de datos incompletos (nulls): nunca presenta un número como si fuera completo.
 // known = cuántos pools aportaron dato; si NINGUNO lo aportó (known===0) y hay incompletos → "—", nunca "$0".
 function usdWithUnknown(n, unknown = 0, known = undefined) {
@@ -181,12 +184,13 @@ function UserRow({ u }) {
             const lp = live?.positions?.[pos.botId] ?? null;
             const acctPnl = (live && pos.hlAccountId && live.pnlByAccountCoin)
               ? live.pnlByAccountCoin[pos.hlAccountId] : null;
-            const pnl = (acctPnl && pos.baseAsset && acctPnl[pos.baseAsset] != null)
-              ? acctPnl[pos.baseAsset] : null;
+            const coin = hlCoin(pos.baseAsset);
+            const pnl = (acctPnl && coin && acctPnl[coin] != null)
+              ? acctPnl[coin] : null;
             const acctCov = (live && pos.hlAccountId && live.coverageByAccountCoin)
               ? live.coverageByAccountCoin[pos.hlAccountId] : null;
-            const coverageLive = (acctCov && pos.baseAsset && acctCov[pos.baseAsset] != null)
-              ? acctCov[pos.baseAsset] : null;
+            const coverageLive = (acctCov && coin && acctCov[coin] != null)
+              ? acctCov[coin] : null;
             const hlAccount = (live && pos.hlAccountId && live.hlAccounts)
               ? (live.hlAccounts.find((a) => a.id === pos.hlAccountId) ?? null) : null;
             return <PositionCard key={pos.botId} pos={pos} live={lp} liveLoading={liveLoading} pnl={pnl} hlAccount={hlAccount} coverageLive={coverageLive} />;
@@ -360,7 +364,7 @@ export default function AdminView() {
         {/* Bugs */}
         <div className="av-section">
           <div className="av-shead"><h2>🐛 BUGS</h2>
-            {bugCounts && <span className="av-pill red">{bugCounts.new} nuevos</span>}
+            {bugCounts && <span className="av-pill red">{bugCounts.new}{bugCounts.capped?.new ? '+' : ''} nuevos</span>}
             <select className="av-mini" value={bugFilter} onChange={(e) => setBugFilter(e.target.value)}>
               <option value="">todos</option><option value="new">nuevos</option>
               <option value="in_review">en revisión</option><option value="resolved">resueltos</option>

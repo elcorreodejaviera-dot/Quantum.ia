@@ -131,15 +131,20 @@ export const countBugReportsByStatus = query({
   args: {},
   handler: async (ctx) => {
     await requireAdmin(ctx);
+    // (JAV-85 #9) Acotado por COUNT_CAP (como el resto de queries admin); el badge muestra "N" o "N+" si
+    // se alcanza el tope. Evita el .collect() ilimitado (la tabla "resolved" crece sin fin).
+    const COUNT_CAP = 1000;
     const counts: Record<string, number> = { new: 0, in_review: 0, resolved: 0 };
+    const capped: Record<string, boolean> = {};
     for (const status of ["new", "in_review", "resolved"] as const) {
       const rows = await ctx.db
         .query("bug_reports")
         .withIndex("by_status_created", (q) => q.eq("status", status))
-        .collect();   // conteo exacto (no truncar a 500); beta-scale, optimizar si crece
+        .take(COUNT_CAP);
       counts[status] = rows.length;
+      capped[status] = rows.length === COUNT_CAP;
     }
-    return counts;
+    return { ...counts, capped };
   },
 });
 
@@ -152,9 +157,13 @@ export const setBugStatus = mutation({
   },
   handler: async (ctx, { id, status, adminNote }) => {
     await requireAdmin(ctx);
+    const existing = await ctx.db.get(id);
+    if (!existing) throw new Error("Reporte no encontrado");
     const patch: Record<string, unknown> = { status };
     if (adminNote !== undefined) patch.adminNote = adminNote.slice(0, 1000);
-    patch.resolvedAt = status === "resolved" ? Date.now() : undefined;
+    // (JAV-85 #10b) Preservar histórico: fijar resolvedAt solo al resolver por 1ª vez; NO borrarlo al
+    // reabrir (in_review/new) ni pisarlo al re-resolver.
+    if (status === "resolved" && existing.resolvedAt == null) patch.resolvedAt = Date.now();
     await ctx.db.patch(id, patch);
     return { ok: true as const };
   },

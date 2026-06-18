@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link, Navigate } from 'react-router-dom';
-import { useQuery, useMutation, usePaginatedQuery } from 'convex/react';
+import { useQuery, useMutation, usePaginatedQuery, useAction } from 'convex/react';
 import { api } from '../../convex/_generated/api';
 
 // (JAV-80) Pestaña de Administración: KPIs del sistema + usuarios (con desglose por posición) +
@@ -43,12 +43,18 @@ function timeShort(ms) {
   catch { return ''; }
 }
 
-function PositionCard({ pos }) {
+function PositionCard({ pos, live, liveLoading, pnl, hlAccount }) {
   const p = pos.pool;
   const lev = pos.kind === 'il' ? `IL short ${pos.leverage ?? '?'}×` : `${pos.direction ?? ''} ${pos.leverage ?? '?'}×`;
   const ft = feeTierPct(p?.feeTier);
   const sub = p ? `Uniswap v3${ft ? ` · ${ft}` : ''} · ${p.network}` : 'sin pool';
   const link = p ? poolLink(p.network, p.tokenId) : null;
+  // Liquidez LP: en vivo (actual) si está, si no la inicial cacheada. Fees: s/cobrar en vivo, si no 1d.
+  const hasLiveLiq = live && live.liquidityUsd != null;
+  const liqLabel = hasLiveLiq ? 'Liquidez LP' : 'Liquidez LP (inicial)';
+  const liqVal = hasLiveLiq ? usd(live.liquidityUsd) : (liveLoading ? '…' : usd(p?.initialLiquidityUsd));
+  const feesLabel = live ? 'Fees s/cobrar' : 'Fees 1d';
+  const feesVal = live ? (live.feesUncollectedUsd != null ? usd(live.feesUncollectedUsd) : '—') : usd(p?.fees1d);
   return (
     <div className="av-pos">
       <div className="av-pos-top">
@@ -57,26 +63,57 @@ function PositionCard({ pos }) {
           <small>{sub}</small></div>
         {p?.tokenId != null && <span className="av-nftid">NFT #{p.tokenId}</span>}
         {link && <a className="av-link" href={link} target="_blank" rel="noreferrer">↗ ver</a>}
-        {pos.armStatus && <span className="av-range in">{pos.armStatus}</span>}
+        {live?.inRange === true && <span className="av-range in">in range</span>}
+        {live?.inRange === false && <span className="av-range out">out of range</span>}
       </div>
       <div className="av-pos-grid">
-        <div className="av-cell"><div className="k">Liquidez LP (inicial)</div><div className="vv">{usd(p?.initialLiquidityUsd)}</div></div>
+        <div className="av-cell"><div className="k">{liqLabel}</div><div className="vv">{liqVal}</div></div>
         <div className="av-cell"><div className="k">Rango</div><div className="vv">{p ? `${p.minRange}–${p.maxRange}` : '—'}</div></div>
-        <div className="av-cell"><div className="k">Fees 1d</div><div className="vv">{usd(p?.fees1d)}</div></div>
+        <div className="av-cell"><div className="k">{feesLabel}</div><div className="vv">{feesVal}</div></div>
         <div className="av-cell"><div className="k">Cobertura (cap)</div><div className="vv">{usd(pos.hedgeNotionalUsd)}</div></div>
       </div>
       <div className="av-pos-foot">
-        <span className="av-tag norevert">Revert: no expuesto aún</span>
         <span className="av-tag il">Cobertura HL: {lev}</span>
         {pos.armStatus && <span className="av-tag ok">{pos.armStatus}</span>}
+        {hlAccount && <span className="av-tag">Cuenta HL {hlAccount.addressMasked} · colateral {usd(hlAccount.collateralUsd)}</span>}
+        {pnl != null && <span className="av-pnl" style={{ marginLeft: 'auto' }}>PnL hedge <b className={pnl >= 0 ? 'av-pos-pnl' : 'av-neg-pnl'}>{pnl >= 0 ? '+' : ''}{usd(pnl)}</b></span>}
       </div>
     </div>
   );
 }
 
+// Caché cliente del snapshot en vivo (TTL): re-expandir dentro de la ventana NO re-dispara la acción.
+const LIVE_TTL_MS = 30_000;
+const liveCache = new Map();
+
 function UserRow({ u }) {
   const [open, setOpen] = React.useState(false);
   const detail = useQuery(api.admin.getUserDetail, open ? { userId: u.userId } : 'skip');
+  // (Fase 2) snapshot EN VIVO (poolScanner + HL Info), bajo demanda al expandir. try/catch → "—", nunca
+  // tumba la vista; TTL evita refetch; topes/secuencial en el backend.
+  const runLive = useAction(api.adminLive.getUserAdminLiveSnapshot);
+  const [live, setLive] = React.useState(null);
+  const [liveLoading, setLiveLoading] = React.useState(false);
+  React.useEffect(() => {
+    if (!open) return undefined;
+    const cached = liveCache.get(u.userId);
+    if (cached && Date.now() - cached.at < LIVE_TTL_MS) { setLive(cached.data); return undefined; }
+    let cancelled = false;
+    setLiveLoading(true);
+    (async () => {
+      try {
+        const snap = await runLive({ userId: u.userId });
+        if (cancelled) return;
+        liveCache.set(u.userId, { at: Date.now(), data: snap });
+        setLive(snap);
+      } catch {
+        if (!cancelled) setLive(null);
+      } finally {
+        if (!cancelled) setLiveLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [open, u.userId, runLive]);
   const pct = u.plan && u.plan.cap > 0 && detail?.coverageUsed != null
     ? Math.min(100, (detail.coverageUsed / u.plan.cap) * 100) : 0;
   const statusEl = u.role === 'admin'
@@ -105,7 +142,16 @@ function UserRow({ u }) {
         <div className="av-detail">
           {detail === undefined && <div className="faint" style={{ padding: 8 }}>Cargando…</div>}
           {detail && detail.positions.length === 0 && <div className="faint" style={{ padding: 8 }}>Sin bots activos.</div>}
-          {detail && detail.positions.map((pos) => <PositionCard key={pos.botId} pos={pos} />)}
+          {detail && detail.positions.map((pos) => {
+            const lp = live?.positions?.[pos.botId] ?? null;
+            const acctPnl = (live && pos.hlAccountId && live.pnlByAccountCoin)
+              ? live.pnlByAccountCoin[pos.hlAccountId] : null;
+            const pnl = (acctPnl && pos.baseAsset && acctPnl[pos.baseAsset] != null)
+              ? acctPnl[pos.baseAsset] : null;
+            const hlAccount = (live && pos.hlAccountId && live.hlAccounts)
+              ? (live.hlAccounts.find((a) => a.id === pos.hlAccountId) ?? null) : null;
+            return <PositionCard key={pos.botId} pos={pos} live={lp} liveLoading={liveLoading} pnl={pnl} hlAccount={hlAccount} />;
+          })}
         </div>
       )}
     </div>
@@ -290,6 +336,8 @@ function AdminStyles() {
   .av-hl{font-size:10px;color:var(--faint);background:#1a1a1a;border-radius:5px;padding:1px 5px;margin-left:6px;font-weight:600}
   .av-range{margin-left:auto;font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px}
   .av-range.in{background:rgba(0,200,5,.14);color:var(--green)}
+  .av-range.out{background:rgba(255,80,0,.14);color:var(--red)}
+  .av-pnl{font-size:12px;color:var(--muted)}.av-pos-pnl{color:var(--green)}.av-neg-pnl{color:var(--red)}
   .av-pos-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line)}
   .av-cell{background:var(--panel-2);padding:10px 14px}
   .av-cell .k{font-size:10px;color:var(--faint);text-transform:uppercase}

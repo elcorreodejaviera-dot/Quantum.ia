@@ -5,6 +5,7 @@ import { paginationOptsValidator } from "convex/server";
 import { requireAdmin, hasPermission } from "./helpers";
 import { getPlan } from "./plans";
 import { consumedCoverageByPool } from "./coverageUsage";
+import { hlNetwork } from "./hlNetwork";
 
 // (JAV-80) Queries de la pestaña de Administración. TODAS admin-only (requireAdmin) y ACOTADAS.
 // NO money-path: solo lectura/cache (la lógica de trading no se toca). Estado HL en vivo NO va aquí
@@ -38,9 +39,26 @@ export const getSystemStats = query({
       for (const a of rows) { capitalArm += a.reservedNotional; marginArm += a.marginReserved; liveArm++; }
     }
 
-    const pools = await ctx.db.query("pools").take(SCAN_CAP);
-    let tvlPools = 0;
-    for (const p of pools) { if (p.closed) continue; tvlPools += (p.tvl ?? p.subgraphTvlUsd ?? 0); }
+    const bots = await ctx.db.query("bots").take(SCAN_CAP);
+    const activeBots = bots.filter((b) => b.active === true);
+    const activeUsers = new Set(activeBots.map((b) => b.userId).filter(Boolean) as string[]);
+    const totalUsers = (await ctx.db.query("users").take(SCAN_CAP)).length;
+
+    // "Monitoreado" = Σ liquidez LP INICIAL (cacheada) de los pools con bot activo. NO es pool.tvl (TVL del
+    // pool entero de Uniswap) ni hedgeNotionalUsd (cobertura HL). Nulls NO se suman como 0 → se cuentan
+    // aparte (unknownLiquidityCount) para señalar "incompleto". Dedupe por pool (un pool, un conteo).
+    let monitoredInitialUsd = 0, unknownLiquidityCount = 0, knownLiquidityCount = 0;
+    const seenPools = new Set<string>();
+    for (const b of activeBots) {
+      if (!b.poolId) continue;
+      const key = String(b.poolId);
+      if (seenPools.has(key)) continue;
+      seenPools.add(key);
+      const p = await ctx.db.get(b.poolId);
+      if (!p || p.closed) continue;
+      if (typeof p.initialLiquidityUsd === "number") { monitoredInitialUsd += p.initialLiquidityUsd; knownLiquidityCount++; }
+      else unknownLiquidityCount++;
+    }
 
     const since = Date.now() - DAY_MS;
     const trades = await ctx.db.query("trades_history")
@@ -48,16 +66,26 @@ export const getSystemStats = query({
     let volume24h = 0;
     for (const t of trades) volume24h += Math.abs((t.amount ?? 0) * (t.price ?? 0));
 
-    const bots = await ctx.db.query("bots").take(SCAN_CAP);
-    const activeBots = bots.filter((b) => b.active === true);
-    const activeUsers = new Set(activeBots.map((b) => b.userId).filter(Boolean) as string[]);
-    const totalUsers = (await ctx.db.query("users").take(SCAN_CAP)).length;
+    // % vs las 24h anteriores (ventana [since-1d, since)). null si no hay base previa (evita /0).
+    const prevTrades = await ctx.db.query("trades_history")
+      .withIndex("by_timestamp", (q) => q.gte("timestamp", since - DAY_MS).lt("timestamp", since)).take(SCAN_CAP);
+    let volumePrev24h = 0;
+    for (const t of prevTrades) volumePrev24h += Math.abs((t.amount ?? 0) * (t.price ?? 0));
+    const volume24hDelta = volumePrev24h > 0 ? ((volume24h - volumePrev24h) / volumePrev24h) * 100 : null;
+
+    // Red efectiva = fuente de verdad del backend (no asumir desde el front). Defensivo: nunca rompe la vista.
+    let network: string | null = null;
+    try { network = hlNetwork(); } catch { network = null; }
 
     return {
       capitalInHL: capitalArm + capitalExec,    // armado + ejecutándose
       marginCommitted: marginArm + marginExec,  // margen comprometido (en movimiento)
-      tvlPools,                                  // Σ TVL cacheado de pools abiertos
+      monitoredInitialUsd,                       // Σ liquidez LP inicial (cacheada) de pools con bot activo
+      unknownLiquidityCount,                     // pools con bot activo SIN initialLiquidityUsd (incompleto)
+      knownLiquidityCount,                       // pools con dato (distingue "$0 real" de "todo incompleto")
       volume24h,
+      volume24hDelta,                            // % vs 24h previas (null si sin base)
+      network,                                   // "mainnet" | "testnet" | null
       activeBots: activeBots.length,
       activeUsers: activeUsers.size,
       totalUsers,
@@ -76,13 +104,31 @@ export const listUsersOverview = query({
     for (const u of result.page) {
       const plan = getPlan(u.subscriptionPlan);
       const bots = await ctx.db.query("bots").withIndex("by_user", (q) => q.eq("userId", u._id)).collect();
-      const activeBots = bots.filter((b) => b.active === true).length;
+      const activeBotsList = bots.filter((b) => b.active === true);
+      const activeBots = activeBotsList.length;
       const hlAcct = await ctx.db.query("hl_api_credentials").withIndex("by_user", (q) => q.eq("userId", u._id)).first();
+
+      // $ monitoreado del usuario = Σ liquidez LP INICIAL (cacheada) de sus pools con bot activo (dedupe por
+      // pool). Nulls → unknownLiquidityCount (no se suman como 0). NO usar hedgeNotionalUsd aquí.
+      let monitoredInitialUsd = 0, unknownLiquidityCount = 0, knownLiquidityCount = 0;
+      const seenPools = new Set<string>();
+      for (const b of activeBotsList) {
+        if (!b.poolId) continue;
+        const key = String(b.poolId);
+        if (seenPools.has(key)) continue;
+        seenPools.add(key);
+        const p = await ctx.db.get(b.poolId);
+        if (!p || p.closed) continue;
+        if (typeof p.initialLiquidityUsd === "number") { monitoredInitialUsd += p.initialLiquidityUsd; knownLiquidityCount++; }
+        else unknownLiquidityCount++;
+      }
+
       page.push({
         userId: u._id, email: u.email ?? null, name: u.name ?? null, role: u.role,
         plan: plan ? { id: plan.id, label: plan.label, cap: plan.coverageCapUsd } : null,
         suspended: u.suspended === true,
         activeBots, hasHlAccount: !!hlAcct,
+        monitoredInitialUsd, unknownLiquidityCount, knownLiquidityCount,
         canManageBots: await hasPermission(ctx, u, "canManageBots"),
         canTradeLive: await hasPermission(ctx, u, "canTradeLive"),
       });
@@ -120,7 +166,9 @@ export const getUserDetail = query({
         const p = await ctx.db.get(b.poolId);
         if (p) pool = {
           poolId: p._id, pair: p.pair, network: p.network, tokenId: p.tokenId ?? null,
+          feeTier: p.feeTier ?? null,
           minRange: p.minRange, maxRange: p.maxRange,
+          initialLiquidityUsd: typeof p.initialLiquidityUsd === "number" ? p.initialLiquidityUsd : null,
           tvl: p.tvl ?? p.subgraphTvlUsd ?? null,
           fees1d: p.fees1d ?? p.subgraphFeesUsd1d ?? null,
           closed: p.closed === true,

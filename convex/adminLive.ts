@@ -59,6 +59,7 @@ export const getUserAdminLiveSnapshot = action({
         let feesUncollectedUsd: number | null = null;
         // (Fase 4) Revert Finance Lend (de la MISMA llamada). leverageRevert = LTV% (no multiplicador).
         let revertLtv: number | null = null, healthFactor: number | null = null, borrowHealth: number | null = null;
+        let revertVaultActive = false, revertLoanKnown = false;
         if (scan?.currentPrice != null && scan.currentPrice > 0) {
           const liq: any = await ctx.runAction(api.actions.poolScanner.fetchPositionLiquidity, {
             tokenId: t.tokenId, network: t.network, priceUsd: scan.currentPrice,
@@ -69,9 +70,12 @@ export const getUserAdminLiveSnapshot = action({
           revertLtv = Number.isFinite(liq?.leverageRevert) ? liq.leverageRevert : null;
           healthFactor = Number.isFinite(liq?.healthFactor) ? liq.healthFactor : null;
           borrowHealth = Number.isFinite(liq?.borrowHealth) ? liq.borrowHealth : null;
+          revertVaultActive = liq?.revertVaultActive === true;
+          revertLoanKnown = liq?.revertLoanKnown === true;
         }
         positions[t.botId] = {
           liquidityUsd, feesUncollectedUsd, revertLtv, healthFactor, borrowHealth,
+          revertVaultActive, revertLoanKnown,
           currentPrice: scan?.currentPrice ?? null,
           inRange: scan?.status === "En rango" ? true : scan?.status === "Fuera de rango" ? false : null,
         };

@@ -66,9 +66,12 @@ function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive }) 
   const coverageVal = coverageLive != null ? usd(coverageLive)
     : (pos.hedgeNotionalUsd != null ? usd(pos.hedgeNotionalUsd) : (liveLoading ? '…' : '—'));
   // (Fase 4) Revert.finance: live.revertLtv es LTV% (no multiplicador). lev derivado = 1/(1−LTV/100), guarda 0<LTV<100.
-  // IMPORTANTE: 0 = leído OK y sin deuda (LP spot); null = desconocido/fallo de lectura → NO confundir con LP spot.
+  // Distinción (con revertVaultActive/revertLoanKnown): en vault con deuda / en vault sin deuda / en vault
+  // deuda no fiable / LP spot (no en vault) / desconocido. Un LTV 0 ya NO significa siempre "LP spot".
   const ltv = live?.revertLtv;
   const bh = live?.borrowHealth;
+  const vaultActive = live?.revertVaultActive === true;
+  const loanKnown = live?.revertLoanKnown === true;
   const healthCls = bh == null ? '' : bh >= 50 ? 'av-pos-pnl' : bh >= 20 ? 'av-amber' : 'av-neg-pnl';
   let revertTag;
   if (ltv != null && ltv > 0) {
@@ -77,7 +80,11 @@ function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive }) 
       <span className="av-tag revert">⚡ Revert · {lev ? `${lev.toFixed(1)}× · ` : ''}LTV {ltv.toFixed(1)}%
         {bh != null && <> · salud <b className={healthCls}>{bh}%</b></>}</span>
     );
-  } else if (ltv === 0) {
+  } else if (vaultActive && !loanKnown) {
+    revertTag = <span className="av-tag revert">En Revert · deuda: —</span>;
+  } else if (ltv === 0 && vaultActive && loanKnown) {
+    revertTag = <span className="av-tag revert">En Revert · sin deuda</span>;
+  } else if (ltv === 0 && !vaultActive) {
     revertTag = <span className="av-tag norevert">Sin apalancar (LP spot)</span>;
   } else {
     revertTag = <span className="av-tag norevert">Revert: {liveLoading ? '…' : '—'}</span>;

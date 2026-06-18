@@ -74,8 +74,10 @@ export const getSystemStats = query({
       if (ts >= since) volume24h += notional;
       else if (ts >= prevSince) volumePrev24h += notional;
     };
+    // .order("desc"): si hay >SCAN_CAP execs en la ventana de 48h, conservar las MÁS RECIENTES (la ventana
+    // actual de 24h) en vez de las más antiguas; si no, infra-contaría el volumen de hoy (falso "-100%").
     const execs24 = await ctx.db.query("execution_requests")
-      .withIndex("by_created", (q) => q.gte("createdAt", prevSince)).take(SCAN_CAP);
+      .withIndex("by_created", (q) => q.gte("createdAt", prevSince)).order("desc").take(SCAN_CAP);
     for (const e of execs24) addVol(e.notional, e.createdAt);
     const armsScan = await ctx.db.query("trigger_arms").withIndex("by_updated").order("desc").take(SCAN_CAP);
     for (const a of armsScan) {

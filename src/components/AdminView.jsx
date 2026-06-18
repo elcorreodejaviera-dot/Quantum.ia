@@ -65,6 +65,23 @@ function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive }) 
   // Cobertura (cap): nocional REAL de la posición HL en vivo; fallback al campo del bot (suele ser null).
   const coverageVal = coverageLive != null ? usd(coverageLive)
     : (pos.hedgeNotionalUsd != null ? usd(pos.hedgeNotionalUsd) : (liveLoading ? '…' : '—'));
+  // (Fase 4) Revert.finance: live.revertLtv es LTV% (no multiplicador). lev derivado = 1/(1−LTV/100), guarda 0<LTV<100.
+  // IMPORTANTE: 0 = leído OK y sin deuda (LP spot); null = desconocido/fallo de lectura → NO confundir con LP spot.
+  const ltv = live?.revertLtv;
+  const bh = live?.borrowHealth;
+  const healthCls = bh == null ? '' : bh >= 50 ? 'av-pos-pnl' : bh >= 20 ? 'av-amber' : 'av-neg-pnl';
+  let revertTag;
+  if (ltv != null && ltv > 0) {
+    const lev = ltv < 100 ? 1 / (1 - ltv / 100) : null;
+    revertTag = (
+      <span className="av-tag revert">⚡ Revert · {lev ? `${lev.toFixed(1)}× · ` : ''}LTV {ltv.toFixed(1)}%
+        {bh != null && <> · salud <b className={healthCls}>{bh}%</b></>}</span>
+    );
+  } else if (ltv === 0) {
+    revertTag = <span className="av-tag norevert">Sin apalancar (LP spot)</span>;
+  } else {
+    revertTag = <span className="av-tag norevert">Revert: {liveLoading ? '…' : '—'}</span>;
+  }
   return (
     <div className="av-pos">
       <div className="av-pos-top">
@@ -83,6 +100,7 @@ function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive }) 
         <div className="av-cell"><div className="k">Cobertura (cap)</div><div className="vv">{coverageVal}</div></div>
       </div>
       <div className="av-pos-foot">
+        {revertTag}
         <span className="av-tag il">Cobertura HL: {lev}</span>
         {pos.armStatus && <span className="av-tag ok">{pos.armStatus}</span>}
         {hlAccount && <span className="av-tag">Cuenta HL {hlAccount.addressMasked} · colateral {usd(hlAccount.collateralUsd)}</span>}
@@ -441,7 +459,7 @@ function AdminStyles() {
   .av-range{margin-left:auto;font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px}
   .av-range.in{background:rgba(0,200,5,.14);color:var(--green)}
   .av-range.out{background:rgba(255,80,0,.14);color:var(--red)}
-  .av-pnl{font-size:12px;color:var(--muted)}.av-pos-pnl{color:var(--green)}.av-neg-pnl{color:var(--red)}
+  .av-pnl{font-size:12px;color:var(--muted)}.av-pos-pnl{color:var(--green)}.av-neg-pnl{color:var(--red)}.av-amber{color:var(--amber)}
   .av-pos-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line)}
   .av-cell{background:var(--panel-2);padding:10px 14px}
   .av-cell .k{font-size:10px;color:var(--faint);text-transform:uppercase}
@@ -450,6 +468,7 @@ function AdminStyles() {
   .av-tag{font-size:10px;font-weight:700;padding:3px 9px;border-radius:6px;background:rgba(255,255,255,.06);color:var(--muted)}
   .av-tag.ok{background:rgba(0,200,5,.14);color:var(--green)}
   .av-tag.norevert{background:#1a1a1a;color:var(--faint)}
+  .av-tag.revert{background:rgba(255,220,0,.16);color:var(--amber)}
   .av-cols{display:grid;grid-template-columns:1.4fr 1fr;gap:18px}
   .av-feed{display:flex;gap:10px;padding:10px 18px;border-bottom:1px solid var(--line);font-size:13px;align-items:baseline}
   .av-feed .t{color:var(--faint);width:42px;flex:none;font-variant-numeric:tabular-nums}

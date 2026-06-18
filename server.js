@@ -21,16 +21,17 @@ const contentTypes = {
 
 const STATIC_EXTENSIONS = new Set(Object.keys(contentTypes).filter(e => e !== '.html'));
 
-// (JAV-39 #19) CSP en Report-Only: observa violaciones sin romper Clerk/Convex/Hyperliquid/
-// WalletConnect; se endurece a enforcing (Content-Security-Policy) tras tunear con los reportes.
-const CSP_REPORT_ONLY = [
+// (JAV-39 #19 / JAV-83) CSP ENFORCING. Incluye el dominio propio de Clerk en producción
+// (*.portal-quantum.com → clerk./accounts.) además de las instancias compartidas de Clerk, y el
+// beacon de analítica de Cloudflare. Verificado en headless que Clerk monta bajo esta política.
+const CSP = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.clerk.accounts.dev https://*.clerk.com",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.clerk.accounts.dev https://*.clerk.com https://*.portal-quantum.com https://static.cloudflareinsights.com",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "img-src 'self' data: blob: https:",
-  "font-src 'self' data: https://fonts.gstatic.com",
+  "font-src 'self' data: https://fonts.gstatic.com https://*.portal-quantum.com",
   "connect-src 'self' https: wss:",
-  "frame-src 'self' https://*.clerk.com https://*.clerk.accounts.dev",
+  "frame-src 'self' https://*.clerk.com https://*.clerk.accounts.dev https://*.portal-quantum.com",
   "worker-src 'self' blob:",
   "base-uri 'self'",
   "form-action 'self'",
@@ -43,7 +44,7 @@ const SECURITY_HEADERS = {
   'X-Frame-Options': 'DENY',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
-  'Content-Security-Policy-Report-Only': CSP_REPORT_ONLY,
+  'Content-Security-Policy': CSP,
 };
 
 // (JAV-39 #20) Cache: no-cache para HTML/SPA/dinámico; immutable para assets versionados (el nombre

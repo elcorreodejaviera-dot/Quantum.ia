@@ -33,6 +33,13 @@ function poolLink(network, tokenId) {
 function feeTierPct(ft) {
   return typeof ft === 'number' ? `${(ft / 10000).toFixed(2)}%` : null;
 }
+// Precio legible para el rango: 2 decimales (1636.04), y más dígitos solo si el valor es < 1 (tokens baratos).
+function fmtPrice(n) {
+  if (n === null || n === undefined || !Number.isFinite(n)) return '—';
+  const a = Math.abs(n);
+  if (a === 0) return '0';
+  return a >= 1 ? n.toFixed(2) : Number(n.toPrecision(4)).toString();
+}
 // Sub del KPI de volumen: % vs 24h previas (null → "trades").
 function volumeDeltaSub(d) {
   if (d === null || d === undefined || !Number.isFinite(d)) return 'trades';
@@ -43,7 +50,7 @@ function timeShort(ms) {
   catch { return ''; }
 }
 
-function PositionCard({ pos, live, liveLoading, pnl, hlAccount }) {
+function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive }) {
   const p = pos.pool;
   const lev = pos.kind === 'il' ? `IL short ${pos.leverage ?? '?'}×` : `${pos.direction ?? ''} ${pos.leverage ?? '?'}×`;
   const ft = feeTierPct(p?.feeTier);
@@ -55,6 +62,9 @@ function PositionCard({ pos, live, liveLoading, pnl, hlAccount }) {
   const liqVal = hasLiveLiq ? usd(live.liquidityUsd) : (liveLoading ? '…' : usd(p?.initialLiquidityUsd));
   const feesLabel = live ? 'Fees s/cobrar' : 'Fees 1d';
   const feesVal = live ? (live.feesUncollectedUsd != null ? usd(live.feesUncollectedUsd) : '—') : usd(p?.fees1d);
+  // Cobertura (cap): nocional REAL de la posición HL en vivo; fallback al campo del bot (suele ser null).
+  const coverageVal = coverageLive != null ? usd(coverageLive)
+    : (pos.hedgeNotionalUsd != null ? usd(pos.hedgeNotionalUsd) : (liveLoading ? '…' : '—'));
   return (
     <div className="av-pos">
       <div className="av-pos-top">
@@ -68,9 +78,9 @@ function PositionCard({ pos, live, liveLoading, pnl, hlAccount }) {
       </div>
       <div className="av-pos-grid">
         <div className="av-cell"><div className="k">{liqLabel}</div><div className="vv">{liqVal}</div></div>
-        <div className="av-cell"><div className="k">Rango</div><div className="vv">{p ? `${p.minRange}–${p.maxRange}` : '—'}</div></div>
+        <div className="av-cell"><div className="k">Rango</div><div className="vv">{p ? `${fmtPrice(p.minRange)} – ${fmtPrice(p.maxRange)}` : '—'}</div></div>
         <div className="av-cell"><div className="k">{feesLabel}</div><div className="vv">{feesVal}</div></div>
-        <div className="av-cell"><div className="k">Cobertura (cap)</div><div className="vv">{usd(pos.hedgeNotionalUsd)}</div></div>
+        <div className="av-cell"><div className="k">Cobertura (cap)</div><div className="vv">{coverageVal}</div></div>
       </div>
       <div className="av-pos-foot">
         <span className="av-tag il">Cobertura HL: {lev}</span>
@@ -148,9 +158,13 @@ function UserRow({ u }) {
               ? live.pnlByAccountCoin[pos.hlAccountId] : null;
             const pnl = (acctPnl && pos.baseAsset && acctPnl[pos.baseAsset] != null)
               ? acctPnl[pos.baseAsset] : null;
+            const acctCov = (live && pos.hlAccountId && live.coverageByAccountCoin)
+              ? live.coverageByAccountCoin[pos.hlAccountId] : null;
+            const coverageLive = (acctCov && pos.baseAsset && acctCov[pos.baseAsset] != null)
+              ? acctCov[pos.baseAsset] : null;
             const hlAccount = (live && pos.hlAccountId && live.hlAccounts)
               ? (live.hlAccounts.find((a) => a.id === pos.hlAccountId) ?? null) : null;
-            return <PositionCard key={pos.botId} pos={pos} live={lp} liveLoading={liveLoading} pnl={pnl} hlAccount={hlAccount} />;
+            return <PositionCard key={pos.botId} pos={pos} live={lp} liveLoading={liveLoading} pnl={pnl} hlAccount={hlAccount} coverageLive={coverageLive} />;
           })}
         </div>
       )}

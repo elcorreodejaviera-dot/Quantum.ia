@@ -189,17 +189,14 @@ function tickPrice(tick: number, dec0: number, dec1: number): number {
   return Math.pow(1.0001, tick) * Math.pow(10, dec0 - dec1);
 }
 
-export const scanPoolByTokenId = action({
-  args: { tokenId: v.number(), network: v.string() },
-  handler: async (ctx, { tokenId, network }) => {
-    await requireAuth(ctx);   // (JAV-38 #8) no consumir RPC/cuota sin auth
-    if (!Number.isFinite(tokenId) || !Number.isInteger(tokenId) || tokenId <= 0 || tokenId > Number.MAX_SAFE_INTEGER)
-      throw new Error("Token ID inválido. Debe ser un entero positivo.");
-
-    const rpcs = RPC[network];
-    const nft = NFT_MANAGER[network];
-    const factory = FACTORY[network];
-    if (!rpcs || !nft) throw new Error(`Red no soportada: ${network}`);
+// Núcleo de escaneo de una posición V3 SIN auth (lectura on-chain): par, rango, precio actual, pool.
+// Lo usa la action pública scanPoolByTokenId (con requireAuth) y el cron de auto-curado (interno, sin auth).
+// No consume cuota sin control: el cron lo gatea a pools que faltan; la action exige auth.
+async function scanPositionCore(network: string, tokenId: number) {
+  const rpcs = RPC[network];
+  const nft = NFT_MANAGER[network];
+  const factory = FACTORY[network];
+  if (!rpcs || !nft) throw new Error(`Red no soportada: ${network}`);
 
     // positions(uint256) = 0x99fbab88
     const posRaw = (await rpcCallWithFallback(rpcs, nft, "0x99fbab88" + pad(BigInt(tokenId)))).slice(2);
@@ -257,6 +254,15 @@ export const scanPoolByTokenId = action({
       : "En rango";
 
     return { tokenId, network, pair, feeTier: fee, minRange, maxRange, currentPrice, status, poolAddress };
+}
+
+export const scanPoolByTokenId = action({
+  args: { tokenId: v.number(), network: v.string() },
+  handler: async (ctx, { tokenId, network }) => {
+    await requireAuth(ctx);   // (JAV-38 #8) no consumir RPC/cuota sin auth
+    if (!Number.isFinite(tokenId) || !Number.isInteger(tokenId) || tokenId <= 0 || tokenId > Number.MAX_SAFE_INTEGER)
+      throw new Error("Token ID inválido. Debe ser un entero positivo.");
+    return await scanPositionCore(network, tokenId);
   },
 });
 
@@ -640,6 +646,31 @@ const POOL_SCAN_CONCURRENCY = 5;
 // solo las transiciones closed→open reales — esas se registran como eventos en `pool_events`.
 type PoolScanCategory = "closed" | "active" | "unavailable" | "skipped" | "errored";
 
+// (JAV-84 subtarea) Auto-curado de `initialLiquidityUsd`: si el pool tiene posición viva pero el campo
+// falta, lo captura on-chain (precio slot0 + lectura AUTORITATIVA fetchPositionNotionalStrict, la MISMA que
+// usa el motor) y lo persiste con patchPoolInitialLiquidity (idempotente). NOTA: para pools antiguos este
+// valor es el PRIMER capturado por el sistema, no el valor al alta original. AISLADO: cualquier fallo
+// devuelve "failed" sin lanzar → nunca rompe el chequeo de cierre del cron. ctx:any corta TS2589 del grafo.
+async function backfillOneInitialLiquidity(ctx: any, pool: any): Promise<"filled" | "skipped" | "failed"> {
+  if (!pool.tokenId || pool.initialLiquidityUsd != null) return "skipped";
+  if (!RPC[pool.network] || !NFT_MANAGER[pool.network] || !FACTORY[pool.network]) return "skipped";
+  try {
+    const core = await scanPositionCore(pool.network, pool.tokenId);
+    if (core.currentPrice == null || !(core.currentPrice > 0)) return "failed";
+    const r = await ctx.runAction(internal.actions.poolScanner.fetchPositionNotionalStrict, {
+      tokenId: pool.tokenId, network: pool.network, priceUsd: core.currentPrice, poolAddress: core.poolAddress,
+    });
+    if (r.reason !== "ok" || !Number.isFinite(r.liquidityUsd) || !(r.liquidityUsd > 0)) return "failed";
+    await ctx.runMutation(internal.pools.patchPoolInitialLiquidity, {
+      id: pool._id, initialLiquidityUsd: r.liquidityUsd, initialLiquidityAt: Date.now(),
+    });
+    return "filled";
+  } catch (e) {
+    console.error(`backfillOneInitialLiquidity: fallo en pool ${pool._id}`, e);
+    return "failed";
+  }
+}
+
 export const checkAllPoolClosures = internalAction({
   args: {},
   // Promise<any>: corta el ciclo de inferencia de tipos (TS2589) del grafo de funciones internas.
@@ -666,6 +697,9 @@ export const checkAllPoolClosures = internalAction({
         // active: si estaba marcado como cerrado, reabrir (posición re-fondeada). reopenPoolIfClosed
         // solo registra el evento "reopened" si realmente venía cerrado (transición); aquí contamos activos.
         await ctx.runMutation(internal.pools.reopenPoolIfClosed, { id: pool._id });
+        // Auto-curar initialLiquidityUsd solo si falta (coste puntual). AISLADO dentro del helper: su
+        // fallo NO altera la categoría "active" del chequeo de cierre.
+        if (pool.initialLiquidityUsd == null) await backfillOneInitialLiquidity(ctx, pool);
         return "active";
       } catch (e) {
         console.error(`checkAllPoolClosures: fallo en pool ${pool._id}`, e);
@@ -685,5 +719,29 @@ export const checkAllPoolClosures = internalAction({
     }
 
     return { total: pools.length, ...counts };
+  },
+});
+
+// (JAV-84 subtarea) Disparo MANUAL inmediato del auto-curado (sin esperar al cron). Acotado: `limit`
+// (tope de pools a procesar por ejecución, máx 100) + misma concurrencia que el escaneo. Solo CLI/interno.
+export const backfillMissingInitialLiquidity = internalAction({
+  args: { limit: v.optional(v.number()) },
+  handler: async (ctx, { limit }): Promise<any> => {
+    const cap = Math.max(1, Math.min(limit ?? 50, 100));
+    const all = await ctx.runQuery(internal.pools.listPoolsInternal);
+    // Solo los que faltan y son procesables, hasta el tope.
+    const targets = all
+      .filter((p: any) => p.tokenId && p.initialLiquidityUsd == null && !p.closed)
+      .slice(0, cap);
+    const counts = { filled: 0, skipped: 0, failed: 0 };
+    for (let i = 0; i < targets.length; i += POOL_SCAN_CONCURRENCY) {
+      const batch = targets.slice(i, i + POOL_SCAN_CONCURRENCY);
+      const results = await Promise.allSettled(batch.map((p: any) => backfillOneInitialLiquidity(ctx, p)));
+      for (const r of results) {
+        if (r.status === "fulfilled") counts[r.value]++;
+        else { counts.failed++; console.error("backfillMissingInitialLiquidity: worker rechazado", r.reason); }
+      }
+    }
+    return { considered: targets.length, ...counts };
   },
 });

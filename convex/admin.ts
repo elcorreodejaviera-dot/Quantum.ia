@@ -1,4 +1,4 @@
-import { query } from "./_generated/server";
+import { query, internalQuery } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { v } from "convex/values";
 import { paginationOptsValidator } from "convex/server";
@@ -181,6 +181,7 @@ export const getUserDetail = query({
       positions.push({
         botId: b._id, kind: b.kind ?? null, leverage: b.leverage ?? null, direction: b.direction ?? null,
         stopLossPct: b.stopLossPct ?? null, hedgeNotionalUsd: b.hedgeNotionalUsd ?? null,
+        baseAsset: b.baseAsset ?? null, hlAccountId: b.hlAccountId ?? null,
         pool, armStatus,
       });
     }
@@ -193,6 +194,37 @@ export const getUserDetail = query({
       coverageCap: u.role === "admin" ? null : (plan ? plan.coverageCapUsd : 0),  // admin = ilimitado
       positions,
     };
+  },
+});
+
+// (JAV-84 Fase 2) Objetivos para el snapshot en VIVO de un usuario: posiciones (pools con bot activo)
+// + cuentas HL. SOLO datos baratos de DB; las lecturas on-chain/HL las hace la ACCIÓN adminLive.
+// Acotado por MAX_LIVE_POSITIONS (tope duro de fan-out, Codex #5).
+export const MAX_LIVE_POSITIONS = 8;
+export const getUserLiveTargetsInternal = internalQuery({
+  args: { userId: v.id("users") },
+  handler: async (ctx, { userId }): Promise<any> => {
+    const bots = await ctx.db.query("bots").withIndex("by_user", (q) => q.eq("userId", userId)).collect();
+    const positions = [];
+    for (const b of bots) {
+      if (b.active !== true || !b.poolId) continue;
+      const p = await ctx.db.get(b.poolId);
+      if (!p || p.closed || p.tokenId == null) continue;
+      positions.push({
+        botId: b._id, baseAsset: b.baseAsset ?? null, hlAccountId: b.hlAccountId ?? null,
+        poolId: p._id, tokenId: p.tokenId, network: p.network,
+        poolAddress: p.poolAddress ?? null, minRange: p.minRange, maxRange: p.maxRange,
+      });
+      if (positions.length >= MAX_LIVE_POSITIONS) break;
+    }
+    // (Codex Fase 2 #2) Solo las cuentas HL REFERENCIADAS por las posiciones visibles (topadas) → el
+    // fan-out de clearinghouseState queda acotado al mismo tope, sin consultar cuentas no mostradas.
+    const referenced = new Set(positions.map((p) => p.hlAccountId).filter(Boolean).map(String));
+    const creds = await ctx.db.query("hl_api_credentials").withIndex("by_user", (q) => q.eq("userId", userId)).collect();
+    const hlAccounts = creds
+      .filter((c) => referenced.has(String(c._id)))
+      .map((c) => ({ id: c._id, tradingAccountAddress: c.tradingAccountAddress }));
+    return { positions, hlAccounts };
   },
 });
 

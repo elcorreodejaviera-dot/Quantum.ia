@@ -9,8 +9,34 @@ import { api } from '../../convex/_generated/api';
 function usd(n) {
   if (n === null || n === undefined || !Number.isFinite(n)) return '—';
   const a = Math.abs(n);
-  if (a >= 1000) return '$' + (n / 1000).toFixed(a >= 100000 ? 0 : 1) + 'k';
+  if (a >= 1_000_000) return '$' + (n / 1_000_000).toFixed(a >= 100_000_000 ? 0 : 1) + 'M';
+  if (a >= 1000) return '$' + (n / 1000).toFixed(a >= 100_000 ? 0 : 1) + 'k';
   return '$' + n.toFixed(0);
+}
+// "$ monitoreado" con señal de datos incompletos (nulls): nunca presenta un número como si fuera completo.
+// known = cuántos pools aportaron dato; si NINGUNO lo aportó (known===0) y hay incompletos → "—", nunca "$0".
+function usdWithUnknown(n, unknown = 0, known = undefined) {
+  if (known === 0 && unknown > 0) return `— (${unknown} incompletos)`;
+  const base = usd(n);
+  if (unknown > 0) return base === '—' ? `— (${unknown} incompletos)` : `${base} (+${unknown})`;
+  return base;
+}
+// Uniswap v3 muestra la posición por tokenId + cadena. Si falta el dato, sin enlace.
+const UNI_CHAIN = { ethereum: 'ethereum', base: 'base', arbitrum: 'arbitrum', optimism: 'optimism' };
+function poolLink(network, tokenId) {
+  if (tokenId == null || !network) return null;
+  const chain = UNI_CHAIN[String(network).toLowerCase()];
+  if (!chain) return null;
+  return `https://app.uniswap.org/positions/v3/${chain}/${tokenId}`;
+}
+// feeTier guardado en unidades crudas de Uniswap (500/3000/10000). Mismo formato que BotPortal: /10000.
+function feeTierPct(ft) {
+  return typeof ft === 'number' ? `${(ft / 10000).toFixed(2)}%` : null;
+}
+// Sub del KPI de volumen: % vs 24h previas (null → "trades").
+function volumeDeltaSub(d) {
+  if (d === null || d === undefined || !Number.isFinite(d)) return 'trades';
+  return `${d >= 0 ? '▲ +' : '▼ '}${d.toFixed(0)}% vs 24h`;
 }
 function timeShort(ms) {
   try { return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
@@ -20,23 +46,27 @@ function timeShort(ms) {
 function PositionCard({ pos }) {
   const p = pos.pool;
   const lev = pos.kind === 'il' ? `IL short ${pos.leverage ?? '?'}×` : `${pos.direction ?? ''} ${pos.leverage ?? '?'}×`;
+  const ft = feeTierPct(p?.feeTier);
+  const sub = p ? `Uniswap v3${ft ? ` · ${ft}` : ''} · ${p.network}` : 'sin pool';
+  const link = p ? poolLink(p.network, p.tokenId) : null;
   return (
     <div className="av-pos">
       <div className="av-pos-top">
         <div className="av-nft"><span>UNI<br />v3</span></div>
         <div className="av-pos-title">{p ? p.pair : '—'}
-          <small>{p ? `Uniswap v3 · ${p.network}` : 'sin pool'}</small></div>
+          <small>{sub}</small></div>
         {p?.tokenId != null && <span className="av-nftid">NFT #{p.tokenId}</span>}
+        {link && <a className="av-link" href={link} target="_blank" rel="noreferrer">↗ ver</a>}
         {pos.armStatus && <span className="av-range in">{pos.armStatus}</span>}
       </div>
       <div className="av-pos-grid">
-        <div className="av-cell"><div className="k">Liquidez / TVL</div><div className="vv">{usd(p?.tvl)}</div></div>
+        <div className="av-cell"><div className="k">Liquidez LP (inicial)</div><div className="vv">{usd(p?.initialLiquidityUsd)}</div></div>
         <div className="av-cell"><div className="k">Rango</div><div className="vv">{p ? `${p.minRange}–${p.maxRange}` : '—'}</div></div>
         <div className="av-cell"><div className="k">Fees 1d</div><div className="vv">{usd(p?.fees1d)}</div></div>
-        <div className="av-cell"><div className="k">Cobertura</div><div className="vv">{usd(pos.hedgeNotionalUsd)}</div></div>
+        <div className="av-cell"><div className="k">Cobertura (cap)</div><div className="vv">{usd(pos.hedgeNotionalUsd)}</div></div>
       </div>
       <div className="av-pos-foot">
-        <span className="av-tag norevert">Revert: — (integración pendiente)</span>
+        <span className="av-tag norevert">Revert: no expuesto aún</span>
         <span className="av-tag il">Cobertura HL: {lev}</span>
         {pos.armStatus && <span className="av-tag ok">{pos.armStatus}</span>}
       </div>
@@ -59,14 +89,16 @@ function UserRow({ u }) {
       <div className="av-main" role="button" tabIndex={0} aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen((v) => !v); } }}>
-        <div className="av-uname"><span className="av-chev">▶</span>{u.email ?? u.name ?? u.userId.slice(0, 8)}</div>
+        <div className="av-uname"><span className="av-chev">▶</span>{u.email ?? u.name ?? u.userId.slice(0, 8)}
+          {u.hasHlAccount && <span className="av-hl" title="Cuenta HL conectada">HL✓</span>}</div>
         <div className="av-plan">{u.role === 'admin' ? 'Admin · ∞' : u.plan ? `${u.plan.label} · ${usd(u.plan.cap)}` : 'Sin plan'}</div>
         <div className="av-cov">
           {u.plan ? (<><div className="av-bar"><i style={{ width: `${pct}%` }} /></div>
             <small>{detail ? usd(detail.coverageUsed) : '…'} / {usd(u.plan.cap)}</small></>) : <small className="faint">—</small>}
         </div>
         <div className="num">{u.activeBots}</div>
-        <div>{u.hasHlAccount ? <span className="faint" style={{ fontSize: 11 }}>HL ✓</span> : <span className="faint" style={{ fontSize: 11 }}>—</span>}</div>
+        <div className="num muted" title="Liquidez LP inicial (cacheada) de pools con bot activo">
+          {usdWithUnknown(u.monitoredInitialUsd, u.unknownLiquidityCount ?? 0, u.knownLiquidityCount)}</div>
         <div>{statusEl}</div>
       </div>
       {open && (
@@ -118,6 +150,7 @@ export default function AdminView() {
 
       <div className="av-head">
         <h1>Panel de Administración</h1>
+        {stats?.network && <span className={`av-pill ${stats.network === 'mainnet' ? 'green' : 'amber'}`}>● {stats.network}</span>}
         <span className={`av-pill ${tradingOn ? 'green' : 'faint'}`}>{tradingOn ? 'Trading LIVE' : 'Trading OFF'}</span>
         <span className={`av-pill ${simOn ? 'amber' : 'faint'}`}>{simOn ? 'SIM ON' : 'SIM OFF'}</span>
         <div className="av-actions">
@@ -131,8 +164,9 @@ export default function AdminView() {
       <div className="av-kpis">
         <Kpi label="Capital en HL ahora" val={usd(stats?.capitalInHL)} sub="armado + ejecutándose" accent />
         <Kpi label="En movimiento" val={usd(stats?.marginCommitted)} sub="margen comprometido" />
-        <Kpi label="TVL en pools" val={usd(stats?.tvlPools)} sub="Σ posiciones" />
-        <Kpi label="Volumen 24h" val={usd(stats?.volume24h)} sub="trades" />
+        <Kpi label="TVL en pools (LP)" val={usdWithUnknown(stats?.monitoredInitialUsd, stats?.unknownLiquidityCount ?? 0, stats?.knownLiquidityCount)}
+          sub={stats?.unknownLiquidityCount ? `LP inicial · ${stats.unknownLiquidityCount} incompletos` : 'LP inicial · Σ posiciones'} />
+        <Kpi label="Volumen 24h" val={usd(stats?.volume24h)} sub={volumeDeltaSub(stats?.volume24hDelta)} />
         <Kpi label="Bots activos" val={stats?.activeBots ?? '—'} sub={`${stats?.activeUsers ?? '–'} / ${stats?.totalUsers ?? '–'} usuarios`} />
       </div>
 
@@ -140,7 +174,7 @@ export default function AdminView() {
       <div className="av-section">
         <div className="av-shead"><h2>USUARIOS</h2></div>
         <div className="av-uhead">
-          <span>Usuario</span><span>Plan</span><span>Cobertura</span><span>Bots</span><span>HL</span><span>Estado</span>
+          <span>Usuario</span><span>Plan</span><span>Cobertura</span><span>Bots</span><span>$ monit.</span><span>Estado</span>
         </div>
         {users.results.map((u) => <UserRow key={u.userId} u={u} />)}
         {users.status === 'CanLoadMore' && <button className="av-more" onClick={() => users.loadMore(25)}>Cargar más</button>}
@@ -252,6 +286,8 @@ function AdminStyles() {
   .av-nft span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:800;color:#fff;text-align:center;line-height:1}
   .av-pos-title{font-weight:700}.av-pos-title small{color:var(--faint);font-weight:500;font-size:11px;margin-left:6px}
   .av-nftid{font-size:11px;color:#fc72ff;background:rgba(252,114,255,.13);padding:2px 8px;border-radius:6px}
+  .av-link{color:var(--green);font-size:11px;text-decoration:none}.av-link:hover{text-decoration:underline}
+  .av-hl{font-size:10px;color:var(--faint);background:#1a1a1a;border-radius:5px;padding:1px 5px;margin-left:6px;font-weight:600}
   .av-range{margin-left:auto;font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px}
   .av-range.in{background:rgba(0,200,5,.14);color:var(--green)}
   .av-pos-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line)}

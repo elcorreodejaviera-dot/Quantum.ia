@@ -18,12 +18,12 @@ export default function App() {
   return (
     <Routes>
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
-      <Route path="/login" element={
+      <Route path="/login/*" element={
         <AuthLayout>
           <SignIn routing="path" path="/login" fallbackRedirectUrl="/dashboard" />
         </AuthLayout>
       } />
-      <Route path="/register" element={
+      <Route path="/register/*" element={
         <AuthLayout>
           <SignUp routing="path" path="/register" fallbackRedirectUrl="/dashboard" />
         </AuthLayout>

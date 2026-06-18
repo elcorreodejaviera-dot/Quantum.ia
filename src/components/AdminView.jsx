@@ -158,6 +158,50 @@ function UserRow({ u }) {
   );
 }
 
+// (Fase 3) Fila de control de UN usuario: toggles de permiso, selector de plan y suspender/reactivar.
+// Reutiliza mutations ya auditadas; admins no son asignables (backend lo bloquea) → fila informativa.
+function UserControlRow({ u, plans }) {
+  const grantManage = useMutation(api.users.grantManageBots);
+  const revokeManage = useMutation(api.users.revokeManageBots);
+  const grantLive = useMutation(api.users.grantTradeLive);
+  const revokeLive = useMutation(api.users.revokeTradeLive);
+  const setPlan = useMutation(api.subscriptions.setSubscriptionPlan);
+  const setSuspended = useMutation(api.subscriptions.setUserSuspended);
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState('');
+  const run = (fn) => async (arg) => {
+    setBusy(true); setErr('');
+    try { await fn(arg); } catch (e) { setErr(e?.message ?? 'Error'); } finally { setBusy(false); }
+  };
+  const name = u.email ?? u.name ?? u.userId.slice(0, 8);
+  if (u.role === 'admin') {
+    return (
+      <div className="av-ctl">
+        <span className="av-ctl-name">{name}</span>
+        <span className="faint" style={{ gridColumn: '2 / -1', fontSize: 12 }}>Admin · ∞ — sin controles (no asignable)</span>
+      </div>
+    );
+  }
+  return (
+    <div className="av-ctl">
+      <span className="av-ctl-name">{name}</span>
+      <button className={`av-tgl ${u.canManageBots ? 'on' : 'off'}`} disabled={busy}
+        onClick={() => run(u.canManageBots ? revokeManage : grantManage)({ userId: u.userId })}>Manage</button>
+      <button className={`av-tgl ${u.canTradeLive ? 'on' : 'off'}`} disabled={busy}
+        onClick={() => run(u.canTradeLive ? revokeLive : grantLive)({ userId: u.userId })}>Live</button>
+      <select className="av-mini" disabled={busy} value={u.plan?.id ?? ''}
+        onChange={(e) => run((a) => setPlan(a))({ userId: u.userId, plan: e.target.value || null })}>
+        <option value="">Sin plan</option>
+        {(plans ?? []).map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+      </select>
+      <button className="av-mini" disabled={busy}
+        onClick={() => run(() => setSuspended({ userId: u.userId, suspended: !u.suspended }))()}>
+        {u.suspended ? 'Reactivar' : 'Suspender'}</button>
+      {err && <span className="av-ctl-err" title={err}>⚠</span>}
+    </div>
+  );
+}
+
 export default function AdminView() {
   const me = useQuery(api.users.getUser, {});
   // (CodeRabbit) Gatear las queries admin con 'skip' hasta confirmar rol admin: un no-admin NO debe
@@ -171,6 +215,10 @@ export default function AdminView() {
     isAdmin ? (bugFilter ? { status: bugFilter } : {}) : 'skip', { initialNumItems: 20 });
   const bugCounts = useQuery(api.bugReports.countBugReportsByStatus, isAdmin ? {} : 'skip');
   const setBugStatus = useMutation(api.bugReports.setBugStatus);
+  // (Fase 3) Búsqueda + filtro de usuarios (cliente, sobre la página cargada) y catálogo de planes.
+  const [userQ, setUserQ] = React.useState('');
+  const [userFilter, setUserFilter] = React.useState('all');
+  const plans = useQuery(api.subscriptions.listPlans, isAdmin ? {} : 'skip');
 
   const simConfig = useQuery(api.systemConfig.getConfig, { key: 'simulationMode' });
   const tradingConfig = useQuery(api.systemConfig.getConfig, { key: 'tradingEnabled' });
@@ -181,6 +229,18 @@ export default function AdminView() {
 
   if (me === undefined) return <div className="av-wrap"><p className="faint">Cargando…</p></div>;
   if (!me || me.role !== 'admin') return <Navigate to="/dashboard" replace />;
+
+  // Filtro/búsqueda cliente sobre la página cargada (beta; sin re-query). Afecta tabla y controles.
+  const visibleUsers = users.results.filter((u) => {
+    const hay = (u.email || u.name || '').toLowerCase();
+    const okQ = !userQ || hay.includes(userQ.toLowerCase());
+    // "activos" = mismo criterio que el estado visual "● activo" de la fila: no-admin, no suspendido y con plan.
+    const okF = userFilter === 'all'
+      || (userFilter === 'active' && u.role !== 'admin' && !u.suspended && !!u.plan)
+      || (userFilter === 'noplan' && !u.plan && u.role !== 'admin')
+      || (userFilter === 'suspended' && u.suspended);
+    return okQ && okF;
+  });
 
   return (
     <div className="av-wrap">
@@ -218,12 +278,30 @@ export default function AdminView() {
 
       {/* Usuarios */}
       <div className="av-section">
-        <div className="av-shead"><h2>USUARIOS</h2></div>
+        <div className="av-shead"><h2>USUARIOS</h2>
+          <input className="av-inp" placeholder="buscar usuario…" value={userQ} onChange={(e) => setUserQ(e.target.value)} />
+          <select className="av-mini" value={userFilter} onChange={(e) => setUserFilter(e.target.value)}>
+            <option value="all">todos</option><option value="active">activos</option>
+            <option value="noplan">sin plan</option><option value="suspended">suspendidos</option>
+          </select>
+        </div>
         <div className="av-uhead">
           <span>Usuario</span><span>Plan</span><span>Cobertura</span><span>Bots</span><span>$ monit.</span><span>Estado</span>
         </div>
-        {users.results.map((u) => <UserRow key={u.userId} u={u} />)}
+        {visibleUsers.map((u) => <UserRow key={u.userId} u={u} />)}
+        {visibleUsers.length === 0 && <div className="faint" style={{ padding: 12 }}>Sin usuarios que coincidan.</div>}
         {users.status === 'CanLoadMore' && <button className="av-more" onClick={() => users.loadMore(25)}>Cargar más</button>}
+      </div>
+
+      {/* (Fase 3) Controles por usuario: permisos · plan · suspensión (reusa mutations auditadas) */}
+      <div className="av-section">
+        <div className="av-shead"><h2>CONTROLES POR USUARIO</h2>
+          <span className="faint" style={{ fontSize: 11 }}>Manage · Live · plan · suspender — admin only</span></div>
+        <div className="av-ctlhead">
+          <span>Usuario</span><span>Manage</span><span>Live</span><span>Plan</span><span>Estado</span>
+        </div>
+        {visibleUsers.map((u) => <UserControlRow key={u.userId} u={u} plans={plans} />)}
+        {visibleUsers.length === 0 && <div className="faint" style={{ padding: 12 }}>Sin usuarios que coincidan.</div>}
       </div>
 
       <div className="av-cols">
@@ -311,6 +389,18 @@ function AdminStyles() {
   .av-shead{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--line)}
   .av-shead h2{font-size:14px;margin:0;font-weight:700}
   .av-shead select{margin-left:auto}
+  .av-inp{margin-left:auto;background:var(--panel-2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:6px 10px;font-size:12px}
+  .av-inp+select{margin-left:8px}
+  .av-ctlhead{display:grid;grid-template-columns:1.6fr .8fr .8fr 1.2fr .9fr;gap:10px;padding:8px 18px;color:var(--faint);font-size:11px;text-transform:uppercase;border-bottom:1px solid var(--line)}
+  .av-ctl{display:grid;grid-template-columns:1.6fr .8fr .8fr 1.2fr .9fr;gap:10px;align-items:center;padding:10px 18px;border-bottom:1px solid var(--line);font-size:13px}
+  .av-ctl:last-child{border-bottom:none}
+  .av-ctl-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .av-tgl{border:1px solid var(--line);border-radius:7px;padding:5px 10px;font-size:11px;font-weight:700;cursor:pointer}
+  .av-tgl.on{background:rgba(0,200,5,.14);color:var(--green);border-color:rgba(0,200,5,.3)}
+  .av-tgl.off{background:#1a1a1a;color:var(--faint)}
+  .av-tgl:disabled,.av-ctl select:disabled,.av-ctl button:disabled{opacity:.5;cursor:not-allowed}
+  .av-ctl-err{color:var(--red)}
+  @media(max-width:900px){.av-ctlhead{display:none}.av-ctl{grid-template-columns:1fr auto auto;row-gap:6px}.av-ctl>select,.av-ctl>button:last-of-type{grid-column:span 1}}
   .av-uhead,.av-main{display:grid;grid-template-columns:1.6fr 1.1fr 1.5fr .5fr .5fr .9fr;gap:10px;align-items:center}
   .av-uhead{padding:8px 18px;color:var(--faint);font-size:11px;text-transform:uppercase;border-bottom:1px solid var(--line)}
   .av-urow{border-bottom:1px solid var(--line)}

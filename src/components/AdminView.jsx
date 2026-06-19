@@ -53,6 +53,51 @@ function timeShort(ms) {
   catch { return ''; }
 }
 
+// Tiempo relativo compacto ("hace 12s/4m/2h/3d") para la salud de crons. undefined → "nunca".
+function agoShort(ms) {
+  if (ms == null) return 'nunca';
+  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (s < 60) return `hace ${s}s`;
+  if (s < 3600) return `hace ${Math.floor(s / 60)}m`;
+  if (s < 86400) return `hace ${Math.floor(s / 3600)}h`;
+  return `hace ${Math.floor(s / 86400)}d`;
+}
+
+// (OBS-2 → Fase 2) Salud de los crons del motor: una fila por cron (last success/error, fallos
+// consecutivos, duración). Read-only, admin-gated por la query (requireAdmin). Cierra el cabo suelto
+// de OBS-2 (listCronHealth existía sin UI). NO muestra nada sensible (la query ya devuelve escalares).
+function CronHealthPanel({ rows }) {
+  if (rows === undefined) return <div className="faint" style={{ padding: 12 }}>Cargando…</div>;
+  if (rows.length === 0) return <div className="faint" style={{ padding: 12 }}>Sin datos de crons todavía.</div>;
+  // Orden estable por nombre; los que están fallando primero para que salten a la vista.
+  const sorted = [...rows].sort((a, b) => {
+    const fa = (a.consecutiveFailures ?? 0) > 0, fb = (b.consecutiveFailures ?? 0) > 0;
+    if (fa !== fb) return fa ? -1 : 1;
+    return (a.name || '').localeCompare(b.name || '');
+  });
+  return (
+    <>
+      {sorted.map((c) => {
+        const fails = c.consecutiveFailures ?? 0;
+        const ok = c.lastSuccessAt ?? 0;
+        const state = fails > 0 ? 'red' : (ok === 0 ? 'amber' : 'green');
+        const label = fails > 0 ? `${fails} fallo${fails > 1 ? 's' : ''}` : (ok === 0 ? 's/datos' : 'OK');
+        return (
+          <div className="av-feed" key={c.name}>
+            <span className={`av-pill ${state}`} style={{ flex: 'none' }}>● {label}</span>
+            <span className="ev"><b>{c.name}</b></span>
+            <span className="who2" title="último éxito">{agoShort(c.lastSuccessAt)}</span>
+            <span className="t" title="duración última ejecución">{c.lastDurationMs != null ? `${c.lastDurationMs}ms` : '—'}</span>
+            {fails > 0 && c.lastError && (
+              <span className="faint" style={{ fontSize: 11, flexBasis: '100%' }} title={c.lastError}>↳ {c.lastError}</span>
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive }) {
   const p = pos.pool;
   const lev = pos.kind === 'il' ? `IL short ${pos.leverage ?? '?'}×` : `${pos.direction ?? ''} ${pos.leverage ?? '?'}×`;
@@ -262,6 +307,8 @@ export default function AdminView() {
   const [userQ, setUserQ] = React.useState('');
   const [userFilter, setUserFilter] = React.useState('all');
   const plans = useQuery(api.subscriptions.listPlans, isAdmin ? {} : 'skip');
+  // (OBS-2 → Fase 2) Salud de los crons del motor (read-only). La query ya es admin-gated.
+  const cronHealth = useQuery(api.cronHealth.listCronHealth, isAdmin ? {} : 'skip');
 
   const simConfig = useQuery(api.systemConfig.getConfig, { key: 'simulationMode' });
   const tradingConfig = useQuery(api.systemConfig.getConfig, { key: 'tradingEnabled' });
@@ -345,6 +392,21 @@ export default function AdminView() {
         </div>
         {visibleUsers.map((u) => <UserControlRow key={u.userId} u={u} plans={plans} />)}
         {visibleUsers.length === 0 && <div className="faint" style={{ padding: 12 }}>Sin usuarios que coincidan.</div>}
+      </div>
+
+      {/* (OBS-2 → Fase 2) Salud de los crons del motor — "¿está vivo el motor?" */}
+      <div className="av-section">
+        <div className="av-shead"><h2>SALUD DE LOS CRONS</h2>
+          {Array.isArray(cronHealth) && (
+            (() => {
+              const failing = cronHealth.filter((c) => (c.consecutiveFailures ?? 0) > 0).length;
+              return <span className={`av-pill ${failing > 0 ? 'red' : 'green'}`}>
+                {failing > 0 ? `● ${failing} con fallos` : '● todos OK'}
+              </span>;
+            })()
+          )}
+        </div>
+        <CronHealthPanel rows={cronHealth} />
       </div>
 
       <div className="av-cols">

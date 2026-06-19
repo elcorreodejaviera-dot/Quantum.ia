@@ -3,7 +3,7 @@ import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { requireUser, requireBotManager, deriveBaseAsset, hasPermission } from "./helpers";
+import { getUserOrNull, requireUser, requireBotManager, deriveBaseAsset, hasPermission } from "./helpers";
 import { hasNonTerminalArmForBot, requestDisarmAndDeactivateImpl } from "./triggerArms";
 import { hasOpenExecutionForBot } from "./executions";
 
@@ -51,7 +51,8 @@ async function assertActivatable(
 export const listBots = query({
   args: {},
   handler: async (ctx) => {
-    const user = await requireUser(ctx);
+    const user = await getUserOrNull(ctx);
+    if (!user) return []; // (JAV-82) race de primer login: aún sin doc Convex
     // Multi-tenancy: cada usuario ve solo sus propios bots.
     return await ctx.db.query("bots").withIndex("by_user", q => q.eq("userId", user._id)).collect();
   },

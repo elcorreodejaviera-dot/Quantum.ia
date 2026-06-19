@@ -1,6 +1,6 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
-import { requireAuth, requireAdmin, requireUser } from "./helpers";
+import { getUserOrNull, requireAuth, requireAdmin, requireUser } from "./helpers";
 
 // (JAV-38 #6) Devuelve TODAS las wallets de TODOS los usuarios → restringido a admin. El frontend
 // usa `listMyWallets` (solo las del usuario autenticado); esta queda para uso administrativo.
@@ -44,7 +44,8 @@ const BTC_RE = /^(bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}$/;
 export const listMyWallets = query({
   args: {},
   handler: async (ctx) => {
-    const user = await requireUser(ctx);
+    const user = await getUserOrNull(ctx);
+    if (!user) return []; // (JAV-82) race de primer login: aún sin doc Convex
     return await ctx.db
       .query("wallets")
       .withIndex("by_owner", (q) => q.eq("ownerId", user._id.toString()))

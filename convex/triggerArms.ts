@@ -3,7 +3,7 @@ import { internal } from "./_generated/api";
 import { v } from "convex/values";
 import type { MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
-import { requireUser } from "./helpers";
+import { getUserOrNull, requireUser } from "./helpers";
 import { committedMarginForAccount, assertLiveAdmissible } from "./executions";
 import { assertWithinPlanCoverage, coverageAdmissible } from "./coverageUsage";
 import { resolveLeverage, MARGIN_SAFETY_BUFFER } from "./leverage";
@@ -839,7 +839,8 @@ export const recoverAbandonedArming = internalMutation({
 export const listMyActiveArms = query({
   args: {},
   handler: async (ctx) => {
-    const user = await requireUser(ctx);
+    const user = await getUserOrNull(ctx);
+    if (!user) return []; // (JAV-82) race de primer login: aún sin doc Convex
     const bots = await ctx.db.query("bots").withIndex("by_user", (q) => q.eq("userId", user._id)).collect();
     const out: Array<{
       botId: Id<"bots">; status: string; desiredState: string; side: string;

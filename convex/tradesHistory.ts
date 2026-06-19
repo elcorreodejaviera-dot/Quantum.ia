@@ -1,6 +1,6 @@
 import { internalMutation, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
-import { requireAdmin, requireUser } from "./helpers";
+import { getUserOrNull, requireAdmin, requireUser } from "./helpers";
 
 export const recordSignal = mutation({
   args: {
@@ -111,7 +111,8 @@ export const recordTestnetExecution = mutation({
 export const listSignals = query({
   args: { limit: v.optional(v.number()) },
   handler: async (ctx, { limit = 50 }) => {
-    const user = await requireUser(ctx);
+    const user = await getUserOrNull(ctx);
+    if (!user) return []; // (JAV-82) race de primer login: aún sin doc Convex
     const clamped = Math.min(Math.max(limit, 1), 100);
     return await ctx.db
       .query("trades_history")

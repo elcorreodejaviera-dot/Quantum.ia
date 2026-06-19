@@ -12,6 +12,7 @@ import {
 import { armCloid } from "./triggerArms";
 import { armErrorKind, REARM_COOLDOWN_MS, REARM_RETRY_MS, REARM_BLOCKED_RECHECK_MS, STOP_ALERT_THRESHOLD } from "./triggerRearm";
 import { TransportError } from "@nktkas/hyperliquid";
+import { elog } from "./log";
 
 // --- JAV-44 Etapa 1: actions del motor (trigger nativo de entrada inferior, TESTNET) ---
 
@@ -387,6 +388,13 @@ export const armBotInternal = internalAction({
       } finally { acE.clear(); }
     }
 
+    // (OBS-3) Clasificación del envío de entradas a HL (engine-level; el settleArm de abajo registra la
+    // transición resultante). Solo booleans/size: `hadError` es booleano — NO se loguea el string crudo
+    // del SDK (puede traer payload sensible; eso es PR3/hyperliquid.ts).
+    elog("arm", "entries_sent", {
+      armId: String(armId), anyFilled, anyPlaced, transportUncertain,
+      hadError: !!hardError, filledSize: anyFilled ? filledSize : 0,
+    });
     // Resolver el estado del arm. Prioridad: fill > colocado/incierto > error.
     if (anyFilled) {
       await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "filled", filledSize, entryPrice });

@@ -39,8 +39,8 @@ consultable, histórica y agregable → cimiento del "panel de verdad" (Fase 2 d
 // (OBS-3b) Hitos persistidos del motor money-path. Escalares no sensibles (mismo contrato que elog).
 // Inserción transaccional desde recordEngineEvent dentro de las mutations del motor.
 engine_events: defineTable({
-  scope: v.string(),     // "exec" | "arm" | "rearm" | "coverage" | "hl"
-  event: v.string(),     // "transition" | "blocked" | "rearm_outcome" | "emergency_close" | ...
+  scope: v.string(),     // "exec" | "arm" | "rearm" | "hl"  (coverage NO se persiste — ver abajo)
+  event: v.string(),     // "transition" | "rearm_outcome" | "emergency_close"
   at: v.number(),        // Date.now()
   botId: v.optional(v.id("bots")),
   armId: v.optional(v.id("trigger_arms")),
@@ -70,12 +70,16 @@ mensajes de error crudos. Solo ids/estados/enums.
 NO se persiste cada `elog` (sería ruido y filas de más). Solo los hitos de valor para diagnóstico:
 
 - **arm:** `transition` a estados clave (filled, protected, closed, failed, armed_lower_only) con
-  `closeReason`; `submitting_blocked`/`gate_before_order` bloqueado (reason). NO `reserved`/`submitting`
-  de cada intento.
-- **exec:** `transition` a entry_filled/protected/closed/failed; `gate_before_order` bloqueado.
-- **rearm:** `outcome` (outcome/kind) — reusa el punto de `recordRearmOutcome` (PR1).
-- **coverage:** `cap_rejected` (sin montos sensibles: pool/plan).
-- **hl:** `emergency_close` (cierre de capital real). Opcional: `order_result` rejected/filled.
+  `closeReason`. NO `reserved`/`submitting` de cada intento.
+- **exec:** `transition` a entry_filled/protected/closed/failed.
+- **rearm:** `rearm_outcome` (outcome/kind) — reusa el punto de `recordRearmOutcome` (PR1).
+- **hl:** `emergency_close` (cierre de capital real), vía `runMutation` (es un action).
+
+Los **bloqueos de gate** NO se persisten como evento aparte: cuando terminalizan, ya fluyen como
+`transition` a `failed` (que sí se persiste) → evita duplicar. El scope **`coverage`** (`cap_rejected`)
+NO se persiste: su ctx es `ReadCtx` (DatabaseReader, no puede escribir) y el bloqueo ya queda reflejado
+en la `transition` a `failed` del gate llamador. `order_result` de `hl` tampoco: redundante con la
+`transition` de la ejecución, que sí se persiste.
 
 Regla: una fila por hito, NUNCA dentro de un bucle caliente ni por tick de reconcile.
 

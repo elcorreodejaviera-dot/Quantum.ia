@@ -95,6 +95,11 @@ export const listEngineEvents = query({
   },
   handler: async (ctx, { botId, armId, limit = 100 }) => {
     await requireAdmin(ctx);
+    // (CodeRabbit) Filtros mutuamente excluyentes: con ambos, la rama botId ignoraría armId en
+    // silencio → rechazar explícitamente en vez de devolver resultados engañosos.
+    if (botId !== undefined && armId !== undefined) {
+      throw new Error("listEngineEvents: usar solo un filtro (botId o armId), no ambos.");
+    }
     const clamped = Math.min(Math.max(limit, 1), 200);
     if (botId) {
       return await ctx.db.query("engine_events")

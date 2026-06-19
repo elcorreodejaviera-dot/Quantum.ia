@@ -69,7 +69,10 @@ export function explainBot(bot, arm, pool, hlBalance) {
     } else if (st === 'unknown') {
       lines.push('Verificando la cobertura…');
     } else if (st === 'failed') {
+      // (CodeRabbit) `failed` es EXCLUSIVO: un arm fallido no tiene cobertura viva → solo el mensaje de
+      // fallo, sin capital ni nota de auto-rearm (que ya estaba excluida).
       lines.push('El último armado falló.');
+      return lines;
     }
     // (Codex MEDIO#1) Es CAPITAL por posición (deriva de reservedNotional), NO margen (marginReserved no
     // se expone en listMyActiveArms). `disponible` = saldo HL libre.

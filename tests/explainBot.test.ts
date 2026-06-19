@@ -64,9 +64,9 @@ describe("explainBot", () => {
     expect(lines.some((l: string) => l.includes("Protección en"))).toBe(false);
   });
 
-  it("failed: solo 'El último armado falló' (sin motivo inventado)", () => {
-    const lines = explainBot(bot(), { status: "failed", reservedNotional: 1000, orders: [] }, null, null);
-    expect(lines).toContain("El último armado falló.");
+  it("failed es EXCLUSIVO: solo el mensaje de fallo (sin capital ni auto-rearm)", () => {
+    const lines = explainBot(bot({ autoRearm: true }), { status: "failed", reservedNotional: 1000, orders: [] }, null, null);
+    expect(lines).toEqual(["El último armado falló."]);
   });
 
   it("auto-rearm: añade la nota solo si bot.autoRearm y no failed", () => {

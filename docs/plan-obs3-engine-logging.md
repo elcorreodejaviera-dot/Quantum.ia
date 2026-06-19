@@ -95,9 +95,11 @@ panel admin. Diferible; empezar solo con logs de Convex.
 OBS-3 NO se implementa de una vez sobre todo el motor. Se hace **un módulo por PR**, auditando código
 entre cada uno, empezando por los de MENOR superficie de secretos:
 
-1. **PR 1 — `coverageUsage.ts` (gates) + `triggerRearm.ts`** (no tocan credenciales descifradas;
-   solo ids/estados/reason). Primero el helper `elog`/`safeError` + estos dos módulos.
-2. **PR 2 — `executions.ts` / `triggerArms.ts` / `triggerEngine.ts`** (transiciones; sin claves).
+1. **PR 1 — helper `elog`/`safeError` (`log.ts`) + `triggerRearm.ts`** (no tocan credenciales
+   descifradas; solo ids/estados/reason). `coverageUsage.ts` se DIFIERE a PR 2 para evitar
+   conflicto con JAV-79 (PR #78, que reescribe `consumedCoverageByPool`).
+2. **PR 2 — `coverageUsage.ts` (gates) + `executions.ts` / `triggerArms.ts` / `triggerEngine.ts`**
+   (transiciones; sin claves). `coverageUsage.ts` solo tras mergear JAV-79.
 3. **PR 3 — `hyperliquid.ts`** (el más sensible: maneja claves descifradas) — auditoría reforzada
    campo por campo.
 

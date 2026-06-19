@@ -9,6 +9,16 @@ export function deriveBaseAsset(pair: string): string {
   return NORMALIZE_ASSET[sym] ?? sym;
 }
 
+// (OBS-1) Escribe una entrada de auditoría en `admin_logs` DENTRO de la mutation que ejecuta la
+// acción admin → atómico con el efecto (Convex transaccional: si la mutation revierte, el log
+// también). `adminClerkId` = clerkId del admin (coherente con admin_logs.userId: v.string()).
+// `meta` debe ser MÍNIMO y SIN secretos (solo ids/valores de config/plan; nunca claves/credenciales).
+export async function writeAdminLog(
+  ctx: MutationCtx, adminClerkId: string, action: string, meta?: unknown,
+) {
+  await ctx.db.insert("admin_logs", { userId: adminClerkId, action, timestamp: Date.now(), meta });
+}
+
 // (JAV-38 #8) Acepta también ActionCtx: solo usa ctx.auth, presente en los tres contextos.
 // Permite exigir auth en actions públicas (p.ej. scanPoolByTokenId / fetchPositionLiquidity).
 export async function requireAuth(ctx: QueryCtx | MutationCtx | ActionCtx) {

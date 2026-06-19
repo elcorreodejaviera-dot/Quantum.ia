@@ -3650,8 +3650,6 @@ function Dashboard({ user, onLogout, userId }) {
   const alertCooldownRef = React.useRef({});
   const alertDirectionRef = React.useRef({});
 
-  const logAdminActionMutation = useMutation(api.systemConfig.logAdminAction);
-
   const fetchPositionAction = useAction(api.actions.poolScanner.fetchPositionLiquidity);
   const [positionData, setPositionData] = React.useState({});
   const positionFetchedRef = React.useRef({});
@@ -3675,12 +3673,11 @@ function Dashboard({ user, onLogout, userId }) {
   }, [poolsFromDb, prices]);
 
   async function killSwitch() {
+    // (OBS-1) El rastro de auditoría es ahora SERVER-SIDE y autoritativo: setTradingEnabled y
+    // setSimulationMode escriben en admin_logs dentro de su mutation (atómico). Se elimina el
+    // logAdminAction({kill_switch}) del cliente (no autoritativo, no atómico, posible duplicado).
     await setTradingEnabledMutation({ enabled: false });
     await setSimulationModeMutation({ enabled: true });
-    // log es best-effort — un fallo aquí no debe enmascarar que el kill switch sí se aplicó
-    logAdminActionMutation({ action: 'kill_switch', meta: { triggeredBy: userId } }).catch(
-      (err) => console.error('admin log failed (kill switch was applied)', err)
-    );
   }
 
   // UI-only state que no persiste en Convex (trading config extendida)

@@ -2,7 +2,7 @@ import { internalQuery, mutation, query } from "./_generated/server";
 import type { MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { v } from "convex/values";
-import { requireAdmin } from "./helpers";
+import { requireAdmin, writeAdminLog } from "./helpers";
 
 // --- Planes de cobertura (JAV-73) — FUENTE ÚNICA de verdad ---
 //
@@ -99,13 +99,15 @@ async function loadNonAdminTarget(ctx: MutationCtx, userId: Id<"users">) {
 export const setSubscriptionPlan = mutation({
   args: { userId: v.id("users"), plan: planArg },
   handler: async (ctx, { userId, plan }) => {
-    await requireAdmin(ctx);
-    await loadNonAdminTarget(ctx, userId);
+    const admin = await requireAdmin(ctx);
+    const target = await loadNonAdminTarget(ctx, userId);
+    const prevPlan = target.subscriptionPlan ?? null;
     // Defensa extra: si viene un plan no-null, debe existir en el catálogo (getPlan).
     if (plan !== null && getPlan(plan) === null) {
       throw new Error(`Plan inválido: ${plan}`);
     }
     await ctx.db.patch(userId, { subscriptionPlan: plan === null ? undefined : plan });
+    await writeAdminLog(ctx, admin.clerkId, "set_subscription_plan", { targetUserId: userId, plan, prevPlan });
   },
 });
 
@@ -115,8 +117,10 @@ export const setSubscriptionPlan = mutation({
 export const setUserSuspended = mutation({
   args: { userId: v.id("users"), suspended: v.boolean() },
   handler: async (ctx, { userId, suspended }) => {
-    await requireAdmin(ctx);
-    await loadNonAdminTarget(ctx, userId);
+    const admin = await requireAdmin(ctx);
+    const target = await loadNonAdminTarget(ctx, userId);
+    const prev = target.suspended ?? false;
     await ctx.db.patch(userId, { suspended });
+    await writeAdminLog(ctx, admin.clerkId, "set_user_suspended", { targetUserId: userId, suspended, prev });
   },
 });

@@ -3,7 +3,7 @@ import type { MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { v } from "convex/values";
 import { paginationOptsValidator } from "convex/server";
-import { requireAdmin, requireAuth, requireUser, requireTradeLive, hasPermission } from "./helpers";
+import { requireAdmin, requireAuth, requireUser, requireTradeLive, hasPermission, writeAdminLog } from "./helpers";
 
 export const getCurrentAdminInternal = internalQuery({
   args: {},
@@ -197,19 +197,21 @@ async function grantPermission(
     await ctx.db.patch(rows[0]._id, { granted: true, grantedAt: now, grantedBy: admin._id, expiresAt: undefined });
     for (const r of rows.slice(1)) if (r.granted) await ctx.db.patch(r._id, { granted: false });
   }
+  await writeAdminLog(ctx, admin.clerkId, "grant_permission", { targetUserId: userId, permission });
 }
 
 // Revoca un permiso en TODAS las filas del usuario (el esquema permite duplicados). Admin-only.
 async function revokePermission(
   ctx: MutationCtx, userId: Id<"users">, permission: GrantablePermission,
 ) {
-  await requireAdmin(ctx);
+  const admin = await requireAdmin(ctx);
   const rows = await ctx.db
     .query("user_permissions")
     .withIndex("by_user_permission", (q) =>
       q.eq("userId", userId).eq("permission", permission))
     .collect();
   for (const r of rows) if (r.granted) await ctx.db.patch(r._id, { granted: false });
+  await writeAdminLog(ctx, admin.clerkId, "revoke_permission", { targetUserId: userId, permission });
 }
 
 // ¿permission vigente para u? (admin → siempre true). Helper de listUsersWithTradeLive.

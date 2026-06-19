@@ -1,6 +1,6 @@
 import { internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
-import { requireAuth, requireAdmin } from "./helpers";
+import { requireAuth, requireAdmin, writeAdminLog } from "./helpers";
 
 // (JAV-77) Los límites beta de nocional por orden/diario ($500/$2.000) se eliminaron: el tope de
 // cobertura por PLAN (coverageUsage.ts) es ahora el único control de tamaño. El kill-switch global
@@ -49,32 +49,36 @@ export const getConfigInternal = internalQuery({
 export const setSimulationMode = mutation({
   args: { enabled: v.boolean() },
   handler: async (ctx, { enabled }) => {
-    await requireAdmin(ctx);
+    const admin = await requireAdmin(ctx);
     const existing = await ctx.db
       .query("system_config")
       .withIndex("by_key", (q) => q.eq("key", "simulationMode"))
       .first();
+    const prev = existing?.value ?? null;
     if (existing) {
       await ctx.db.patch(existing._id, { value: enabled });
     } else {
       await ctx.db.insert("system_config", { key: "simulationMode", value: enabled });
     }
+    await writeAdminLog(ctx, admin.clerkId, "set_simulation_mode", { enabled, prev });
   },
 });
 
 export const setTradingEnabled = mutation({
   args: { enabled: v.boolean() },
   handler: async (ctx, { enabled }) => {
-    await requireAdmin(ctx);
+    const admin = await requireAdmin(ctx);
     const existing = await ctx.db
       .query("system_config")
       .withIndex("by_key", (q) => q.eq("key", "tradingEnabled"))
       .first();
+    const prev = existing?.value ?? null;
     if (existing) {
       await ctx.db.patch(existing._id, { value: enabled });
     } else {
       await ctx.db.insert("system_config", { key: "tradingEnabled", value: enabled });
     }
+    await writeAdminLog(ctx, admin.clerkId, "set_trading_enabled", { enabled, prev });
   },
 });
 

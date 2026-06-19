@@ -243,6 +243,48 @@ export const getUserLiveTargetsInternal = internalQuery({
   },
 });
 
+// (Fase 6-C) Datos de DB para la auditoría de pools del usuario AUDITADO. Read-only, admin-gated, SIN
+// RPC ni secretos (solo ids/estados/números operativos; nunca credenciales/direcciones). Provee lo que
+// el snapshot live NO trae: arms/trigger_orders/pool/bot, incluidos pools cerrados/sin tokenId.
+// (Codex BAJO#1) arms acotados a los últimos AUDIT_ARMS_PER_BOT por bot (by_bot_generation desc) →
+// orphan_orders detecta huérfanas DENTRO de ese alcance reciente.
+const AUDIT_ARMS_PER_BOT = 5;
+export const getUserPoolAuditData = query({
+  args: { userId: v.id("users") },
+  handler: async (ctx, { userId }): Promise<any> => {
+    await requireAdmin(ctx);
+    const bots = await ctx.db.query("bots").withIndex("by_user", (q) => q.eq("userId", userId)).collect();
+    const out = [];
+    for (const b of bots) {
+      let pool = null;
+      if (b.poolId) {
+        const p = await ctx.db.get(b.poolId);
+        if (p) pool = {
+          poolId: p._id, pair: p.pair, network: p.network, tokenId: p.tokenId ?? null,
+          minRange: p.minRange, maxRange: p.maxRange, closed: p.closed === true,
+        };
+      }
+      const armDocs = await ctx.db.query("trigger_arms")
+        .withIndex("by_bot_generation", (q) => q.eq("botId", b._id)).order("desc").take(AUDIT_ARMS_PER_BOT);
+      const arms = [];
+      for (const a of armDocs) {
+        const orders = await ctx.db.query("trigger_orders")
+          .withIndex("by_arm_role", (q) => q.eq("armId", a._id)).collect();
+        arms.push({
+          status: a.status, network: a.network, generation: a.generation,
+          triggerPx: a.triggerPx, lowerEdge: a.lowerEdge, upperEdge: a.upperEdge ?? null,
+          orders: orders.map((o) => ({ role: o.role, observedStatus: o.observedStatus, triggerPx: o.triggerPx })),
+        });
+      }
+      out.push({
+        botId: b._id, active: b.active === true, hlAccountId: b.hlAccountId ?? null,
+        baseAsset: b.baseAsset ?? null, pool, arms,
+      });
+    }
+    return out;
+  },
+});
+
 // Feed de actividad: merge de fuentes indexadas por tiempo (Codex #5: sin tabla activity_log en v1).
 export const listActivity = query({
   args: { limit: v.optional(v.number()) },

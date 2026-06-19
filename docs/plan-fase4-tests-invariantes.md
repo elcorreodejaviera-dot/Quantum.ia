@@ -42,8 +42,8 @@ Invariantes (paridad ya auditada por Codex):
 - **margen derivado:** `marginRequired === reservedNotional / appliedLeverage`.
 
 ### 2. `armErrorKind` (`convex/triggerRearm.ts`)
-- clasifica por prefijo `[blocked_config]`/`[blocked_margin]`/`[transient]`/`[retry_incompatible]`,
-  incluso bajo wrappers `Uncaught Error:` (solo al inicio).
+- clasifica por prefijo `[blocked_config]`/`[blocked_margin]`/`[transient]`/`[retry_incompatible]`/
+  `[cancel]`, incluso bajo wrappers `Uncaught Error:` (solo al inicio).
 - string desconocido / sin prefijo → `transient` (fail-safe: reintentar, nunca abandonar por error técnico).
 
 ## Import directo primero; extracción mínima solo si vitest lo exige (Codex #2/#3)

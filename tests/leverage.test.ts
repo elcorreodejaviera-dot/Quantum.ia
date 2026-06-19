@@ -137,10 +137,13 @@ describe("resolveLeverage — validaciones globales (ambos modos)", () => {
       .toThrow(/\[blocked_config\]/);
   });
 
-  it("reservedNotional no finito → [blocked_config] (auto)", () => {
-    expect(() => resolveLeverage({ ...base, autoLeverage: true, reservedNotional: Number.NaN, availableCollateral: 10_000 }))
-      .toThrow(/\[blocked_config\]/);
-  });
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    "reservedNotional no finito (%s) → [blocked_config] (auto)",
+    (reservedNotional) => {
+      expect(() => resolveLeverage({ ...base, autoLeverage: true, reservedNotional, availableCollateral: 10_000 }))
+        .toThrow(/\[blocked_config\]/);
+    },
+  );
 
   it("el buffer de margen es el documentado (10%) — ancla del usableReal", () => {
     expect(MARGIN_SAFETY_BUFFER).toBe(0.10);

@@ -354,7 +354,8 @@ export default defineSchema({
     .index("by_status_created", ["status", "createdAt"])
     .index("by_account", ["hlAccountId"])    // bloquear revocación con ejecuciones abiertas
     .index("by_bot", ["botId"])              // bloquear borrado del bot con ejecuciones abiertas (D)
-    .index("by_created", ["createdAt"]),     // observabilidad admin (listRecentExecutions)
+    .index("by_created", ["createdAt"])      // observabilidad admin (listRecentExecutions)
+    .index("by_user_status", ["userId", "status"]), // (JAV-79) cobertura: leer solo filas vivas del user
 
   // --- JAV-44 Etapa 1: motor de cobertura automática (triggers nativos en HL) ---
   // Un "armado" de un bot (versión = generation). Snapshot inmutable de la intención + lease/fencing.
@@ -438,7 +439,8 @@ export default defineSchema({
     .index("by_updated", ["updatedAt"])                   // cron sin starvation (más antiguo primero)
     .index("by_user_created", ["userId", "createdAt"])    // límite diario compartido con JAV-43
     .index("by_account", ["hlAccountId"])                 // bloquear revocación con arm no terminal
-    .index("by_filledAt", ["filledAt"]),                  // (JAV-85 #5) volumen 24h por momento del fill
+    .index("by_filledAt", ["filledAt"])                   // (JAV-85 #5) volumen 24h por momento del fill
+    .index("by_user_status", ["userId", "status"]),       // (JAV-79) cobertura: leer solo filas vivas del user
 
   // Cada orden trigger nativa de un arm. CLOID = identidad primaria determinista.
   trigger_orders: defineTable({

@@ -1,5 +1,5 @@
 import type { DatabaseReader } from "./_generated/server";
-import type { Id } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 import { getPlan } from "./plans";
 
 // (JAV-77 fix TS2589) Estos helpers SOLO LEEN (ctx.db.get/query). Tipamos el ctx con el tipo ligero
@@ -18,6 +18,33 @@ type ReadCtx = { db: DatabaseReader };
 const ARM_TERMINAL = new Set(["disarmed", "closed", "failed"]);
 const EXEC_TERMINAL = new Set(["closed", "failed"]);
 
+// (JAV-79) Estados VIVOS por tabla, para consultar SOLO filas vivas por índice `by_user_status` en vez
+// de hacer collect() de todo el historial. Se derivan de ALL_STATUSES − TERMINAL (NUNCA a mano):
+// - `as const satisfies readonly Doc<...>["status"][]` + el guard de exhaustividad de abajo garantizan
+//   que ALL_STATUSES contenga TODOS los estados del schema → si el schema añade uno y no se lista,
+//   `npm run typecheck` FALLA (no se puede desplegar el olvido).
+// - LIVE = ALL − TERMINAL → un estado nuevo (listado, no marcado terminal) cuenta como vivo por
+//   defecto = fail-CLOSED (sobre-conteo bloquea; nunca infra-conteo que dejaría pasar sobre el cap).
+type ArmStatus = Doc<"trigger_arms">["status"];
+type ExecStatus = Doc<"execution_requests">["status"];
+
+const ARM_ALL_STATUSES = [
+  "arming", "submitting", "armed", "disarming", "disarmed", "filled", "protecting",
+  "protected", "armed_lower_only", "closed", "failed", "unknown",
+] as const satisfies readonly ArmStatus[];
+const EXEC_ALL_STATUSES = [
+  "pending", "submitting", "entry_filled", "protected", "sl_failed", "closed", "unknown", "failed",
+] as const satisfies readonly ExecStatus[];
+
+// Guards de EXHAUSTIVIDAD: si el schema añade un estado no listado arriba, esto NO compila.
+type _ArmExhaustive = Exclude<ArmStatus, typeof ARM_ALL_STATUSES[number]> extends never ? true : never;
+type _ExecExhaustive = Exclude<ExecStatus, typeof EXEC_ALL_STATUSES[number]> extends never ? true : never;
+const _armCheck: _ArmExhaustive = true; void _armCheck;
+const _execCheck: _ExecExhaustive = true; void _execCheck;
+
+const ARM_LIVE: readonly ArmStatus[] = ARM_ALL_STATUSES.filter((s) => !ARM_TERMINAL.has(s));
+const EXEC_LIVE: readonly ExecStatus[] = EXEC_ALL_STATUSES.filter((s) => !EXEC_TERMINAL.has(s));
+
 // Cobertura consumida por pool sobre TODOS los compromisos vivos del usuario (arms IL + ejecuciones
 // legacy). Por pool se toma el MÁXIMO hedgeNotionalUsd (un pool cuenta una vez; lecturas distintas del
 // mismo LP varían levemente → max es fail-closed). LANZA [blocked_config] si una fila viva no tiene
@@ -28,35 +55,40 @@ export async function consumedCoverageByPool(
 ): Promise<Map<string, number>> {
   const map = new Map<string, number>();
 
-  const arms = await ctx.db
-    .query("trigger_arms")
-    .withIndex("by_user_created", (q) => q.eq("userId", userId))
-    .collect();
-  for (const a of arms) {
-    if (ARM_TERMINAL.has(a.status)) continue;
-    const h = a.hedgeNotionalUsd;
-    if (!(typeof h === "number" && Number.isFinite(h) && h > 0)) {
-      throw new Error("[blocked_config] Cobertura no cuantificable: arm vivo sin hedgeNotionalUsd (requiere backfill/drain).");
+  // (JAV-79) Solo filas VIVAS, por índice `by_user_status` (nº de queries constante = |LIVE|,
+  // independiente del tamaño del historial). El conjunto de filas consideradas es idéntico al del
+  // antiguo collect()+filtro (todas las no-terminales) → mismo Map, misma agregación max por pool.
+  for (const st of ARM_LIVE) {
+    const arms = await ctx.db
+      .query("trigger_arms")
+      .withIndex("by_user_status", (q) => q.eq("userId", userId).eq("status", st))
+      .collect();
+    for (const a of arms) {
+      const h = a.hedgeNotionalUsd;
+      if (!(typeof h === "number" && Number.isFinite(h) && h > 0)) {
+        throw new Error("[blocked_config] Cobertura no cuantificable: arm vivo sin hedgeNotionalUsd (requiere backfill/drain).");
+      }
+      const key = a.poolId as string;
+      map.set(key, Math.max(map.get(key) ?? 0, h));
     }
-    const key = a.poolId as string;
-    map.set(key, Math.max(map.get(key) ?? 0, h));
   }
 
-  const execs = await ctx.db
-    .query("execution_requests")
-    .withIndex("by_user_created", (q) => q.eq("userId", userId))
-    .collect();
-  for (const r of execs) {
-    if (EXEC_TERMINAL.has(r.status)) continue;
-    const h = r.hedgeNotionalUsd;
-    if (!(typeof h === "number" && Number.isFinite(h) && h > 0)) {
-      throw new Error("[blocked_config] Cobertura no cuantificable: ejecución viva sin hedgeNotionalUsd (requiere backfill/drain).");
+  for (const st of EXEC_LIVE) {
+    const execs = await ctx.db
+      .query("execution_requests")
+      .withIndex("by_user_status", (q) => q.eq("userId", userId).eq("status", st))
+      .collect();
+    for (const r of execs) {
+      const h = r.hedgeNotionalUsd;
+      if (!(typeof h === "number" && Number.isFinite(h) && h > 0)) {
+        throw new Error("[blocked_config] Cobertura no cuantificable: ejecución viva sin hedgeNotionalUsd (requiere backfill/drain).");
+      }
+      if (!r.poolId) {
+        throw new Error("[blocked_config] Cobertura no cuantificable: ejecución viva sin poolId (requiere backfill/drain).");
+      }
+      const key = r.poolId as string;
+      map.set(key, Math.max(map.get(key) ?? 0, h));
     }
-    if (!r.poolId) {
-      throw new Error("[blocked_config] Cobertura no cuantificable: ejecución viva sin poolId (requiere backfill/drain).");
-    }
-    const key = r.poolId as string;
-    map.set(key, Math.max(map.get(key) ?? 0, h));
   }
 
   return map;

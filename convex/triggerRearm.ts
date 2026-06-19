@@ -1,6 +1,7 @@
 import { internalMutation, internalQuery } from "./_generated/server";
 import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
+import { elog } from "./log";
 
 // --- JAV-44 auto-rearm durable (Codex GO) ---
 // Estado persistente del re-armado tras un cierre por SL, en la tabla `bots`. El cron lo reclama con
@@ -72,28 +73,49 @@ export const recordRearmOutcome = internalMutation({
   handler: async (ctx, { botId, token, outcome, kind, error, nextRearmAt }) => {
     const bot = await ctx.db.get(botId);
     if (!bot) return { ok: false as const };
-    if (bot.rearmLeaseToken !== token || (bot.rearmLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (bot.rearmLeaseToken !== token || (bot.rearmLeaseUntil ?? 0) <= Date.now()) {
+      // (OBS-3) lease perdido/expirado entre el claim y el registro → el outcome se descarta.
+      elog("rearm", "outcome_stale_lease", { botId: String(botId), outcome });
+      return { ok: false as const };
+    }
+    // (OBS-3) loggedAttempts/loggedNextRearmAt reflejan lo realmente persistido (no una aproximación):
+    // success/cancel limpian nextRearmAt (→ null); cancel además deja rearmAttempts igual (no incrementa).
+    let loggedAttempts: number;
+    let loggedNextRearmAt: number | null;
     if (outcome === "success") {
       await ctx.db.patch(botId, {
         rearmStatus: undefined, nextRearmAt: undefined, rearmAttempts: 0,
         lastRearmError: undefined, lastRearmErrorKind: undefined,
         rearmLeaseToken: undefined, rearmLeaseUntil: undefined,
       });
+      loggedAttempts = 0;
+      loggedNextRearmAt = null;
     } else if (outcome === "cancel") {
       await ctx.db.patch(botId, {
         rearmStatus: undefined, nextRearmAt: undefined,
         rearmLeaseToken: undefined, rearmLeaseUntil: undefined,
         lastRearmError: error, lastRearmErrorKind: undefined,
       });
+      loggedAttempts = bot.rearmAttempts ?? 0;
+      loggedNextRearmAt = null;
     } else {
+      const persistedNextRearmAt = nextRearmAt ?? (Date.now() + REARM_RETRY_MS);
+      const persistedAttempts = (bot.rearmAttempts ?? 0) + 1;
       await ctx.db.patch(botId, {
         rearmStatus: outcome === "blocked" ? "blocked" : "pending",
-        rearmAttempts: (bot.rearmAttempts ?? 0) + 1,
-        nextRearmAt: nextRearmAt ?? (Date.now() + REARM_RETRY_MS),
+        rearmAttempts: persistedAttempts,
+        nextRearmAt: persistedNextRearmAt,
         lastRearmError: error, lastRearmErrorKind: kind,
         rearmLeaseToken: undefined, rearmLeaseUntil: undefined,
       });
+      loggedAttempts = persistedAttempts;
+      loggedNextRearmAt = persistedNextRearmAt;
     }
+    // (OBS-3) Decisión de auto-rearm. Solo escalares no sensibles (ids/estado/kind/intentos).
+    elog("rearm", "outcome", {
+      botId: String(botId), outcome, kind: kind ?? null,
+      attempts: loggedAttempts, nextRearmAt: loggedNextRearmAt,
+    });
     return { ok: true as const };
   },
 });

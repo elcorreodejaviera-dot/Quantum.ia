@@ -5,6 +5,7 @@ import type { Id } from "./_generated/dataModel";
 import { hasPermission, requireAdmin } from "./helpers";
 import { assertWithinPlanCoverage, coverageAdmissible } from "./coverageUsage";
 import { resolveLeverage, MARGIN_SAFETY_BUFFER } from "./leverage";
+import { elog } from "./log";
 
 // Lease anti-carrera: la reconciliación no toca pending/submitting con updatedAt más reciente.
 export const LEASE_MS = 90_000;
@@ -166,6 +167,8 @@ export const reserveExecution = internalMutation({
       if (!same) throw new Error("Conflicto de idempotencia: la clave ya existe con otros parámetros.");
       // Dedupe: NO se recalcula ni sobrescribe leverage/margen — se devuelve lo PERSISTIDO (Codex #3).
       // Una fila legacy puede no tener appliedLeverage (undefined); el caller no re-ejecuta updateLeverage.
+      // (OBS-3) Hit de idempotencia: la solicitud ya existía (reintento). Solo ids/estado.
+      elog("exec", "reserve_dedupe", { requestId: String(existing._id), botId: String(args.botId), status: existing.status });
       return { requestId: existing._id, status: existing.status, alreadyExists: true as const, appliedLeverage: existing.appliedLeverage };
     }
     // (2) Hard-cap por plan (JAV-77, Modelo B): la cobertura de POOLS del usuario (Σ hedgeNotionalUsd
@@ -218,6 +221,12 @@ export const reserveExecution = internalMutation({
       slAttempt: 0,
       createdAt: now,
       updatedAt: now,
+    });
+    // (OBS-3) Reserva creada (pending). Escalares no sensibles: ids/side/asset/leverage (appliedLeverage
+    // NO es secreto: no permite operar la cuenta). NADA de credencial/cuenta.
+    elog("exec", "reserved", {
+      requestId: String(requestId), botId: String(args.botId), side: args.side,
+      asset: args.asset, appliedLeverage,
     });
     return { requestId, status: "pending" as const, alreadyExists: false as const, appliedLeverage };
   },
@@ -297,15 +306,19 @@ export const markSubmitting = internalMutation({
     if (req.status !== "pending") return { ok: false as const, reason: "state" as const };
     // Último gate antes del envío: switch/permiso/estado del bot. Si cambió → no marcar.
     if (!(await assertLiveAdmissible(ctx, req.userId, req.botId, req.hlAccountId))) {
+      elog("exec", "submitting_blocked", { requestId: String(requestId), gate: "admissible" });
       return { ok: false as const, reason: "blocked" as const };
     }
     // (JAV-77) Revalidar hard-cap/plan/suspensión (ventana reserva→CAS). Bloqueado → `blocked`: el
     // caller (executePerpMarketOrder) lo terminaliza a `failed` sin envío (libera margen/cap).
     if (!(await coverageAdmissible(ctx, req.userId, req.poolId, req.hedgeNotionalUsd))) {
+      elog("exec", "submitting_blocked", { requestId: String(requestId), gate: "coverage" });
       return { ok: false as const, reason: "blocked" as const };
     }
     const now = Date.now();
     await ctx.db.patch(requestId, { status: "submitting", submittedAt: now, updatedAt: now });
+    // (OBS-3) Transición pending→submitting confirmada (justo antes del envío a HL).
+    elog("exec", "submitting", { requestId: String(requestId) });
     return { ok: true as const };
   },
 });
@@ -356,6 +369,10 @@ async function applyTransition(ctx: MutationCtx, args: TransitionArgs): Promise<
     patch.historyRecorded = true;
   }
   await ctx.db.patch(args.requestId, patch);
+  // (OBS-3) Transición de ejecución realmente aplicada (tras fencing+ALLOWED). Solo from/to (NO el
+  // string de error: puede venir del SDK con payload sensible — eso es PR3). Se emite solo cuando hubo
+  // cambio efectivo (los no-op de fencing/ALLOWED ya retornaron arriba).
+  elog("exec", "transition", { requestId: String(args.requestId), from: req.status, to: args.status });
 }
 
 export const settleExecution = internalMutation({
@@ -441,22 +458,35 @@ export const gateBeforeOrder = internalMutation({
   // Promise<any>: corta el ciclo TS2589 (llama a coverageAdmissible). El cuerpo se sigue chequeando.
   handler: async (ctx, { requestId }): Promise<any> => {
     const req = await ctx.db.get(requestId);
-    if (!req || req.status !== "submitting") return { ok: false as const, reason: "state" as const };
-    if (Date.now() - req.updatedAt >= LEASE_MS) return { ok: false as const, reason: "expired" as const };
-    if (req.reconcileLeaseUntil && req.reconcileLeaseUntil > Date.now()) return { ok: false as const, reason: "claimed" as const };
+    // (OBS-3) Decisión del último gate antes de exchange.order. Una línea por intento (no en bucle).
+    if (!req || req.status !== "submitting") {
+      elog("exec", "gate_before_order", { requestId: String(requestId), ok: false, reason: "state" });
+      return { ok: false as const, reason: "state" as const };
+    }
+    if (Date.now() - req.updatedAt >= LEASE_MS) {
+      elog("exec", "gate_before_order", { requestId: String(requestId), ok: false, reason: "expired" });
+      return { ok: false as const, reason: "expired" as const };
+    }
+    if (req.reconcileLeaseUntil && req.reconcileLeaseUntil > Date.now()) {
+      elog("exec", "gate_before_order", { requestId: String(requestId), ok: false, reason: "claimed" });
+      return { ok: false as const, reason: "claimed" as const };
+    }
     if (!(await assertLiveAdmissible(ctx, req.userId, req.botId, req.hlAccountId))) {
+      elog("exec", "gate_before_order", { requestId: String(requestId), ok: false, reason: "blocked_admissible" });
       await applyTransition(ctx, { requestId, status: "failed", error: "blocked before order (switch/permiso/estado bot)" });
       return { ok: false as const, reason: "blocked" as const };
     }
     // (JAV-77) Último gate antes de exchange.order: revalidar hard-cap/plan/suspensión. Bloqueado →
     // terminalizar a `failed` inline (no se envió nada, libera margen/cap), como el bloqueo de admisión.
     if (!(await coverageAdmissible(ctx, req.userId, req.poolId, req.hedgeNotionalUsd))) {
+      elog("exec", "gate_before_order", { requestId: String(requestId), ok: false, reason: "blocked_coverage" });
       await applyTransition(ctx, { requestId, status: "failed", error: "[blocked_margin] cap/plan/suspensión (gateBeforeOrder)" });
       return { ok: false as const, reason: "blocked" as const };
     }
     // Renovar el lease del submitting: el cron no debe reclamar mientras exchange.order está en
     // vuelo (≤ HL_ORDER_TIMEOUT_MS). Renovar aquí cubre el envío con otros LEASE_MS.
     await ctx.db.patch(requestId, { updatedAt: Date.now() });
+    elog("exec", "gate_before_order", { requestId: String(requestId), ok: true, reason: null });
     return { ok: true as const };
   },
 });

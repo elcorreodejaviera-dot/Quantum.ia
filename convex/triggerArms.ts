@@ -9,6 +9,7 @@ import { assertWithinPlanCoverage, coverageAdmissible } from "./coverageUsage";
 import { resolveLeverage, MARGIN_SAFETY_BUFFER } from "./leverage";
 import { hlNetwork } from "./hlNetwork";
 import { REARM_COOLDOWN_MS, REARM_BLOCKED_RECHECK_MS, armErrorKind } from "./triggerRearm";
+import { elog } from "./log";
 
 // (Codex #1) Reprograma un auto-rearm en el BOT atómicamente (dentro de la mutation que lo invoca).
 // Solo si la config sigue siendo válida: activo, autoRearm, sin pausa, pool abierto y SIN otro rearm en
@@ -324,6 +325,12 @@ export const reserveArm = internalMutation({
         reduceOnly: false, observedStatus: "pending", createdAt: now, updatedAt: now,
       });
     }
+    // (OBS-3) Armado reservado (arming). Escalares no sensibles: ids/asset/generación/leverage/modo.
+    // appliedLeverage NO es secreto. NADA de credencial/cuenta.
+    elog("arm", "reserved", {
+      armId: String(armId), botId: String(args.botId), asset: args.asset,
+      generation, appliedLeverage, twoEntries, fromRearm: inheritsRearm,
+    });
     return { armId, generation, cloid: cloidLower, cloidUpper, appliedLeverage, marginReserved };
   },
 });
@@ -356,6 +363,8 @@ export const markArmSubmitting = internalMutation({
     // durable hasta que el admin actúe).
     if (!(await coverageAdmissible(ctx, arm.userId, arm.poolId, arm.hedgeNotionalUsd))) {
       await ctx.db.patch(armId, { status: "failed", error: "[blocked_margin] cap/plan/suspensión (markArmSubmitting)", updatedAt: Date.now() });
+      // (OBS-3) Bloqueo de cobertura en el CAS pre-envío → terminaliza a failed (no envió nada).
+      elog("arm", "submitting_blocked", { armId: String(armId), gate: "coverage" });
       return { ok: false as const, reason: "blocked" as const };
     }
     const now = Date.now();
@@ -364,6 +373,8 @@ export const markArmSubmitting = internalMutation({
       status: "submitting", submittedAt: now, updatedAt: now,
       reconcileLeaseUntil: now + ARM_RECONCILE_LEASE_MS, reconcileLeaseToken: token,
     });
+    // (OBS-3) Transición arming→submitting confirmada (justo antes del envío a HL).
+    elog("arm", "submitting", { armId: String(armId), generation: arm.generation });
     return { ok: true as const, token };
   },
 });
@@ -396,9 +407,12 @@ export const gateArmBeforeOrder = internalMutation({
         status: "failed", error: "[blocked_margin] cap/plan/suspensión (gateArmBeforeOrder)",
         reconcileLeaseUntil: 0, reconcileLeaseToken: undefined, updatedAt: Date.now(),
       });
+      // (OBS-3) Último gate antes de exchange.order: bloqueo de cobertura → terminaliza a failed.
+      elog("arm", "gate_before_order", { armId: String(armId), ok: false, reason: "blocked_coverage" });
       return { ok: false as const };
     }
     await ctx.db.patch(armId, { reconcileLeaseUntil: Date.now() + ARM_RECONCILE_LEASE_MS, updatedAt: Date.now() });
+    elog("arm", "gate_before_order", { armId: String(armId), ok: true, reason: null });
     return { ok: true as const };
   },
 });
@@ -451,6 +465,8 @@ export const transitionToArmedLowerOnly = internalMutation({
       closeConfirmSince: undefined, slAttempts: undefined, slSubmittedAt: undefined, protectDeadline: undefined,
       updatedAt: Date.now(),
     });
+    // (OBS-3) OCO reentry_coexist: el short de arriba cerró flat y entry_lower sigue armada.
+    elog("arm", "transition", { armId: String(armId), from: arm.status, to: "armed_lower_only", closeReason: null });
     return { ok: true as const };
   },
 });
@@ -565,6 +581,8 @@ export const activateBreakeven = internalMutation({
       protectDeadline: now + protectDeadlineMs, slAttempts: 0, slSubmittedAt: undefined,
       updatedAt: now,
     });
+    // (OBS-3) Break-even activado: protected→protecting para recolocar el SL en el punto de entrada.
+    elog("arm", "breakeven_activated", { armId: String(armId), from: "protected", to: "protecting" });
     return { ok: true as const };
   },
 });
@@ -640,6 +658,11 @@ export const settleArm = internalMutation({
     // filledAt: marca la PRIMERA confirmación de fill (grace anti-closed-prematuro por lag de APIs).
     if (args.status === "filled" && arm.filledAt == null) patch.filledAt = now;
     await ctx.db.patch(args.armId, patch);
+    // (OBS-3) Transición de arm realmente aplicada (tras fencing+ALLOWED+cuarentena). from/to/closeReason.
+    elog("arm", "transition", {
+      armId: String(args.armId), from: arm.status, to: args.status,
+      closeReason: args.closeReason ?? null,
+    });
 
     // (N2) Finalización de la pausa: al alcanzar terminal con disarmPending, completar active=false.
     if (ARM_TERMINAL.has(args.status)) {
@@ -683,6 +706,8 @@ export const closeArmAndScheduleRearm = internalMutation({
     }
     const now = Date.now();
     await ctx.db.patch(armId, { status: "closed", closeReason, updatedAt: now });
+    // (OBS-3) Cierre del arm (atómico con la programación del rearm). from/closeReason no sensibles.
+    elog("arm", "transition", { armId: String(armId), from: arm.status, to: "closed", closeReason });
 
     const bot = await ctx.db.get(arm.botId);
     // (Codex #3) Reiniciar la secuencia de whipsaw limpia los TRES campos (consecutiveStops,

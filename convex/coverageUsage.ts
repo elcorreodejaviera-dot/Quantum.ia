@@ -1,6 +1,7 @@
 import type { DatabaseReader } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { getPlan } from "./plans";
+import { elog } from "./log";
 
 // (JAV-77 fix TS2589) Estos helpers SOLO LEEN (ctx.db.get/query). Tipamos el ctx con el tipo ligero
 // `{ db: DatabaseReader }` en vez de `MutationCtx`: este último arrastra runQuery/runMutation/scheduler
@@ -121,6 +122,10 @@ export async function assertWithinPlanCoverage(
   let total = 0;
   for (const v of post.values()) total += v;
   if (total > plan.coverageCapUsd) {
+    // (OBS-3) Rechazo por cap de plan. Solo escalares no sensibles (pool/total/cap/plan); NADA de cuenta/claves.
+    elog("coverage", "cap_rejected", {
+      poolId: key, total: Number(total.toFixed(2)), cap: plan.coverageCapUsd, plan: plan.label,
+    });
     throw new Error(
       `[blocked_margin] Supera el tope de cobertura del plan: ${total.toFixed(2)} > ${plan.coverageCapUsd} (${plan.label}).`);
   }

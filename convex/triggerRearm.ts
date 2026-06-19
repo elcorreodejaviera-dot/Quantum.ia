@@ -1,6 +1,7 @@
 import { internalMutation, internalQuery } from "./_generated/server";
 import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
+import { elog } from "./log";
 
 // --- JAV-44 auto-rearm durable (Codex GO) ---
 // Estado persistente del re-armado tras un cierre por SL, en la tabla `bots`. El cron lo reclama con
@@ -72,7 +73,11 @@ export const recordRearmOutcome = internalMutation({
   handler: async (ctx, { botId, token, outcome, kind, error, nextRearmAt }) => {
     const bot = await ctx.db.get(botId);
     if (!bot) return { ok: false as const };
-    if (bot.rearmLeaseToken !== token || (bot.rearmLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (bot.rearmLeaseToken !== token || (bot.rearmLeaseUntil ?? 0) <= Date.now()) {
+      // (OBS-3) lease perdido/expirado entre el claim y el registro → el outcome se descarta.
+      elog("rearm", "outcome_stale_lease", { botId: String(botId), outcome });
+      return { ok: false as const };
+    }
     if (outcome === "success") {
       await ctx.db.patch(botId, {
         rearmStatus: undefined, nextRearmAt: undefined, rearmAttempts: 0,
@@ -94,6 +99,12 @@ export const recordRearmOutcome = internalMutation({
         rearmLeaseToken: undefined, rearmLeaseUntil: undefined,
       });
     }
+    // (OBS-3) Decisión de auto-rearm. Solo escalares no sensibles (ids/estado/kind/intentos).
+    elog("rearm", "outcome", {
+      botId: String(botId), outcome, kind: kind ?? null,
+      attempts: outcome === "success" ? 0 : (bot.rearmAttempts ?? 0) + 1,
+      nextRearmAt: outcome === "success" || outcome === "cancel" ? null : (nextRearmAt ?? null),
+    });
     return { ok: true as const };
   },
 });

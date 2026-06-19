@@ -1,0 +1,140 @@
+import { describe, it, expect } from "vitest";
+import { internal } from "../convex/_generated/api";
+import { makeConvexTest } from "./convexHarness";
+import { seedBase, seedExecutionRequest, seedTriggerArm } from "./fixtures";
+
+// (Fase 4 PR2) Invariantes de las state machines del motor, probados sobre las mutations REALES
+// (settleExecution→applyTransition, settleArm) con convex-test. CONGELAN el contrato, no lo cambian.
+// Acotado a settleArm + ejecuciones; sin rutas con scheduler/internal action (Codex).
+
+describe("settleExecution / applyTransition — transiciones de ejecución", () => {
+  it("válida: pending → entry_filled aplica", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedBase(ctx).then((b) => seedExecutionRequest(ctx, b, { status: "pending" })));
+    await t.mutation(internal.executions.settleExecution, { requestId: id, status: "entry_filled" });
+    expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("entry_filled");
+  });
+
+  it("terminal NO resucita: closed → cualquier estado = no-op", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedBase(ctx).then((b) => seedExecutionRequest(ctx, b, { status: "closed" })));
+    await t.mutation(internal.executions.settleExecution, { requestId: id, status: "entry_filled" });
+    expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("closed");
+  });
+
+  it("protected NO degrada: protected → sl_failed = no-op", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedBase(ctx).then((b) => seedExecutionRequest(ctx, b, { status: "protected" })));
+    await t.mutation(internal.executions.settleExecution, { requestId: id, status: "sl_failed" });
+    expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("protected");
+  });
+
+  it("protected → closed SÍ aplica (única salida permitida)", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedBase(ctx).then((b) => seedExecutionRequest(ctx, b, { status: "protected" })));
+    await t.mutation(internal.executions.settleExecution, { requestId: id, status: "closed" });
+    expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("closed");
+  });
+
+  it("transición inválida: entry_filled → unknown = no-op (no está en ALLOWED de entry_filled)", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedBase(ctx).then((b) => seedExecutionRequest(ctx, b, { status: "entry_filled" })));
+    await t.mutation(internal.executions.settleExecution, { requestId: id, status: "unknown" });
+    expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("entry_filled");
+  });
+
+  it("fencing: token ajeno = no-op (applyTransition exige ser dueño del claim)", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedBase(ctx).then((b) =>
+      seedExecutionRequest(ctx, b, { status: "entry_filled", reconcileLeaseToken: "owner", reconcileLeaseUntil: Date.now() + 60_000 })));
+    await t.mutation(internal.executions.settleExecution, { requestId: id, status: "protected", token: "intruso" });
+    expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("entry_filled");
+  });
+
+  it("fencing: lease vencido = no-op", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedBase(ctx).then((b) =>
+      seedExecutionRequest(ctx, b, { status: "entry_filled", reconcileLeaseToken: "owner", reconcileLeaseUntil: Date.now() - 1 })));
+    await t.mutation(internal.executions.settleExecution, { requestId: id, status: "protected", token: "owner" });
+    expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("entry_filled");
+  });
+});
+
+describe("applyTransition — trades_history EXACTAMENTE una vez (Codex BAJO#4)", () => {
+  const countHistory = (t: ReturnType<typeof makeConvexTest>) =>
+    t.run((ctx) => ctx.db.query("trades_history").collect().then((r) => r.length));
+
+  it("terminal inserta 1 fila y marca historyRecorded; repetir no duplica; no-terminal no inserta", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedBase(ctx).then((b) => seedExecutionRequest(ctx, b, { status: "entry_filled" })));
+
+    // no-terminal: entry_filled → protected NO inserta historial
+    await t.mutation(internal.executions.settleExecution, { requestId: id, status: "protected" });
+    expect(await countHistory(t)).toBe(0);
+
+    // terminal: protected → closed inserta 1 + historyRecorded=true
+    await t.mutation(internal.executions.settleExecution, { requestId: id, status: "closed" });
+    expect(await countHistory(t)).toBe(1);
+    expect((await t.run((ctx) => ctx.db.get(id)))?.historyRecorded).toBe(true);
+
+    // repetir sobre el ya-terminal: no-op, NO duplica
+    await t.mutation(internal.executions.settleExecution, { requestId: id, status: "failed" });
+    expect(await countHistory(t)).toBe(1);
+  });
+});
+
+describe("settleArm — transiciones de arm", () => {
+  it("válida: filled → protecting aplica", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedBase(ctx).then((b) => seedTriggerArm(ctx, b, { status: "filled" })));
+    await t.mutation(internal.triggerArms.settleArm, { armId: id, status: "protecting" });
+    expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("protecting");
+  });
+
+  it("terminal NO resucita: closed → filled = no-op", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedBase(ctx).then((b) => seedTriggerArm(ctx, b, { status: "closed" })));
+    await t.mutation(internal.triggerArms.settleArm, { armId: id, status: "filled" });
+    expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("closed");
+  });
+
+  it("transición inválida: protected → armed = no-op (ALLOWED_ARM no lo permite)", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedBase(ctx).then((b) => seedTriggerArm(ctx, b, { status: "protected" })));
+    await t.mutation(internal.triggerArms.settleArm, { armId: id, status: "armed" });
+    expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("protected");
+  });
+
+  it("closeReason OBLIGATORIO: protected → closed CON closeReason aplica", async () => {
+    const t = makeConvexTest();
+    // submittedAt sin fijar → fuera de cuarentena N6 (que solo aplica a targets terminales recientes).
+    const id = await t.run((ctx) => seedBase(ctx).then((b) => seedTriggerArm(ctx, b, { status: "protected" })));
+    await t.mutation(internal.triggerArms.settleArm, { armId: id, status: "closed", closeReason: "sl" });
+    const after = await t.run((ctx) => ctx.db.get(id));
+    expect(after?.status).toBe("closed");
+    expect(after?.closeReason).toBe("sl");
+  });
+
+  it("closeReason OBLIGATORIO: protected → closed SIN closeReason = no-op (Codex MEDIO#2)", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedBase(ctx).then((b) => seedTriggerArm(ctx, b, { status: "protected" })));
+    await t.mutation(internal.triggerArms.settleArm, { armId: id, status: "closed" });
+    expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("protected");
+  });
+
+  it("fencing: token ajeno = no-op", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedBase(ctx).then((b) =>
+      seedTriggerArm(ctx, b, { status: "filled", reconcileLeaseToken: "owner", reconcileLeaseUntil: Date.now() + 60_000 })));
+    await t.mutation(internal.triggerArms.settleArm, { armId: id, status: "protecting", token: "intruso" });
+    expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("filled");
+  });
+
+  it("fencing: lease vencido = no-op", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedBase(ctx).then((b) =>
+      seedTriggerArm(ctx, b, { status: "filled", reconcileLeaseToken: "owner", reconcileLeaseUntil: Date.now() - 1 })));
+    await t.mutation(internal.triggerArms.settleArm, { armId: id, status: "protecting", token: "owner" });
+    expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("filled");
+  });
+});

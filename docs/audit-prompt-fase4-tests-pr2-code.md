@@ -12,7 +12,7 @@ R=/home/bicho/Escritorio/Quantum.ia/Quantum.ia
 git -C $R diff master...elcorreodejaviera/fase4-tests-pr2 -- package.json tests/ docs/
 ```
 
-Verificación ya hecha: `npm test` → 54 verdes (25 leverage + 11 armErrors + 13 stateMachine + 5
+Verificación ya hecha: `npm test` → 56 verdes (25 leverage + 11 armErrors + 15 stateMachine + 5
 reservation); `npm run typecheck` OK; `npm audit --audit-level=critical` VERDE.
 
 Responde **GO / NO-GO** con hallazgos numerados (ALTO/MEDIO/BAJO). Verifica:

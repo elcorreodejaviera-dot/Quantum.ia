@@ -3,35 +3,38 @@ import { internal } from "./_generated/api";
 
 const crons = cronJobs();
 
+// (OBS-2) Cada cron apunta a un wrapper de cronHealth.ts que registra salud (best-effort) y llama al
+// cron real vía runAction. Los cuerpos money-path quedan intactos; el error real se re-lanza siempre.
+
 crons.interval(
   "fetch DeFiLlama APY",
   { minutes: 5 },
-  internal.actions.defillama.fetchAndUpdateApys,
+  internal.cronHealth.fetchDefiLlamaApyWithHealth,
 );
 
 crons.interval(
   "fetch Uniswap V3 subgraph",
   { minutes: 30 },
-  internal.actions.uniswap.fetchUniswapSubgraphData,
+  internal.cronHealth.fetchUniswapSubgraphWithHealth,
 );
 
 crons.interval(
   "check pool closures",
   { minutes: 10 },
-  internal.actions.poolScanner.checkAllPoolClosures,
+  internal.cronHealth.checkPoolClosuresWithHealth,
 );
 
 crons.interval(
   "reconcile HL executions",
   { minutes: 1 },
-  internal.executionsCron.reconcileStaleExecutions,
+  internal.cronHealth.reconcileExecutionsWithHealth,
 );
 
 // JAV-44 Etapa 1: convergencia de los trigger_arms (kill switch que cancela, pausa, recuperación).
 crons.interval(
   "reconcile pool arms",
   { minutes: 1 },
-  internal.triggerEngine.reconcileStaleArms,
+  internal.cronHealth.reconcileArmsWithHealth,
 );
 
 // JAV-44 auto-rearm durable: reabre la cobertura tras un cierre por SL (reintento forzado, política de
@@ -39,7 +42,7 @@ crons.interval(
 crons.interval(
   "process bot rearms",
   { minutes: 1 },
-  internal.triggerEngine.processRearms,
+  internal.cronHealth.processRearmsWithHealth,
 );
 
 export default crons;

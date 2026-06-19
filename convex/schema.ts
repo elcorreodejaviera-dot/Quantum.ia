@@ -275,6 +275,18 @@ export default defineSchema({
     value: v.any(),
   }).index("by_key", ["key"]),
 
+  // (OBS-2) Salud/heartbeat de los crons. Una fila por cron (by_name). Se actualiza best-effort
+  // desde los wrappers de cronHealth.ts: NUNCA bloquea ni marca como fallido un cron money-path.
+  cron_health: defineTable({
+    name: v.string(),
+    lastStartedAt: v.optional(v.number()),
+    lastSuccessAt: v.optional(v.number()),
+    lastErrorAt: v.optional(v.number()),
+    lastError: v.optional(v.string()),       // mensaje truncado, SIN payload ni datos sensibles
+    lastDurationMs: v.optional(v.number()),
+    consecutiveFailures: v.optional(v.number()),
+  }).index("by_name", ["name"]),
+
   // (JAV-81) Reportes de bug enviados por usuarios desde su Portal. El admin los gestiona en JAV-80.
   bug_reports: defineTable({
     userId: v.id("users"),

@@ -2545,6 +2545,10 @@ details[open] > .pool-pnl-toggle::before {
 /* (Fase 6-D) Explicaciones en lenguaje simple */
 .cobertura-explain { margin: 6px 0 2px; }
 .cv-explain-line { margin: 2px 0; font-size: 12.5px; line-height: 1.35; color: var(--muted); }
+/* (Fase 6-C) Panel de auditoría de pool en AdminView */
+.av-audit { margin-top: 10px; padding: 10px 12px; background: #0c0c0c; border: 1px solid var(--line); border-radius: 10px; }
+.av-audit-head { display: flex; align-items: center; gap: 8px; font-size: 11px; letter-spacing: .04em; color: var(--faint); margin-bottom: 6px; }
+.av-audit-row { display: flex; gap: 8px; align-items: flex-start; padding: 4px 0; }
 .cobertura-tiles {
   display: grid;
   grid-template-columns: repeat(4, 1fr);

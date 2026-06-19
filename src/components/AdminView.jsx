@@ -2,6 +2,7 @@ import React from 'react';
 import { Link, Navigate } from 'react-router-dom';
 import { useQuery, useMutation, usePaginatedQuery, useAction } from 'convex/react';
 import { api } from '../../convex/_generated/api';
+import { auditUserPools, hlCoin } from '../lib/poolAudit';
 
 // (JAV-80) Pestaña de Administración: KPIs del sistema + usuarios (con desglose por posición) +
 // flujo de actividad + gestión de bugs. Solo admin. Reutiliza la paleta del portal (var(--green)…).
@@ -14,8 +15,8 @@ function usd(n) {
   if (a >= 1000) return sign + '$' + (a / 1000).toFixed(a >= 100_000 ? 0 : 1) + 'k';
   return sign + '$' + a.toFixed(0);
 }
-// (JAV-85 #6) baseAsset del bot ↔ símbolo de coin en HL (HL usa ETH/BTC, no WETH/WBTC).
-function hlCoin(s) { return s === 'WETH' ? 'ETH' : s === 'WBTC' ? 'BTC' : s; }
+// (JAV-85 #6) baseAsset del bot ↔ símbolo de coin en HL: `hlCoin` se importa de src/lib/poolAudit
+// (fuente única; antes estaba duplicado aquí).
 // "$ monitoreado" con señal de datos incompletos (nulls): nunca presenta un número como si fuera completo.
 // known = cuántos pools aportaron dato; si NINGUNO lo aportó (known===0) y hay incompletos → "—", nunca "$0".
 function usdWithUnknown(n, unknown = 0, known = undefined) {
@@ -172,6 +173,8 @@ const liveCache = new Map();
 function UserRow({ u }) {
   const [open, setOpen] = React.useState(false);
   const detail = useQuery(api.admin.getUserDetail, open ? { userId: u.userId } : 'skip');
+  // (Fase 6-C) Datos de DB para la auditoría de pool (arms/órdenes/pool/bot del usuario auditado).
+  const audit = useQuery(api.admin.getUserPoolAuditData, open ? { userId: u.userId } : 'skip');
   // (Fase 2) snapshot EN VIVO (poolScanner + HL Info), bajo demanda al expandir. try/catch → "—", nunca
   // tumba la vista; TTL evita refetch; topes/secuencial en el backend.
   const runLive = useAction(api.adminLive.getUserAdminLiveSnapshot);
@@ -240,8 +243,50 @@ function UserRow({ u }) {
               ? (live.hlAccounts.find((a) => a.id === pos.hlAccountId) ?? null) : null;
             return <PositionCard key={pos.botId} pos={pos} live={lp} liveLoading={liveLoading} pnl={pnl} hlAccount={hlAccount} coverageLive={coverageLive} />;
           })}
+          <PoolAuditPanel audit={audit} live={live} />
         </div>
       )}
+    </div>
+  );
+}
+
+// (Fase 6-C) Auditoría de pool: cruza la data de DB (getUserPoolAuditData) con el snapshot live y
+// muestra ✅/⚠️/«sin datos» + las inconsistencias por bot. Read-only; la lógica vive en src/lib/poolAudit.
+function PoolAuditPanel({ audit, live }) {
+  if (audit === undefined) return null;
+  // Derivar `live` por bot del snapshot (liquidez/inRange/hedge). present = el pool estaba en el snapshot
+  // (adminLive omite pools cerrados/sin tokenId → ese caso lo cubren los checks DB-only).
+  const liveByBot = {};
+  for (const b of audit) {
+    const coin = b.baseAsset ? hlCoin(b.baseAsset) : null;
+    const cov = (live && b.hlAccountId && live.coverageByAccountCoin) ? live.coverageByAccountCoin[b.hlAccountId] : null;
+    liveByBot[b.botId] = {
+      liquidityUsd: live?.positions?.[b.botId]?.liquidityUsd ?? null,
+      inRange: live?.positions?.[b.botId]?.inRange ?? null,
+      coverageUsd: (cov && coin && cov[coin] != null) ? cov[coin] : null,
+      present: !!live?.positions?.[b.botId],
+    };
+  }
+  const results = auditUserPools(audit, liveByBot).filter((r) => r.findings.length > 0);
+  return (
+    <div className="av-audit">
+      <div className="av-audit-head">AUDITORÍA DE POOLS
+        <span className={`av-pill ${results.some((r) => r.verdict === 'warn') ? 'red' : results.length ? 'amber' : 'green'}`}>
+          {results.some((r) => r.verdict === 'warn') ? '● inconsistencias' : results.length ? '● revisar' : '● todo coherente'}
+        </span>
+      </div>
+      {results.length === 0 && <div className="faint" style={{ fontSize: 12 }}>Sin inconsistencias detectadas.</div>}
+      {results.map((r) => (
+        <div className="av-audit-row" key={r.botId}>
+          <span className={`av-pill ${r.verdict === 'warn' ? 'red' : 'amber'}`} style={{ flex: 'none' }}>
+            {r.verdict === 'warn' ? '⚠' : '?'}
+          </span>
+          <div>
+            <b style={{ fontSize: 12 }}>{r.pair ?? r.botId.slice(0, 8)}</b>
+            {r.findings.map((fd, i) => <div key={i} className="faint" style={{ fontSize: 11.5 }}>↳ {fd.msg}</div>)}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

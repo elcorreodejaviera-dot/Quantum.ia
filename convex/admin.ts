@@ -249,14 +249,29 @@ export const getUserLiveTargetsInternal = internalQuery({
 // (Codex BAJO#1) arms acotados a los últimos AUDIT_ARMS_PER_BOT por bot (by_bot_generation desc) →
 // orphan_orders detecta huérfanas DENTRO de ese alcance reciente.
 const AUDIT_ARMS_PER_BOT = 5;
+// (CodeRabbit) Contrato de salida EXPLÍCITO (consumido por AdminView + src/lib/poolAudit). Solo escalares
+// operativos no sensibles. Esta query NO llama runQuery → no necesita Promise<any> (sin riesgo TS2589).
+type AuditOrderView = { role: string; observedStatus: string; triggerPx: number };
+type AuditArmView = {
+  status: string; network: string; generation: number;
+  triggerPx: number; lowerEdge: number; upperEdge: number | null; orders: AuditOrderView[];
+};
+type AuditPoolView = {
+  poolId: Id<"pools">; pair: string; network: string; tokenId: number | null;
+  minRange: number; maxRange: number; closed: boolean;
+};
+type AuditBotView = {
+  botId: Id<"bots">; active: boolean; hlAccountId: Id<"hl_api_credentials"> | null;
+  baseAsset: string | null; pool: AuditPoolView | null; arms: AuditArmView[];
+};
 export const getUserPoolAuditData = query({
   args: { userId: v.id("users") },
-  handler: async (ctx, { userId }): Promise<any> => {
+  handler: async (ctx, { userId }): Promise<AuditBotView[]> => {
     await requireAdmin(ctx);
     const bots = await ctx.db.query("bots").withIndex("by_user", (q) => q.eq("userId", userId)).collect();
-    const out = [];
+    const out: AuditBotView[] = [];
     for (const b of bots) {
-      let pool = null;
+      let pool: AuditPoolView | null = null;
       if (b.poolId) {
         const p = await ctx.db.get(b.poolId);
         if (p) pool = {
@@ -266,7 +281,7 @@ export const getUserPoolAuditData = query({
       }
       const armDocs = await ctx.db.query("trigger_arms")
         .withIndex("by_bot_generation", (q) => q.eq("botId", b._id)).order("desc").take(AUDIT_ARMS_PER_BOT);
-      const arms = [];
+      const arms: AuditArmView[] = [];
       for (const a of armDocs) {
         const orders = await ctx.db.query("trigger_orders")
           .withIndex("by_arm_role", (q) => q.eq("armId", a._id)).collect();

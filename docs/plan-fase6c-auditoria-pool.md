@@ -28,7 +28,7 @@ NO añade lecturas RPC nuevas (la exposición/hedge salen del snapshot que ya se
 
 ### Helpers PUROS `src/lib/poolAudit.js` → `auditPool(input) → Finding[]`
 Funciones puras (sin React, testeables) que reciben un `input` ya resuelto (mezcla DB-query + live):
-```
+```ts
 { pool: {minRange,maxRange,closed,tokenId,network,pair},     // de la query admin DB
   bot:  {active, hlAccountId, baseAsset, network?},          // de la query admin DB
   arms: [{ status, network, triggerPx, lowerEdge, upperEdge,

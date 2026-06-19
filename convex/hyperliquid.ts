@@ -8,6 +8,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { createHash } from "crypto";
 import { decryptPrivateKey } from "./hlCredentialActions";
 import { hlNetwork, hlIsTestnet, assertExpectedNetwork } from "./hlNetwork";
+import { elog } from "./log";
 // Timeout del envío de órdenes a HL (entrada y SL). Menor que RECONCILE_LEASE_MS (60s) para el SL.
 const HL_ORDER_TIMEOUT_MS = 30_000;
 // (G5) Grace para CONFIRMAR el cierre externo de una posición: szi==0 debe mantenerse al menos este
@@ -230,20 +231,39 @@ export async function placeStopLoss(
     //    de HL): DEFINITIVO sin orden colocada → throw → sl_failed (observable). La consulta
     //    orderStatus(slCloid) ANTES de recolocar + idempotencia por CLOID impiden un 2º SL aunque
     //    HL hubiera aceptado (el siguiente ciclo lo ve como open→protected y no recoloca).
-    if (e instanceof TransportError) return { state: "pending" };
+    // (OBS-3) Clasificación de capa de error del SDK: SOLO la categoría (transport vs deterministic),
+    // NUNCA el mensaje/payload crudo del error (puede traer datos sensibles).
+    if (e instanceof TransportError) {
+      elog("hl", "sl_placed", { cloid: String(slCloidVal), result: "pending_transport" });
+      return { state: "pending" };
+    }
+    elog("hl", "sl_placed", { cloid: String(slCloidVal), result: "error_deterministic" });
     throw e;
   } finally {
     ac.clear();
   }
   // Defensa en profundidad: si una versión del SDK devolviera el error en vez de lanzarlo.
   const st = (resp as any)?.response?.data?.statuses?.[0];
-  if (st?.error) throw new Error(String(st.error));   // rechazo EXPLÍCITO de HL: sin orden → sl_failed (rota CLOID al reintentar)
+  if (st?.error) {   // rechazo EXPLÍCITO de HL: sin orden → sl_failed (rota CLOID al reintentar)
+    elog("hl", "sl_placed", { cloid: String(slCloidVal), result: "rejected" });
+    throw new Error(String(st.error));
+  }
   // resting/filled traen oid. "waitingForTrigger" y "waitingForFill" son LITERALES string (SDK
   // 0.32.2), respuestas EXITOSAS de order() sin oid: orden aceptada a la espera del cruce / del
   // llenado → pending (se confirma por CLOID en la reconciliación, NO inventar oid ni protected).
-  if (st?.resting?.oid != null) return { state: "resting", oid: String(st.resting.oid) };
-  if (st?.filled?.oid != null) return { state: "filled", oid: String(st.filled.oid) };
-  if (st === "waitingForTrigger" || st === "waitingForFill") return { state: "pending" };
+  if (st?.resting?.oid != null) {
+    elog("hl", "sl_placed", { cloid: String(slCloidVal), result: "resting", oid: String(st.resting.oid) });
+    return { state: "resting", oid: String(st.resting.oid) };
+  }
+  if (st?.filled?.oid != null) {
+    elog("hl", "sl_placed", { cloid: String(slCloidVal), result: "filled", oid: String(st.filled.oid) });
+    return { state: "filled", oid: String(st.filled.oid) };
+  }
+  if (st === "waitingForTrigger" || st === "waitingForFill") {
+    elog("hl", "sl_placed", { cloid: String(slCloidVal), result: "pending" });
+    return { state: "pending" };
+  }
+  elog("hl", "sl_placed", { cloid: String(slCloidVal), result: "ambiguous" });
   throw new Error(`Respuesta de SL ambigua: ${JSON.stringify(st ?? null).slice(0, 120)}`);
 }
 
@@ -304,6 +324,9 @@ export const closePositionEmergency = internalAction({
     const after = await info.clearinghouseState({ user: tradingAccount });
     const posAfter = (after.assetPositions ?? []).find((p: any) => p.position?.coin === a);
     const sziAfter = posAfter ? Number(posAfter.position?.szi ?? 0) : 0;
+    // (OBS-3) Cierre de emergencia (aplana capital real). coin + tamaños de posición (no sensibles);
+    // NADA de cuenta/clave ni la respuesta cruda del SDK. flat=true si quedó sin posición residual.
+    elog("hl", "emergency_close", { coin: a, sziBefore: szi, sziAfter, flat: sziAfter === 0 });
 
     // 4) SOLO si está flat: cancelar las órdenes vivas del activo (SL ya inútiles). Si NO está flat,
     // se dejan los SL intactos (protección) y se devuelve sziAfter != 0 → el llamador NO borra/desarma.
@@ -542,15 +565,20 @@ export const executePerpMarketOrder = action({
     // posición. Clasificar: TransportError = incierto (reconciliable); resto = determinista (failed ya).
     try {
       await exchange.updateLeverage({ asset: assetId, isCross: false, leverage: appliedLeverage });
+      // (OBS-3) updateLeverage OK. coin/leverage no sensibles; NADA de cuenta/clave.
+      elog("hl", "update_leverage", { requestId: String(requestId), coin: asset, leverage: appliedLeverage, ok: true });
     } catch (e) {
       if (e instanceof TransportError) {
         // Incierto: dejar reconciliable (el cron por cloid hará prueba negativa → libera la reserva).
+        // (OBS-3) Solo la categoría del error (transport), NUNCA el mensaje crudo del SDK.
+        elog("hl", "update_leverage", { requestId: String(requestId), coin: asset, ok: false, kind: "transport" });
         await ctx.runMutation(internal.executions.settleExecution, {
           requestId, status: "unknown", error: `updateLeverage transport: ${String((e as Error)?.message ?? e).slice(0, 200)}`,
         });
         return { ok: false, status: "unknown", requestId };
       }
       // Determinista: leverage no aplicado + sin orden → cerrar failed YA (libera margen).
+      elog("hl", "update_leverage", { requestId: String(requestId), coin: asset, ok: false, kind: "deterministic" });
       await ctx.runMutation(internal.executions.settleExecution, {
         requestId, status: "failed", error: `updateLeverage rechazado: ${String((e as Error)?.message ?? e).slice(0, 200)}`,
       });
@@ -565,6 +593,12 @@ export const executePerpMarketOrder = action({
     }
 
     let entryResp: unknown;
+    // (OBS-3) Envío de la entrada a HL. Escalares no sensibles: cloid/coin/side/leverage (el plan los
+    // lista como NO secretos). NADA de cuenta/clave/precio-payload. Se emite ANTES de abortAfter para
+    // NO consumir nada de la ventana HL_ORDER_TIMEOUT_MS del exchange.order (Codex MEDIO: solo observación).
+    elog("hl", "order_send", {
+      requestId: String(requestId), cloid: String(entryCloid), coin: asset, side: args.side, leverage: appliedLeverage,
+    });
     const ac = abortAfter(HL_ORDER_TIMEOUT_MS);
     // Usa el orderLimitPx ya calculado/formateado (agresivo para cruzar el book). NO se recalcula
     // aquí: el mismo precio sustenta el dimensionado/reserva (Codex: coherencia precio↔nocional).
@@ -579,6 +613,8 @@ export const executePerpMarketOrder = action({
       }, { signal: ac.signal, expiresAfter: Date.now() + HL_ORDER_TIMEOUT_MS });   // HL no acepta la orden si llega tarde
     } catch (e) {
       // Resultado incierto (abort/red): NO marcar failed; queda reconciliable por cloid.
+      // (OBS-3) Solo la categoría (transport_uncertain), NUNCA el mensaje crudo del SDK.
+      elog("hl", "order_result", { requestId: String(requestId), cloid: String(entryCloid), kind: "transport_uncertain" });
       await ctx.runMutation(internal.executions.settleExecution, {
         requestId, status: "unknown", error: String((e as Error)?.message ?? e),
       });
@@ -589,14 +625,18 @@ export const executePerpMarketOrder = action({
 
     const entry = parseEntryResult(entryResp);
     if (entry.kind === "rejected") {   // HL rechazó explícitamente → sin posición
+      elog("hl", "order_result", { requestId: String(requestId), cloid: String(entryCloid), kind: "rejected" });
       await ctx.runMutation(internal.executions.settleExecution, { requestId, status: "failed", error: entry.reason });
       return { ok: false, status: "failed", requestId };
     }
     if (entry.kind === "ambiguous") {  // no concluyente → reconciliar, NO liberar como failed
+      elog("hl", "order_result", { requestId: String(requestId), cloid: String(entryCloid), kind: "ambiguous" });
       await ctx.runMutation(internal.executions.settleExecution, { requestId, status: "unknown", error: entry.detail });
       return { ok: false, status: "unknown", requestId };
     }
     const { filledSize, avgPx, oid: entryOid } = entry;
+    // (OBS-3) Entrada llenada. filledSize/oid no sensibles.
+    elog("hl", "order_result", { requestId: String(requestId), cloid: String(entryCloid), kind: "filled", filledSize, oid: String(entryOid) });
     await ctx.runMutation(internal.executions.settleExecution, {
       requestId, status: "entry_filled", entryOrderId: entryOid, filledSize, entryPrice: avgPx,
     });

@@ -45,4 +45,11 @@ crons.interval(
   internal.cronHealth.processRearmsWithHealth,
 );
 
+// (OBS-3b) Poda de engine_events una vez al día (retención 30d, por lotes). Best-effort.
+crons.interval(
+  "prune engine events",
+  { hours: 24 },
+  internal.cronHealth.pruneEngineEventsWithHealth,
+);
+
 export default crons;

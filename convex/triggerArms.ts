@@ -10,6 +10,7 @@ import { resolveLeverage, MARGIN_SAFETY_BUFFER } from "./leverage";
 import { hlNetwork } from "./hlNetwork";
 import { REARM_COOLDOWN_MS, REARM_BLOCKED_RECHECK_MS, armErrorKind } from "./triggerRearm";
 import { elog } from "./log";
+import { recordEngineEvent } from "./engineEvents";
 
 // (Codex #1) Reprograma un auto-rearm en el BOT atómicamente (dentro de la mutation que lo invoca).
 // Solo si la config sigue siendo válida: activo, autoRearm, sin pausa, pool abierto y SIN otro rearm en
@@ -467,6 +468,11 @@ export const transitionToArmedLowerOnly = internalMutation({
     });
     // (OBS-3) OCO reentry_coexist: el short de arriba cerró flat y entry_lower sigue armada.
     elog("arm", "transition", { armId: String(armId), from: arm.status, to: "armed_lower_only", closeReason: null });
+    // (OBS-3b) Persistir el hito (best-effort; nunca aborta esta mutation).
+    await recordEngineEvent(ctx, {
+      scope: "arm", event: "transition", armId, botId: arm.botId, userId: arm.userId,
+      fromStatus: arm.status, toStatus: "armed_lower_only",
+    });
     return { ok: true as const };
   },
 });
@@ -663,6 +669,11 @@ export const settleArm = internalMutation({
       armId: String(args.armId), from: arm.status, to: args.status,
       closeReason: args.closeReason ?? null,
     });
+    // (OBS-3b) Persistir el hito (best-effort; nunca aborta esta mutation).
+    await recordEngineEvent(ctx, {
+      scope: "arm", event: "transition", armId: args.armId, botId: arm.botId, userId: arm.userId,
+      fromStatus: arm.status, toStatus: args.status, reason: args.closeReason,
+    });
 
     // (N2) Finalización de la pausa: al alcanzar terminal con disarmPending, completar active=false.
     if (ARM_TERMINAL.has(args.status)) {
@@ -708,6 +719,11 @@ export const closeArmAndScheduleRearm = internalMutation({
     await ctx.db.patch(armId, { status: "closed", closeReason, updatedAt: now });
     // (OBS-3) Cierre del arm (atómico con la programación del rearm). from/closeReason no sensibles.
     elog("arm", "transition", { armId: String(armId), from: arm.status, to: "closed", closeReason });
+    // (OBS-3b) Persistir el hito (best-effort; nunca aborta esta mutation).
+    await recordEngineEvent(ctx, {
+      scope: "arm", event: "transition", armId, botId: arm.botId, userId: arm.userId,
+      fromStatus: arm.status, toStatus: "closed", reason: closeReason,
+    });
 
     const bot = await ctx.db.get(arm.botId);
     // (Codex #3) Reiniciar la secuencia de whipsaw limpia los TRES campos (consecutiveStops,

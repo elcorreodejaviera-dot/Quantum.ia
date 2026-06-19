@@ -2,6 +2,7 @@ import { internalMutation, internalQuery } from "./_generated/server";
 import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import { elog } from "./log";
+import { recordEngineEvent } from "./engineEvents";
 
 // --- JAV-44 auto-rearm durable (Codex GO) ---
 // Estado persistente del re-armado tras un cierre por SL, en la tabla `bots`. El cron lo reclama con
@@ -115,6 +116,11 @@ export const recordRearmOutcome = internalMutation({
     elog("rearm", "outcome", {
       botId: String(botId), outcome, kind: kind ?? null,
       attempts: loggedAttempts, nextRearmAt: loggedNextRearmAt,
+    });
+    // (OBS-3b) Persistir el hito (best-effort; nunca aborta esta mutation). reason = outcome[/kind].
+    await recordEngineEvent(ctx, {
+      scope: "rearm", event: "rearm_outcome", botId, userId: bot.userId,
+      toStatus: outcome, reason: kind ? `${outcome}:${kind}` : outcome,
     });
     return { ok: true as const };
   },

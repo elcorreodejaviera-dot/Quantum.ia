@@ -2542,6 +2542,9 @@ details[open] > .pool-pnl-toggle::before {
   gap: 8px;
 }
 .cobertura-head strong { font-size: 13px; }
+/* (Fase 6-D) Explicaciones en lenguaje simple */
+.cobertura-explain { margin: 6px 0 2px; }
+.cv-explain-line { margin: 2px 0; font-size: 12.5px; line-height: 1.35; color: var(--muted); }
 .cobertura-tiles {
   display: grid;
   grid-template-columns: repeat(4, 1fr);

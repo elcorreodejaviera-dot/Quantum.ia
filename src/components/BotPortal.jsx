@@ -5,6 +5,7 @@ import BugReportButton from './BugReportButton'
 import { useConvexAuth, useQuery, useMutation, useAction, usePaginatedQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState, useWalletBalances, useHLAccountBalance, useHLAccountsBalances, useHLAgentExpiry, useMetaMaskSigner, executeHLTestnetOrder } from '../hooks/useHyperliquid'
+import { capitalPerPosition, leverageText, slOrderOpen, beState as beStateOf, explainBot } from '../lib/armView'
 
 const IS_TESTNET = import.meta.env.VITE_HL_NETWORK === 'testnet';
 
@@ -199,19 +200,10 @@ function CoberturaViva({ bot, arm, pool, accountById, hlBalance }) {
   const fmtDist = (d) => (d == null ? '—' : `${d > 0 ? '+' : ''}${d.toFixed(2)}%`);
   const dentro = price != null && pool?.min != null && pool?.max != null && price >= pool.min && price <= pool.max;
 
-  // Capital por posición. (Codex #1) Tras el OCO el backend ya hizo reservedNotional/2 dejando upperEdge
-  // intacto → si reservationReduced, NO dividir de nuevo. allowReentryFromAbove marca el OCO de 2 entradas.
-  const twoEntries = arm?.allowReentryFromAbove === true;
-  const capital = arm
-    ? (arm.reservationReduced ? arm.reservedNotional : arm.reservedNotional / (twoEntries ? 2 : 1))
-    : null;
-  const lev = arm?.appliedLeverage ?? bot.leverage ?? null;
-  // (JAV-50) Leverage EFECTIVO: con autoLeverage y un arm vivo (appliedLeverage), mostrar "Auto · Nx";
-  // si autoLeverage sin arm aún, "Auto"; manual → "Nx".
-  const levText = lev == null ? ''
-    : bot.autoLeverage
-      ? (arm?.appliedLeverage != null ? `Auto · ${lev}x` : 'Auto')
-      : `${lev}x`;
+  // (Fase 6-D) Capital/leverage desde los helpers COMPARTIDOS (src/lib/armView.js), reutilizados por
+  // explainBot para que las tiles y las frases no diverjan. Misma lógica que antes (OCO/reservationReduced).
+  const capital = capitalPerPosition(arm);
+  const levText = leverageText(bot, arm);
 
   const acc = bot.hlAccountId ? accountById?.[bot.hlAccountId] : null;
   const walletLabel = acc?.label
@@ -220,17 +212,12 @@ function CoberturaViva({ bot, arm, pool, accountById, hlBalance }) {
   // (Fase C) Posición HL en vivo del activo del bot (si hay alguna abierta).
   const pos = hlBalance?.openPositions?.find((p) => p.coin === bot.baseAsset) ?? null;
 
-  // (feature BE) SL vigente = la orden SL ABIERTA real. Hoy el único role de SL persistido en
-  // trigger_orders es 'sl_upper' (ver schema.ts: v.union); 'sl' se incluye solo como defensa
-  // forward-compat/legacy y no matchea nada actualmente. Se muestra SIEMPRE el precio de la orden,
-  // nunca inferido desde entryPrice.
-  const slOrder = arm?.orders?.find((o) => (o.role === 'sl' || o.role === 'sl_upper') && o.observedStatus === 'open') ?? null;
-  // Estado BE: el latch beMoved se prende ANTES de rotar el SL (protected→protecting, el SL viejo +%
-  // sigue vivo hasta confirmar). Por eso "BE" (verde) solo si el SL abierto ya está en break-even
-  // (≤ entry·1.001, tolerancia que cubre el offset ~0.05% + redondeo HL); si beMoved pero el SL sigue
-  // arriba → "BE…" (ámbar, rotando). Sin badge si !beMoved.
-  const beState = !arm?.beMoved ? null
-    : (slOrder && arm.entryPrice != null && slOrder.triggerPx <= arm.entryPrice * 1.001) ? 'be' : 'be_pending';
+  // (Fase 6-D) SL vigente + estado BE desde los helpers COMPARTIDOS (src/lib/armView.js). El SL es la
+  // orden ABIERTA real (nunca inferido desde entryPrice); BE = 'be'|'be_pending'|null. Misma lógica.
+  const slOrder = slOrderOpen(arm);
+  const be = beStateOf(arm, slOrder);
+  // (Fase 6-D) Explicación en lenguaje simple, derivada del mismo estado (helpers compartidos).
+  const explain = explainBot(bot, arm, pool, hlBalance);
 
   return (
     <div className="cobertura-viva">
@@ -239,12 +226,17 @@ function CoberturaViva({ bot, arm, pool, accountById, hlBalance }) {
         <span className={`pill ${tone}`}>{estado}</span>
         <span className={`pill ${dentro ? 'green' : 'faint'}`}>{dentro ? 'Dentro' : 'Fuera'}</span>
       </div>
+      {explain.length > 0 && (
+        <div className="cobertura-explain">
+          {explain.map((line, i) => <p key={i} className="cv-explain-line">{line}</p>)}
+        </div>
+      )}
       {slOrder && pool && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '6px 0', fontSize: 13 }}>
           <span className="cv-label">Stop Loss</span>
           <strong>${formatPrice(pool.pair, slOrder.triggerPx)}</strong>
-          {beState === 'be' && <span className="pill green">BE</span>}
-          {beState === 'be_pending' && <span className="pill amber">BE…</span>}
+          {be === 'be' && <span className="pill green">BE</span>}
+          {be === 'be_pending' && <span className="pill amber">BE…</span>}
           {pos && (
             <strong className={pos.unrealizedPnl >= 0 ? 'positive' : 'negative'} style={{ marginLeft: 'auto' }}>
               {pos.unrealizedPnl >= 0 ? '+' : ''}{formatUsd2(pos.unrealizedPnl)}

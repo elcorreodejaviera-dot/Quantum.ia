@@ -349,6 +349,17 @@ export const closePositionEmergency = internalAction({
       const openAfter: any[] = await info.frontendOpenOrders({ user: tradingAccount });
       ordersRemaining = openAfter.filter((o: any) => o?.coin === a).length;
     }
+    // (OBS-3b, Codex MEDIO#1) Persistir el hito DESPUÉS de cancelar/re-leer, no entre el aplanado y la
+    // limpieza de SL. Vía mutation (este action no tiene ctx.db). Best-effort: el try/catch garantiza
+    // que un fallo de observabilidad nunca afecte el cierre de capital real. reason = coin:estado:orders.
+    try {
+      await ctx.runMutation(internal.engineEvents.record, {
+        scope: "hl", event: "emergency_close", userId: credential.userId,
+        reason: `${a}:${sziAfter === 0 ? "flat" : "residual"}:orders=${ordersRemaining ?? "na"}`,
+      });
+    } catch (e) {
+      console.warn("[engine_events] emergency_close record failed:", String(e).slice(0, 160));
+    }
     return { sziBefore: szi, closeResult, canceledOrders: canceled, sziAfter, ordersRemaining };
   },
 });

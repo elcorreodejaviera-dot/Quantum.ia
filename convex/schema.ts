@@ -287,6 +287,27 @@ export default defineSchema({
     consecutiveFailures: v.optional(v.number()),
   }).index("by_name", ["name"]),
 
+  // (OBS-3b) Hitos persistidos del motor money-path (subconjunto de los elog de OBS-3): transiciones
+  // de arm/ejecución, outcome de auto-rearm, cierre de emergencia. Solo ESCALARES no sensibles (mismo
+  // contrato que elog): ids/estados/enums/categoría. PROHIBIDO claves/direcciones/payloads/errores
+  // crudos del SDK. Inserción best-effort desde recordEngineEvent (engineEvents.ts): un fallo escribiendo
+  // aquí NUNCA aborta una mutation de trading. Todo v.optional → un campo de más nunca rompe el insert.
+  engine_events: defineTable({
+    scope: v.string(),     // "exec" | "arm" | "rearm" | "hl"
+    event: v.string(),     // "transition" | "rearm_outcome" | "emergency_close"
+    at: v.number(),
+    botId: v.optional(v.id("bots")),
+    armId: v.optional(v.id("trigger_arms")),
+    requestId: v.optional(v.id("execution_requests")),
+    userId: v.optional(v.id("users")),
+    fromStatus: v.optional(v.string()),
+    toStatus: v.optional(v.string()),
+    reason: v.optional(v.string()),   // closeReason/kind/outcome — categoría, NUNCA string crudo
+  })
+    .index("by_at", ["at"])                // poda + feed admin global
+    .index("by_bot_at", ["botId", "at"])   // panel por bot
+    .index("by_arm_at", ["armId", "at"]),  // panel por arm
+
   // (JAV-81) Reportes de bug enviados por usuarios desde su Portal. El admin los gestiona en JAV-80.
   bug_reports: defineTable({
     userId: v.id("users"),

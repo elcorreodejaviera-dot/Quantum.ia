@@ -6,6 +6,7 @@ import { hasPermission, requireAdmin } from "./helpers";
 import { assertWithinPlanCoverage, coverageAdmissible } from "./coverageUsage";
 import { resolveLeverage, MARGIN_SAFETY_BUFFER } from "./leverage";
 import { elog } from "./log";
+import { recordEngineEvent } from "./engineEvents";
 
 // Lease anti-carrera: la reconciliación no toca pending/submitting con updatedAt más reciente.
 export const LEASE_MS = 90_000;
@@ -373,6 +374,11 @@ async function applyTransition(ctx: MutationCtx, args: TransitionArgs): Promise<
   // string de error: puede venir del SDK con payload sensible — eso es PR3). Se emite solo cuando hubo
   // cambio efectivo (los no-op de fencing/ALLOWED ya retornaron arriba).
   elog("exec", "transition", { requestId: String(args.requestId), from: req.status, to: args.status });
+  // (OBS-3b) Persistir el hito para el panel admin (best-effort; nunca aborta esta mutation).
+  await recordEngineEvent(ctx, {
+    scope: "exec", event: "transition", requestId: args.requestId, botId: req.botId, userId: req.userId,
+    fromStatus: req.status, toStatus: args.status,
+  });
 }
 
 export const settleExecution = internalMutation({

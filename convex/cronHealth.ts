@@ -120,6 +120,13 @@ export const processRearmsWithHealth = internalAction({
     () => ctx.runAction(internal.triggerEngine.processRearms, {})),
 });
 
+// (OBS-3b) Poda diaria de engine_events (best-effort vía withCronHealth, no afecta money-path).
+export const pruneEngineEventsWithHealth = internalAction({
+  args: {},
+  handler: async (ctx) => withCronHealth(ctx, "prune engine events",
+    () => ctx.runMutation(internal.engineEvents.pruneEngineEvents, {})),
+});
+
 // --- Lectura para el panel admin ---
 
 export const listCronHealth = query({

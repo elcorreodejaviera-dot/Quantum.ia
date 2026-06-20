@@ -1,4 +1,8 @@
-import { internalMutation } from "./_generated/server";
+import { internalMutation, internalQuery } from "./_generated/server";
+
+// Estados terminales de un arm (espejo de triggerArms.ts ARM_TERMINAL). Un arm terminal NO debería
+// tener trigger_orders vivas en HL (el motor cancela antes de cerrar).
+const ARM_TERMINAL = new Set(["disarmed", "closed", "failed"]);
 
 // Backfill de userId en bots existentes (Fase 1 de JAV-35).
 //
@@ -63,5 +67,52 @@ export const backfillIlAutoRearm = internalMutation({
       patched++;
     }
     return { patched, eligible, total: bots.length };
+  },
+});
+
+// (JAV-98) Diagnóstico READ-ONLY del falso positivo orphan_orders: lista las trigger_orders con
+// observedStatus open/pending cuyo arm está TERMINAL (dato rancio que JAV-96 ya no produce hacia
+// adelante, pero quedó de antes del deploy). Correr ANTES del backfill para inspeccionar:
+//   npx convex run migrations:diagnoseOrphanOrders
+export const diagnoseOrphanOrders = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const orders = await ctx.db.query("trigger_orders").collect();
+    const armCache = new Map<string, any>();
+    const stale: Array<{ armId: string; botId: string; armStatus: string; role: string; cloid: string; observedStatus: string }> = [];
+    for (const o of orders) {
+      if (o.observedStatus !== "open" && o.observedStatus !== "pending") continue;
+      let arm = armCache.get(o.armId);
+      if (arm === undefined) { arm = await ctx.db.get(o.armId); armCache.set(o.armId, arm); }
+      if (!arm || !ARM_TERMINAL.has(arm.status)) continue;
+      stale.push({ armId: String(o.armId), botId: String(arm.botId), armStatus: arm.status, role: o.role, cloid: o.cloid, observedStatus: o.observedStatus });
+    }
+    return { count: stale.length, stale };
+  },
+});
+
+// (JAV-98) Backfill: marca observedStatus open/pending → canceled SOLO en trigger_orders de arms
+// TERMINALES (nunca toca un arm vivo). Normaliza el dato rancio que el panel de auditoría leía como
+// orphan_orders. NO toca HL, NO envía/cancela órdenes: solo el campo de display. Idempotente.
+//   npx convex run migrations:backfillCanceledOrphanOrders
+export const backfillCanceledOrphanOrders = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const orders = await ctx.db.query("trigger_orders").collect();
+    const armCache = new Map<string, any>();
+    const now = Date.now();
+    let scanned = 0, patched = 0;
+    const byStatus: Record<string, number> = {};
+    for (const o of orders) {
+      if (o.observedStatus !== "open" && o.observedStatus !== "pending") continue;
+      scanned++;
+      let arm = armCache.get(o.armId);
+      if (arm === undefined) { arm = await ctx.db.get(o.armId); armCache.set(o.armId, arm); }
+      if (!arm || !ARM_TERMINAL.has(arm.status)) continue;   // SOLO arms terminales
+      byStatus[o.observedStatus] = (byStatus[o.observedStatus] ?? 0) + 1;
+      await ctx.db.patch(o._id, { observedStatus: "canceled", updatedAt: now });
+      patched++;
+    }
+    return { scanned, patched, byStatus };
   },
 });

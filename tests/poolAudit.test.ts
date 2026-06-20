@@ -5,7 +5,7 @@ import { auditPool, auditUserPools, verdictOf, hlCoin, HEDGE_BAND } from "../src
 // (Fase 6-C) Congela los checks de auditoría de pool. Puros: cruzan config DB + live, devuelven
 // findings warn/unknown; NUNCA un falso ✅.
 
-const pool = (over: any = {}) => ({ poolId: "p", pair: "ETH/USDC", network: "testnet", tokenId: 1, minRange: 1000, maxRange: 2000, closed: false, ...over });
+const pool = (over: any = {}) => ({ poolId: "p", pair: "ETH/USDC", network: "Base", tokenId: 1, minRange: 1000, maxRange: 2000, closed: false, ...over });
 const bot = (over: any = {}) => ({ botId: "b", active: true, hlAccountId: "acc", baseAsset: "ETH", pool: pool(), arms: [], ...over });
 const liveArm = (over: any = {}) => ({ status: "armed", network: "testnet", generation: 1, triggerPx: 1000, lowerEdge: 1000, upperEdge: 2000, orders: [], ...over });
 const codes = (f: any[]) => f.map((x) => x.code);

@@ -322,11 +322,13 @@ export const closeCycleAndRepost = internalMutation({
     if (!sell || sell.botId !== botId || sell.side !== "sell") return { ok: false as const };
     if (sell.cycleSettled === true) return { ok: true as const, alreadySettled: true as const };  // idempotencia
     const buy = sell.pairedOrderId ? await ctx.db.get(sell.pairedOrderId) : null;
-    const buyPrice = buy?.price ?? sell.price;                  // fallback defensivo
+    // (Codex MEDIO#3) netProfit con el COSTO REAL: VWAP de compra (avgFillPx) y de venta (avgFillPx).
+    const buyCost = (buy && buy.avgFillPx) ? buy.avgFillPx : (buy?.price ?? sell.price);
     const qty = sell.filledQty ?? sell.quantity;
     const sellPrice = sell.avgFillPx ?? sell.price;
-    const gross = (sellPrice - buyPrice) * qty;
+    const gross = (sellPrice - buyCost) * qty;
     const net = gross - feesUsd;
+    const repostLimit = buy?.price ?? buyCost;                  // la reposición usa el LÍMITE del nivel, no el VWAP
     const now = Date.now();
     // (a) marcar la SELL consumida + (b) incrementar cycleSeq + (c) insertar ciclo + (e) reponer BUY.
     await ctx.db.patch(sell._id, { cycleSettled: true, status: "filled", filledAt: sell.filledAt ?? now });
@@ -335,10 +337,11 @@ export const closeCycleAndRepost = internalMutation({
     await ctx.db.insert("spot_grid_cycles", {
       botId, userId: bot!.userId, cycleId: sell.cycleId,
       buyOrderId: (buy?._id ?? sell._id) as Id<"spot_grid_orders">,
-      sellOrderId: sell._id, buyPrice, sellPrice, quantity: qty,
+      sellOrderId: sell._id, buyPrice: buyCost, sellPrice, quantity: qty,
       grossProfit: gross, fees: feesUsd, netProfit: net, closedAt: now,
     });
-    // BUY de reposición al MISMO nivel/precio, nuevo cycleId → cloid nuevo. Estado submitting (el motor la envía).
+    // BUY de reposición al MISMO nivel y al precio LÍMITE del nivel (no el VWAP), nuevo cycleId → cloid nuevo.
+    // Cantidad = la del BUY original del nivel (la SELL solo se coloca con el BUY 100% lleno → casan).
     const repostQuantity = buy?.quantity ?? qty;
     const cloid = await toHlCloid(spotGridCloidInput(String(botId), bot!.generation, newCycle, sell.gridLevel, "buy"));
     const existing = await ctx.db.query("spot_grid_orders").withIndex("by_cloid", (q) => q.eq("cloid", cloid)).first();
@@ -346,14 +349,14 @@ export const closeCycleAndRepost = internalMutation({
     if (!existing) {
       repostOrderId = await ctx.db.insert("spot_grid_orders", {
         botId, userId: bot!.userId, cloid, assetId: sell.assetId, side: "buy",
-        price: buyPrice, quantity: repostQuantity, quoteSize: buyPrice * repostQuantity,
+        price: repostLimit, quantity: repostQuantity, quoteSize: repostLimit * repostQuantity,
         gridLevel: sell.gridLevel, generation: bot!.generation, cycleId: newCycle, status: "submitting",
         remainingQty: repostQuantity, attempt: 1, submittedAt: now, createdAt: now,
       });
     }
     elog("spotgrid", "cycle_closed", { botId: String(botId), cycleId: sell.cycleId, net: Math.round(net * 100) / 100 });
     return {
-      ok: true as const, repostOrderId, repostCloid: cloid, repostPrice: buyPrice,
+      ok: true as const, repostOrderId, repostCloid: cloid, repostPrice: repostLimit,
       repostQuantity, repostAssetId: sell.assetId, newCycle, netProfit: net,
     };
   },

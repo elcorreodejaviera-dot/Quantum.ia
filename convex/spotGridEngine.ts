@@ -92,19 +92,33 @@ export function calculateGridLevels(p: {
 
 type Clients = { info: any; exchange: any; address: string };
 
-// Coloca una orden bajo el contrato DB-intent (ALTO#1): record `submitting` → place → mark `open`.
-// Idempotente: si el cloid ya está vivo en HL (openCloids), no reenvía; solo confirma `open`.
+// (Codex MEDIO#6, FUENTE ÚNICA de envío) Revalida el gate live INMEDIATAMENTE antes de CADA envío real
+// (renew lease + assertLiveAdmissible) — un kill switch / pérdida de permiso / cambio de red entre el
+// claim y este envío debe abortar. Si la orden ya está viva en HL (openCloids), confirma `open` sin
+// reenviar (idempotente). Devuelve el oid si HL la dejó resting. La usan placeOrder, el retry y el repost.
+async function gatedPlace(ctx: any, exchange: any, botId: any, token: string, p: {
+  assetId: number; isBuy: boolean; priceStr: string; sizeStr: string; cloid: string; openCloids: Set<string>;
+}): Promise<{ ok: boolean; oid?: string; gateBlocked?: boolean }> {
+  const renew: any = await ctx.runMutation(internal.spotGridBots.renewSpotGridReconcile, { botId, token });
+  if (!renew.ok) return { ok: false, gateBlocked: true };
+  const live: any = await ctx.runQuery(internal.spotGridBots.assertSpotGridLiveAdmissibleInternal, { botId });
+  if (!live.ok) return { ok: false, gateBlocked: true };
+  if (p.openCloids.has(p.cloid.toLowerCase())) {
+    await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: p.cloid, status: "open" });
+    return { ok: true };
+  }
+  const st: any = await placeSpotLimit(exchange, { assetId: p.assetId, isBuy: p.isBuy, priceStr: p.priceStr, sizeStr: p.sizeStr, cloid: p.cloid as `0x${string}` });
+  const oid = st?.resting?.oid != null ? String(st.resting.oid) : (st?.filled?.oid != null ? String(st.filled.oid) : undefined);
+  await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: p.cloid, status: "open", ...(oid ? { oid } : {}) });
+  return { ok: true, oid };
+}
+
+// Coloca una orden bajo el contrato DB-intent (ALTO#1): record `submitting` → gatedPlace → mark `open`.
 async function placeOrder(ctx: any, exchange: any, args: {
   botId: any; token: string; side: "buy" | "sell"; gridLevel: number; generation: number; cycleId: number;
   assetId: number; price: number; quantity: number; priceStr: string; sizeStr: string;
   pairedOrderId?: any; openCloids: Set<string>;
 }): Promise<{ ok: boolean; cloid?: string }> {
-  // (Codex MEDIO#6) Revalidar el gate live INMEDIATAMENTE antes de cada envío real (no solo al inicio del
-  // reconcile): un kill switch / pérdida de permiso / cambio de red entre el claim y este envío debe abortar.
-  const gate: any = await ctx.runMutation(internal.spotGridBots.renewSpotGridReconcile, { botId: args.botId, token: args.token });
-  if (!gate.ok) return { ok: false };
-  const live: any = await ctx.runQuery(internal.spotGridBots.assertSpotGridLiveAdmissibleInternal, { botId: args.botId });
-  if (!live.ok) return { ok: false };
   const rec = await ctx.runMutation(internal.spotGridBots.recordSpotGridOrder, {
     botId: args.botId, token: args.token, side: args.side, gridLevel: args.gridLevel,
     generation: args.generation, cycleId: args.cycleId, assetId: args.assetId,
@@ -112,18 +126,12 @@ async function placeOrder(ctx: any, exchange: any, args: {
     ...(args.pairedOrderId ? { pairedOrderId: args.pairedOrderId } : {}),
   });
   if (!rec.ok) return { ok: false };
-  if (args.openCloids.has(rec.cloid.toLowerCase())) {   // ya viva en HL → solo confirmar open
-    await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId: args.botId, token: args.token, cloid: rec.cloid, status: "open" });
-    return { ok: true, cloid: rec.cloid };
-  }
   try {
-    const st: any = await placeSpotLimit(exchange, {
+    const r = await gatedPlace(ctx, exchange, args.botId, args.token, {
       assetId: args.assetId, isBuy: args.side === "buy", priceStr: args.priceStr, sizeStr: args.sizeStr,
-      cloid: rec.cloid as `0x${string}`,
+      cloid: rec.cloid, openCloids: args.openCloids,
     });
-    const oid = st?.resting?.oid != null ? String(st.resting.oid) : (st?.filled?.oid != null ? String(st.filled.oid) : undefined);
-    await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId: args.botId, token: args.token, cloid: rec.cloid, status: "open", ...(oid ? { oid } : {}) });
-    return { ok: true, cloid: rec.cloid };
+    return { ok: r.ok, cloid: rec.cloid };   // gateBlocked → queda `submitting`, el reconcile reintenta
   } catch (e) {
     elog("spotgrid", "place_failed", { botId: String(args.botId), side: args.side, err: safeError(e) });
     return { ok: false, cloid: rec.cloid };
@@ -177,11 +185,10 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
     }
     try {
       const { priceStr, sizeStr } = roundAndValidateSpotOrder({ price: o.price, size: o.quantity, szDecimals, isBuy: o.side === "buy" });
-      const r: any = await placeSpotLimit(clients.exchange, { assetId: o.assetId, isBuy: o.side === "buy", priceStr, sizeStr, cloid: o.cloid as `0x${string}` });
-      const oid = r?.resting?.oid != null ? String(r.resting.oid) : undefined;
-      await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, status: "open", incAttempt: true, ...(oid ? { oid } : {}) });
+      await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, incAttempt: true });
+      await gatedPlace(ctx, clients.exchange, botId, token, { assetId: o.assetId, isBuy: o.side === "buy", priceStr, sizeStr, cloid: o.cloid, openCloids });
     } catch (e) {
-      await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, incAttempt: true, errorMessage: safeError(e) });
+      await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, errorMessage: safeError(e) });
     }
   }
 
@@ -202,39 +209,38 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
     const o = byCloid.get(cloid);
     if (!o || !(a.sz > 0)) continue;   // no es una orden nuestra (o ya consumida)
     await ctx.runMutation(internal.spotGridBots.renewSpotGridReconcile, { botId, token });
-    const avgPx = a.notional / a.sz;
-    const newFilled = (o.filledQty ?? 0) + a.sz;
+    const prevFilled = o.filledQty ?? 0;
+    const newFilled = prevFilled + a.sz;
     const full = newFilled >= o.quantity - 1e-9;
+    // (Codex MEDIO#3) VWAP ACUMULADO entre rondas (no solo el batch): (prevQty·prevAvg + Σbatch)/newQty.
+    const vwap = newFilled > 0 ? (prevFilled * (o.avgFillPx ?? 0) + a.notional) / newFilled : a.notional / a.sz;
     await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, {
-      botId, token, cloid: o.cloid, filledQty: newFilled, avgFillPx: avgPx,
+      botId, token, cloid: o.cloid, filledQty: newFilled, avgFillPx: vwap,
       remainingQty: Math.max(0, o.quantity - newFilled), status: full ? "filled" : "partially_filled",
     });
     if (o.side === "buy") {
-      // BUY (parcial/total): SELL pareada por lo recién llenado, con la FÓRMULA NETA (fix #3, solveSellPrice).
-      // Sub-mínima / uneconomic (Codex #3-r2): acumula `pendingSellQty` hasta poder colocar una SELL válida.
-      if (isRunning) {
-        const pending = floorSpotSize((o.pendingSellQty ?? 0) + a.sz, szDecimals);
-        const targetNet = pending * o.price * (bot.gridProfitPercent / 100);   // p% del costo de lo vendido
-        const sellPrice = pending > 0 ? solveSellPrice(o.price, pending, bot.gridProfitPercent, bot.feeRate, szDecimals, targetNet) : null;
+      // (Codex ALTO#1/#2) La SELL pareada se coloca SOLO cuando el BUY se llena COMPLETO → UNA SELL por
+      // (nivel,ciclo), cloid único, sin colisión por tranches, y la reposición casa con la cantidad real.
+      // Mientras el BUY esté parcial se espera; el remanente sin completar al detener queda como balance.
+      if (full && isRunning) {
+        const sellQty = floorSpotSize(newFilled, szDecimals);
+        const basis = vwap > 0 ? vwap : o.price;                       // costo real (VWAP de compra)
+        const targetNet = sellQty * basis * (bot.gridProfitPercent / 100);
+        const sellPrice = sellQty > 0 ? solveSellPrice(basis, sellQty, bot.gridProfitPercent, bot.feeRate, szDecimals, targetNet) : null;
         if (sellPrice != null) {
           await placeOrder(ctx, clients.exchange, { botId, token, side: "sell", gridLevel: o.gridLevel, generation: bot.generation, cycleId: o.cycleId,
-            assetId: bot.assetId, price: sellPrice, quantity: pending, priceStr: String(sellPrice), sizeStr: String(pending), pairedOrderId: o._id, openCloids });
-          await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, pendingSellQty: 0 });
-        } else {
-          await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, pendingSellQty: (o.pendingSellQty ?? 0) + a.sz });
+            assetId: bot.assetId, price: sellPrice, quantity: sellQty, priceStr: String(sellPrice), sizeStr: String(sellQty), pairedOrderId: o._id, openCloids });
         }
       }
     } else if (full) {
       // (fix #1) SELL cierra el ciclo SOLO al llenarse COMPLETA (si fue parcial, se espera a más fills).
       const feeUsd = a.fee + (bot.feeRate * o.price * newFilled);   // fee real de la SELL + estimado del BUY
       const res: any = await ctx.runMutation(internal.spotGridBots.closeCycleAndRepost, { botId, token, sellCloid: o.cloid, feesUsd: feeUsd });
-      // (ALTO#1) La reposición se insertó como `submitting`; aquí se ENVÍA a HL (solo si running y no viva).
-      if (res.ok && !res.alreadySettled && res.repostCloid && isRunning && !openCloids.has(String(res.repostCloid).toLowerCase())) {
+      // (ALTO#1) La reposición se insertó como `submitting`; aquí se ENVÍA a HL vía gatedPlace (gate + idempotente).
+      if (res.ok && !res.alreadySettled && res.repostCloid && isRunning) {
         try {
           const { priceStr, sizeStr } = roundAndValidateSpotOrder({ price: res.repostPrice, size: res.repostQuantity, szDecimals, isBuy: true });
-          const r: any = await placeSpotLimit(clients.exchange, { assetId: res.repostAssetId, isBuy: true, priceStr, sizeStr, cloid: res.repostCloid as `0x${string}` });
-          const oid = r?.resting?.oid != null ? String(r.resting.oid) : undefined;
-          await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: res.repostCloid, status: "open", ...(oid ? { oid } : {}) });
+          await gatedPlace(ctx, clients.exchange, botId, token, { assetId: res.repostAssetId, isBuy: true, priceStr, sizeStr, cloid: res.repostCloid, openCloids });
         } catch (e) {
           await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: res.repostCloid, errorMessage: safeError(e) });
         }

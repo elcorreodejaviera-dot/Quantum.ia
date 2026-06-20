@@ -1,82 +1,93 @@
 # Plan JAV-96 — Fix `orphan_orders` falso positivo (observedStatus rancio al cancelar entradas)
 
+> Rev.2 (tras Codex NO-GO r1): helper por **CLOID exacto** (no por rol), enumeración COMPLETA de
+> rutas de terminalización y de los puntos `ensureOrdersDead===true`, y tests convex de cierre/disarm/
+> armed_lower_only.
+
 ## Objetivo
 Que un arm terminal no deje filas `trigger_orders` con `observedStatus:"open"` rancio cuando la orden
-ya fue cancelada en HL, para que el check `orphan_orders` del panel "Auditoría de Pools" deje de dar
-falso positivo **y** quede como detector fiable de huérfanos REALES.
+ya fue cancelada/confirmada muerta en HL, para que el check `orphan_orders` del panel "Auditoría de
+Pools" deje de dar falso positivo **y** quede como detector fiable de huérfanos REALES.
 
-## Contexto / causa raíz
-- El check `orphan_orders` (`src/lib/poolAudit.js:51`) dispara cuando un arm **terminal**
-  (`disarmed|closed|failed`) tiene alguna `trigger_order` con `observedStatus === "open"`.
-- El audit lee `observedStatus` **de la DB** (`convex/admin.ts:291`), **NO consulta HL en vivo** → el
+## Causa raíz
+- `orphan_orders` (`src/lib/poolAudit.js:51`) dispara cuando un arm **terminal** (`disarmed|closed|failed`)
+  tiene alguna `trigger_order` con `observedStatus === "open"`.
+- El audit lee `observedStatus` **de la DB** (`convex/admin.ts:291`), **NO** consulta HL en vivo → el
   texto "vivas en HL" es engañoso.
-- Las órdenes de **entrada** (`entry_lower`/`entry_upper`) se marcan `observedStatus:"open"` al colocarse
-  (`triggerEngine.ts:372`), pero cuando se **cancelan** en el cierre/disarm vía `ensureOrdersDead` /
-  `cancelByCloid` (`triggerEngine.ts:70-79`, `~420`, `~575`, `~614`) **nadie actualiza su fila a
-  `canceled`**. (Las de SL/TP sí: líneas 648/714/760.)
-- → un arm que cierra deja sus filas de entrada con `observedStatus:"open"` rancio aunque la orden esté
-  MUERTA en HL → el audit grita huérfano para siempre. Misma clase de bug que JAV-95 (dato rancio).
-- El motor **garantiza** (anti-huérfano Codex #2, `triggerEngine.ts:510`) no declarar `closed` con una
-  orden viva en el book (`ensureOrdersDead` gatea el cierre) → un huérfano REAL es muy improbable.
+- Las entradas (`entry_lower`/`entry_upper`) se marcan `observedStatus:"open"` al colocarse
+  (`triggerEngine.ts:372`); al **cancelarse** vía `ensureOrdersDead`/`cancelByCloid` **nadie** actualiza
+  su fila a `canceled` (SL/TP sí: 648/714/760) → quedan `open` rancio en arms terminales.
+- El motor garantiza (anti-huérfano Codex #2, `triggerEngine.ts:510`) no declarar `closed` con orden
+  viva (gate `ensureOrdersDead`) → huérfano REAL muy improbable; lo que se ve es rancio.
 
 ## Diagnóstico previo (OBLIGATORIO antes de tocar money-path)
-Confirmar que es rancio y no un huérfano real, con datos reales:
-1. **Convex query (read-only, admin):** contar `trigger_orders` con `observedStatus ∈ {open, pending}`
-   cuyo `arm.status` sea terminal (`disarmed|closed|failed`). Listar armId/role/cloid/updatedAt.
+1. **Convex query (read-only, admin):** `trigger_orders` con `observedStatus ∈ {open, pending}` cuyo
+   `arm.status` sea terminal (`disarmed|closed|failed`). Listar armId/role/cloid/updatedAt.
 2. **HL en vivo:** `frontendOpenOrders` de la `tradingAccountAddress` del bot ETH/USDC → confirmar que
    esos cloids **no** están en el book.
-- Si no están vivos → confirmado falso positivo (rancio) → proceder con Opción A.
-- Si alguno está vivo → huérfano REAL → cancelarlo y revisar por qué el gate anti-huérfano no lo pilló.
+- No vivos → falso positivo confirmado (rancio) → Opción A. Alguno vivo → huérfano REAL → cancelar y
+  revisar por qué el gate anti-huérfano no lo pilló.
 
-## Enfoque elegido: Opción A (raíz) — marcar `canceled` al confirmar muertas
-Reusar el patrón ya existente para SL/TP (`setArmOrderObserved(..., "canceled")`).
+## Enfoque: Opción A (raíz) — marcar `canceled` por CLOID, SOLO tras muerte confirmada
 
-### Cambios
-1. **`convex/triggerArms.ts` — nueva internalMutation `markArmOrdersCanceled`:**
-   - Args: `armId`, `token` (lease), `roles?` (opcional; si se omite → todas las del arm).
-   - Bajo fencing (mismo patrón que `setArmOrderObserved`/`settleArm`): para cada `trigger_order` del arm
-     con `observedStatus ∈ {open, pending}` (NUNCA tocar `filled`/`triggered`/`rejected`/`canceled`) →
-     patch a `canceled` + `updatedAt`.
-   - Idempotente (re-llamarla no cambia nada).
-   - `elog("arm","orders_canceled",{ armId, n })` (OBS-3, solo escalares).
+### 1. Nueva internalMutation `markArmOrdersCanceled(armId, token, cloids)`  (`convex/triggerArms.ts`)
+- Args: `armId`, `token` (lease), **`cloids: string[]`** (las EXACTAS que `ensureOrdersDead` confirmó
+  muertas). **NO por rol** (Codex r1 #3): `tp` tiene múltiples `tpIndex` y `armed_lower_only` jamás
+  debe tocar `entry_lower` viva.
+- Bajo el MISMO fencing que `setArmOrderObserved`/`settleArm` (token + `reconcileLeaseUntil` vigente).
+- Para cada cloid: busca la `trigger_order` por índice `by_cloid`; si su `observedStatus ∈ {open,
+  pending}` → patch a `canceled` + `updatedAt`. **NUNCA** toca `filled`/`triggered`/`rejected`/`canceled`.
+- Idempotente. `elog("arm","orders_canceled",{ armId, n })` (OBS-3, solo escalares; NO loguear cloids).
 
-2. **`convex/triggerEngine.ts` — llamarla SOLO donde `ensureOrdersDead` YA confirmó muerte:**
-   - Tras `ensureOrdersDead(...allCloids...) === true` en los gates de cierre (líneas ~575 y ~614) →
-     `markArmOrdersCanceled(armId, token)` **antes** del `settleArm(closed)`. Sabemos que todas están
-     muertas.
-   - En `armed_lower_only` (línea ~568, cancela `nonLowerCloids`) →
-     `markArmOrdersCanceled(armId, token, roles: <no-lower>)` solo para esas (NO tocar `entry_lower`,
-     que sigue armada).
-   - En la defensa N5 (línea ~420, cancela ambas entradas tras pausa) → marcar esas entradas `canceled`
-     (o dejar que el reconcile de disarm lo haga; decidir con Codex para no duplicar).
-   - **Disarm/pausa:** localizar el punto del reconcile donde se cancela por `desiredState:"disarmed"` y
-     se llega a terminal → tras confirmar muertas (`ensureOrdersDead`), misma llamada.
+### 2. Llamarla en TODOS los puntos donde `ensureOrdersDead(...cloids...) === true` precede una transición terminal/parcial (`convex/triggerEngine.ts`)
+Pasar EXACTAMENTE los cloids recién confirmados muertos (Codex r1 #4):
+- **Cierre flat normal** — gate `ensureOrdersDead(allCloids)` (líneas ~575 y ~614) → antes de
+  `closeArmAndScheduleRearm` (`triggerArms.ts:700`) → `markArmOrdersCanceled(armId, token, allCloids)`.
+- **Transición a `armed_lower_only`** — `ensureOrdersDead(nonLowerCloids)` (~568) y `(deadCloids)`
+  (~952) → marcar SOLO esos cloids (NUNCA `entry_lower`, sigue armada). Cierre por expiración →
+  `closeArmLowerOnlyExpired` (`triggerArms.ts:484`): marcar las cancelables confirmadas muertas.
+- **Disarm pre-fill** — `ensureOrdersDead(entryCloids)` (~923) → antes de `settleArm(... "disarmed")`
+  (engine ~927) → `markArmOrdersCanceled(armId, token, entryCloids)`.
+- **`failed` por prueba negativa** — `ensureOrdersDead(entryCloids)` (~977) → antes de
+  `settleArm(... "failed")` (engine ~984) → marcar `entryCloids`.
+- **N5 defensa pausa** (~420, cancela ambas entradas tras pausa): marcar esas entradas (o dejar que el
+  reconcile de disarm lo haga; evitar duplicar — decidir con Codex).
 
-3. **`convex/triggerArms.ts:settleArm` — red de seguridad (decisión a validar con Codex):**
-   - Recomendación: **NO** normalizar a ciegas `open→canceled` en settleArm, porque enmascararía un
-     huérfano REAL si un cancel falló en silencio. Confiar en los call sites que ya verificaron muerte
-     con `ensureOrdersDead`. Que el audit siga pudiendo señalar el caso real residual.
+### 3. Rutas de terminalización SIN órdenes "open" (confirmar que NO necesitan cambio)
+Terminalizan con entradas en `pending` (nunca enviadas a HL) → no generan `open` rancio y el audit no
+las marca: `failArmPreOrder` (`triggerArms.ts:829`, exige entradas pending+oid null),
+`recoverAbandonedArming` (`:866`), patches directos a `failed` en gates pre-envío
+(`markArmSubmitting :366`, `gateArmBeforeOrder :408`, engine `:409`). DOCUMENTAR como no-afectadas;
+opcional normalizar `pending→canceled` por higiene, NO requisito (el audit solo mira `open`).
+
+### 4. `settleArm` — NO normalizar a ciegas (Codex r1 #2)
+No marcar `open→canceled` dentro de `settleArm`: enmascararía un huérfano REAL si un cancel falló en
+silencio. La señal se preserva confiando en los call sites que pasaron por `ensureOrdersDead`.
 
 ### Lo que NO se toca
-- La lógica de SL/TP (ya marca `canceled`).
-- El gate anti-huérfano (`ensureOrdersDead` que bloquea `closed` con orden viva).
-- La máquina de estados del arm ni el cálculo/reserva de margen.
+Lógica SL/TP (ya marca `canceled`); gate anti-huérfano; máquina de estados del arm; reserva/cálculo de
+margen; OCO; auto-rearm; conteo whipsaw/consecutiveStops.
 
-## Alternativa descartada (registrada): Opción B — audit robusto contra HL live
-Ampliar `adminLive.ts` para traer `openOrders` por cuenta y marcar huérfana solo si el cloid sigue vivo
-en el book. Elimina la dependencia del `observedStatus` persistido, pero añade RPC por cuenta (coste) y
-no corrige la inconsistencia de datos subyacente. Considerar como endurecimiento posterior, no ahora.
+## Alternativa descartada (Codex r1 #5 de acuerdo): Opción B
+Cruzar `openOrders` HL en `adminLive.ts`: más RPC/fan-out y mezcla diagnóstico read-only con
+reconciliación; no corrige la inconsistencia de datos. Posible endurecimiento posterior, no ahora.
 
 ## Tests
-- **poolAudit (pure, ya existe la suite):** añadir caso "arm terminal con todas las órdenes `canceled`
-  → NO `orphan_orders`" y mantener el caso positivo (orden `open` en arm terminal → sí dispara).
-- **convex-test (motor):** simular cierre de un arm con `entry_lower` en `open` → tras el reconcile de
-  cierre su `observedStatus` queda `canceled` y el audit no marca huérfano. Reusar la infra de tests de
-  máquina de estados de Fase 4.
+- **poolAudit (pure, suite existente):** caso "arm terminal con órdenes `canceled` → NO `orphan_orders`"
+  + mantener el positivo (orden `open` en arm terminal → sí dispara).
+- **convex-test (motor) — congelar "terminal tras muerte confirmada ⇒ open/pending pasan a canceled;
+  filled/triggered/rejected NO cambian":**
+  - **Cierre flat** de un arm con `entry_lower` en `open` → tras reconcile: `canceled`.
+  - **Disarm pre-fill** → entradas `open/pending` → `canceled`.
+  - **`armed_lower_only`**: las del short de arriba → `canceled` PERO `entry_lower` viva permanece
+    `open` (no se toca).
+  - Un SL/TP `filled` NO cambia a `canceled`.
+  Reusar infra de tests de máquina de estados de Fase 4 (convex-test).
 
 ## DoD
-- Diagnóstico confirma rancio (o se trata el huérfano real si lo hubiera).
-- Un arm que cierra/disarma deja sus entradas en `canceled` (no `open`).
+- Diagnóstico confirma rancio (o se trata el real).
+- Todo arm que cierra/disarma/expira deja sus órdenes confirmadas muertas en `canceled` (no `open`),
+  por CLOID, en TODAS las rutas enumeradas.
 - `orphan_orders` solo dispara con una orden realmente viva sobre arm terminal.
 - `npm run typecheck` OK, tests verdes, `convex deploy` (toca `convex/`), verificar `HL_NETWORK=mainnet`.
-- Flujo: este plan → GO Codex → implementar → GO Codex código → PR → CodeRabbit → merge → deploy.
+- Flujo: plan → GO Codex → implementar → GO Codex código → PR → CodeRabbit → merge → deploy.

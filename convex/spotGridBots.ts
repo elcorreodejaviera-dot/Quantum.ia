@@ -171,6 +171,68 @@ export const getSpotGridBot = query({
   },
 });
 
+// (JAV-93) Detalle + stats de un grid para la UI. READ-ONLY, scoped por ownership. Solo escalares:
+// nunca expone la credencial ni la clave. Topes explícitos para que el coste de lectura sea acotado;
+// si se topa el cap se marca `truncated` para que la UI NO muestre un total parcial como exacto.
+const SPOT_GRID_DETAIL_CYCLE_CAP = 500;   // tope de ciclos sumados/contados por lectura
+const SPOT_GRID_DETAIL_OPEN_CAP = 50;     // tope de órdenes abiertas devueltas
+const SPOT_GRID_DETAIL_RECENT_CYCLES = 20;// ciclos recientes devueltos al detalle
+
+export const getSpotGridDetail = query({
+  args: { botId: v.id("spot_grid_bots") },
+  handler: async (ctx, { botId }) => {
+    const user = await getUserOrNull(ctx);
+    if (!user) return null;
+    const bot = await ctx.db.get(botId);
+    if (!bot || bot.userId !== user._id) return null;
+
+    // Ciclos: tope de cap para contar/sumar (truncated si lo alcanza) + recientes para listar.
+    const capped = await ctx.db
+      .query("spot_grid_cycles")
+      .withIndex("by_bot_cycle", (q) => q.eq("botId", botId))
+      .order("desc")
+      .take(SPOT_GRID_DETAIL_CYCLE_CAP);
+    const truncated = capped.length >= SPOT_GRID_DETAIL_CYCLE_CAP;
+    const cyclesCount = capped.length;
+    const totalNetProfit = capped.reduce((s, c) => s + (c.netProfit ?? 0), 0);
+    const recentCycles = capped.slice(0, SPOT_GRID_DETAIL_RECENT_CYCLES).map((c) => ({
+      cycleId: c.cycleId, buyPrice: c.buyPrice, sellPrice: c.sellPrice ?? null,
+      quantity: c.quantity, netProfit: c.netProfit ?? null, closedAt: c.closedAt ?? null,
+    }));
+
+    // Órdenes vivas (submitting/open/partially_filled), tope explícito.
+    const liveStatuses = ["submitting", "open", "partially_filled"] as const;
+    const openOrders: Array<any> = [];
+    for (const st of liveStatuses) {
+      if (openOrders.length >= SPOT_GRID_DETAIL_OPEN_CAP) break;
+      const rows = await ctx.db
+        .query("spot_grid_orders")
+        .withIndex("by_bot_status", (q) => q.eq("botId", botId).eq("status", st))
+        .take(SPOT_GRID_DETAIL_OPEN_CAP - openOrders.length);
+      for (const o of rows) {
+        openOrders.push({
+          side: o.side, price: o.price, quantity: o.quantity, status: o.status,
+          gridLevel: o.gridLevel, filledQty: o.filledQty ?? null, cycleId: o.cycleId,
+        });
+      }
+    }
+
+    return {
+      bot: {
+        _id: bot._id, symbol: bot.symbol, baseAsset: bot.baseAsset, quoteAsset: bot.quoteAsset,
+        minPrice: bot.minPrice, gridProfitPercent: bot.gridProfitPercent,
+        investmentAmount: bot.investmentAmount, orderSize: bot.orderSize, gridCount: bot.gridCount,
+        status: bot.status, network: bot.network, currentPrice: bot.currentPrice ?? null,
+        createdAt: bot.createdAt, lastReconciledAt: bot.lastReconciledAt ?? null,
+        errorMessage: bot.errorMessage ?? null, hlAccountId: bot.hlAccountId,
+      },
+      stats: { cyclesCount, totalNetProfit, truncated, cycleCap: SPOT_GRID_DETAIL_CYCLE_CAP },
+      openOrders,
+      recentCycles,
+    };
+  },
+});
+
 // --- Internal query para el motor (PR3) ------------------------------------------------------------
 export const getSpotGridBotInternal = internalQuery({
   args: { botId: v.id("spot_grid_bots") },

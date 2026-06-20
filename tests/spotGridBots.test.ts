@@ -239,4 +239,39 @@ describe("pause/list/get — ownership (JAV-91, Codex BAJO)", () => {
     expect(await as(t, "owner2").query(api.spotGridBots.getSpotGridBot, { botId })).toBeNull();
     expect((await as(t, "owner1").query(api.spotGridBots.getSpotGridBot, { botId }))?._id).toBe(botId);
   });
+
+  it("getSpotGridDetail: ownership + agrega stats de ciclos (cyclesCount/totalNetProfit) sin truncar", async () => {
+    const t = makeConvexTest();
+    const { userId, botId } = await seedBotFor(t, "owner1");
+    await t.run(async (ctx: MutationCtx) => { await seedUser(ctx, ["canManageBots", "canTradeLive"], "viewer", "owner2"); });
+    await t.run(async (ctx: MutationCtx) => {
+      const now = Date.now();
+      const mkOrder = (side: "buy" | "sell", cloid: string) => ctx.db.insert("spot_grid_orders", {
+        botId, userId, cloid, assetId: 10107, side, price: 50000, quantity: 0.001, quoteSize: 50,
+        gridLevel: 0, generation: 1, cycleId: 0, status: "filled", createdAt: now,
+      });
+      const buyId = await mkOrder("buy", "0xb");
+      // Dos ciclos cerrados con netProfit conocido + una orden viva (open).
+      for (const [i, np] of [1.5, 2.25].entries()) {
+        await ctx.db.insert("spot_grid_cycles", {
+          botId, userId, cycleId: i, buyOrderId: buyId, buyPrice: 50000, sellPrice: 50500,
+          quantity: 0.001, netProfit: np, closedAt: now,
+        });
+      }
+      await ctx.db.insert("spot_grid_orders", {
+        botId, userId, cloid: "0xopen", assetId: 10107, side: "buy", price: 49000, quantity: 0.001,
+        quoteSize: 49, gridLevel: 1, generation: 1, cycleId: 2, status: "open", createdAt: now,
+      });
+    });
+    const ajeno = await as(t, "owner2").query(api.spotGridBots.getSpotGridDetail, { botId });
+    expect(ajeno).toBeNull();                                   // ownership: ajeno → null
+    const d = await as(t, "owner1").query(api.spotGridBots.getSpotGridDetail, { botId });
+    expect(d?.stats.cyclesCount).toBe(2);
+    expect(d?.stats.totalNetProfit).toBeCloseTo(3.75, 6);
+    expect(d?.stats.truncated).toBe(false);
+    expect(d?.recentCycles.length).toBe(2);
+    expect(d?.openOrders.some((o: any) => o.status === "open")).toBe(true);
+    // Nunca expone credencial/clave: hlAccountId es el id, pero no hay campos de clave.
+    expect(JSON.stringify(d)).not.toMatch(/encryptedPrivateKey|authTag/);
+  });
 });

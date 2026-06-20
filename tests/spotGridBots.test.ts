@@ -125,13 +125,54 @@ describe("persistSpotGridBot — guards (JAV-91)", () => {
       .rejects.toThrow(/insuficiente/i);
   });
 
-  it("inputs inválidos: gridCount no entero / orderSize > investment → rechaza", async () => {
+  it("inputs inválidos: gridCount no entero → rechaza", async () => {
     const t = makeConvexTest();
     const hlAccountId = await seedLiveEnv(t);
     await expect(asUser(t).mutation(internal.spotGridBots.persistSpotGridBot, args(hlAccountId, { gridCount: 2.5 })))
       .rejects.toThrow(/gridCount/);
-    await expect(asUser(t).mutation(internal.spotGridBots.persistSpotGridBot, args(hlAccountId, { orderSize: 200 })))
-      .rejects.toThrow(/orderSize/);
+  });
+
+  it("(Codex ALTO) presupuesto total orderSize×gridCount > investmentAmount → rechaza", async () => {
+    const t = makeConvexTest();
+    const hlAccountId = await seedLiveEnv(t);
+    // 50 × 5 = 250 > 100 (aunque una sola orden 50 ≤ 100).
+    await expect(asUser(t).mutation(internal.spotGridBots.persistSpotGridBot, args(hlAccountId, { orderSize: 50, gridCount: 5, investmentAmount: 100, freeQuoteBalance: 500 })))
+      .rejects.toThrow(/[Pp]resupuesto|orderSize×gridCount/);
+  });
+
+  it("(Codex MEDIO) orderSize < mínimo notional HL (~$10) → rechaza", async () => {
+    const t = makeConvexTest();
+    const hlAccountId = await seedLiveEnv(t);
+    await expect(asUser(t).mutation(internal.spotGridBots.persistSpotGridBot, args(hlAccountId, { orderSize: 5, gridCount: 1 })))
+      .rejects.toThrow(/m[ií]nimo notional|10 USDC/);
+  });
+});
+
+describe("preflightCreateSpotGridBot — guards ANTES de la RPC (JAV-91, Codex MEDIO #2)", () => {
+  const preArgs = (hlAccountId: Id<"hl_api_credentials">, over: any = {}) => ({
+    hlAccountId, network: "testnet" as const,
+    minPrice: 50000, gridProfitPercent: 1, investmentAmount: 100, orderSize: 20, gridCount: 5, feeRate: 0.0004, ...over,
+  });
+
+  it("happy path: devuelve la tradingAccountAddress (todo OK)", async () => {
+    const t = makeConvexTest();
+    const hlAccountId = await seedLiveEnv(t);
+    const r = await asUser(t).query(internal.spotGridBots.preflightCreateSpotGridBot, preArgs(hlAccountId));
+    expect(typeof r.tradingAccountAddress).toBe("string");
+  });
+
+  it("rechaza ANTES de tocar HL si falta canTradeLive", async () => {
+    const t = makeConvexTest();
+    const hlAccountId = await seedLiveEnv(t, ["canManageBots"]);
+    await expect(asUser(t).query(internal.spotGridBots.preflightCreateSpotGridBot, preArgs(hlAccountId)))
+      .rejects.toThrow(/canTradeLive/);
+  });
+
+  it("rechaza inputs inválidos (presupuesto excedido) en el preflight", async () => {
+    const t = makeConvexTest();
+    const hlAccountId = await seedLiveEnv(t);
+    await expect(asUser(t).query(internal.spotGridBots.preflightCreateSpotGridBot, preArgs(hlAccountId, { orderSize: 50, gridCount: 5, investmentAmount: 100 })))
+      .rejects.toThrow(/[Pp]resupuesto|orderSize×gridCount/);
   });
 });
 

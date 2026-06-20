@@ -29,14 +29,20 @@ export const createSpotGridBot = action({
     if (!a.confirm) throw new Error("Crear Spot Grid requiere confirmación LIVE explícita.");
     const network = hlNetwork();
 
-    // Ownership de la cuenta + tradingAccountAddress (auth propagada al runQuery).
-    const cred = await ctx.runQuery(internal.spotGridBots.getCredentialForSpotGrid, { hlAccountId: a.hlAccountId });
+    // (Codex MEDIO #2) PREFLIGHT ANTES de tocar HL: permisos (canManageBots + canTradeLive), switches
+    // live-only, gate mainnet, ownership, exclusividad de cuenta e inputs. Si falla, NO se hace ninguna
+    // RPC. Devuelve la tradingAccountAddress para las lecturas públicas. (auth propagada al runQuery.)
+    const pre = await ctx.runQuery(internal.spotGridBots.preflightCreateSpotGridBot, {
+      hlAccountId: a.hlAccountId, network,
+      minPrice: a.minPrice, gridProfitPercent: a.gridProfitPercent, investmentAmount: a.investmentAmount,
+      orderSize: a.orderSize, gridCount: a.gridCount, feeRate: a.feeRate,
+    });
 
     // Lecturas PÚBLICAS de HL (sin descifrar clave): resolver activo por red, precio, balance quote.
     const info = new InfoClient({ transport: new HttpTransport({ isTestnet: hlIsTestnet() }) });
     const resolved = await resolveSpotAsset(info, a.symbol, network);
     const currentPrice = await getSpotPrice(info, resolved);
-    const bal = await getSpotBalance(info, cred.tradingAccountAddress, resolved.quoteAsset);
+    const bal = await getSpotBalance(info, pre.tradingAccountAddress, resolved.quoteAsset);
 
     // Persistir con TODOS los guards de DB (permisos, switches, gate mainnet, exclusividad, inputs,
     // balance) atómicos con el insert.

@@ -336,7 +336,7 @@ function GridDetail({ botId }) {
             <thead><tr><th>#</th><th>Compra</th><th>Venta</th><th>Cantidad</th><th>Profit neto</th><th>Cerrado</th></tr></thead>
             <tbody>
               {recentCycles.map((c) => (
-                <tr key={c.cycleId}>
+                <tr key={`${c.cycleId}-${c.sellOrderId ?? c.closedAt ?? ''}`}>
                   <td>{c.cycleId}</td>
                   <td>{usd(c.buyPrice)}</td>
                   <td>{c.sellPrice != null ? usd(c.sellPrice) : '—'}</td>

@@ -186,17 +186,19 @@ export const getSpotGridDetail = query({
     const bot = await ctx.db.get(botId);
     if (!bot || bot.userId !== user._id) return null;
 
-    // Ciclos: tope de cap para contar/sumar (truncated si lo alcanza) + recientes para listar.
-    const capped = await ctx.db
+    // Ciclos: leemos cap+1 para distinguir "exactamente cap" de "cap+" (Codex BAJO#2); solo se cuentan/
+    // suman hasta `cap` y se marca `truncated` únicamente cuando hay MÁS que el cap.
+    const fetched = await ctx.db
       .query("spot_grid_cycles")
       .withIndex("by_bot_cycle", (q) => q.eq("botId", botId))
       .order("desc")
-      .take(SPOT_GRID_DETAIL_CYCLE_CAP);
-    const truncated = capped.length >= SPOT_GRID_DETAIL_CYCLE_CAP;
+      .take(SPOT_GRID_DETAIL_CYCLE_CAP + 1);
+    const truncated = fetched.length > SPOT_GRID_DETAIL_CYCLE_CAP;
+    const capped = truncated ? fetched.slice(0, SPOT_GRID_DETAIL_CYCLE_CAP) : fetched;
     const cyclesCount = capped.length;
     const totalNetProfit = capped.reduce((s, c) => s + (c.netProfit ?? 0), 0);
     const recentCycles = capped.slice(0, SPOT_GRID_DETAIL_RECENT_CYCLES).map((c) => ({
-      cycleId: c.cycleId, buyPrice: c.buyPrice, sellPrice: c.sellPrice ?? null,
+      cycleId: c.cycleId, sellOrderId: c.sellOrderId ?? null, buyPrice: c.buyPrice, sellPrice: c.sellPrice ?? null,
       quantity: c.quantity, netProfit: c.netProfit ?? null, closedAt: c.closedAt ?? null,
     }));
 
@@ -224,7 +226,7 @@ export const getSpotGridDetail = query({
         investmentAmount: bot.investmentAmount, orderSize: bot.orderSize, gridCount: bot.gridCount,
         status: bot.status, network: bot.network, currentPrice: bot.currentPrice ?? null,
         createdAt: bot.createdAt, lastReconciledAt: bot.lastReconciledAt ?? null,
-        errorMessage: bot.errorMessage ?? null, hlAccountId: bot.hlAccountId,
+        errorMessage: bot.errorMessage ?? null,   // (Codex BAJO#1) sin hlAccountId: la UI no lo usa
       },
       stats: { cyclesCount, totalNetProfit, truncated, cycleCap: SPOT_GRID_DETAIL_CYCLE_CAP },
       openOrders,

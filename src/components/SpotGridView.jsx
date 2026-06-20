@@ -97,6 +97,15 @@ export default function SpotGridView() {
 // ----------------------------------------------------------------------------------------------------
 // Crear grid (money-path: confirmación LIVE no salteable + expectedNetwork)
 // ----------------------------------------------------------------------------------------------------
+// (Codex MEDIO) orderSize efectivo del modo avanzado: el explícito si es > 0, o el fallback "inversión /
+// niveles" FLOOREADO a centavos. El backend rechaza orderSize con > 2 decimales (regla de centavos, igual
+// que AUTO/floorQuoteForBudget), así que el fallback debe ser un nº exacto de centavos o el payload fallaría.
+function effectiveManualOrderSize(inv, gridCount, orderSize) {
+  if (Number(orderSize) > 0) return Number(orderSize)
+  if (!(inv > 0) || !(Number(gridCount) >= 1)) return NaN
+  return Math.floor((inv * 100) / Number(gridCount)) / 100
+}
+
 function CreateGridForm({ onCreated }) {
   const accounts = useQuery(api.hlCredentials.list) ?? []
   const createGrid = useAction(api.spotGridActions.createSpotGridBot)
@@ -124,9 +133,16 @@ function CreateGridForm({ onCreated }) {
     if (!(gp >= 0.5 && gp <= 10)) return 'El profit por cuadrícula debe estar entre 0.5% y 10%.'
     if (!(inv > 0)) return 'La inversión debe ser > 0.'
     if (showAdvanced) {
-      if (!(Number(orderSize) > 0)) return 'El tamaño de orden debe ser > 0.'
+      // (CodeRabbit) orderSize vacío es válido: doCreate cae al fallback "inversión / niveles". Sólo se
+      // rechaza un valor presente no positivo (0 o negativo).
+      if (orderSize !== '' && !(Number(orderSize) > 0)) return 'El tamaño de orden debe ser > 0.'
       if (!(Number(gridCount) >= 2)) return 'El nº de niveles debe ser ≥ 2.'
       if (!(Number(feeRate) >= 0)) return 'El fee rate no puede ser negativo.'
+      // (Codex MEDIO) El tamaño efectivo (explícito o fallback inversión/niveles floreado a centavos) debe
+      // respetar el mínimo de HL (~$10), o el backend lo rechazaría tras enviar el payload.
+      if (!(effectiveManualOrderSize(inv, gridCount, orderSize) >= 10)) {
+        return 'El tamaño por orden (o inversión ÷ niveles) debe ser ≥ 10 USDC (mínimo de Hyperliquid).'
+      }
     }
     return null
   }
@@ -153,7 +169,7 @@ function CreateGridForm({ onCreated }) {
       }
       // (JAV-101) Básico = AUTO: el backend deriva el nº de niveles del rango. Avanzado = manual explícito.
       const payload = showAdvanced
-        ? { ...common, auto: false, gridCount: Number(gridCount), orderSize: Number(orderSize) > 0 ? Number(orderSize) : inv / Number(gridCount) }
+        ? { ...common, auto: false, gridCount: Number(gridCount), orderSize: effectiveManualOrderSize(inv, gridCount, orderSize) }
         : { ...common, auto: true }
       const res = await createGrid(payload)
       setConfirmOpen(false)
@@ -177,7 +193,11 @@ function CreateGridForm({ onCreated }) {
     const cur = Number(refPrice), mp = Number(minPrice), p = Number(gridProfit), inv = Number(investment)
     if (!(cur > 0) || !(mp > 0) || !(mp < cur) || !(p >= 0.5 && p <= 10) || !(inv > 0)) return null
     const nFull = Math.floor(Math.log(cur / mp) / Math.log(1 + p / 100))
-    const nCap = Math.floor(inv / 10)
+    // (CodeRabbit) Cota de capital alineada con deriveAutoGrid: el backend exige por orden ≥ $10 + colchón
+    // por truncado de tamaño (currentPrice·sizeTick). El front no conoce szDecimals, así que usa un colchón
+    // prudente (1e-4) para NO prometer más niveles de los que el backend aceptará cerca del mínimo.
+    const minNotEff = 10 + cur * 1e-4
+    const nCap = Math.floor(inv / minNotEff)
     const n = Math.min(nFull, nCap, 50)
     if (n < 2) return { tooFew: true }
     return { n, capped: nFull > Math.min(nCap, 50) }

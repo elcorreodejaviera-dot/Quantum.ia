@@ -25,6 +25,12 @@ const MAX_TICK_BUMPS = 20;          // (Codex MEDIO#4) tope del loop de profit n
 // para NO crear más órdenes reales de las que la UI puede mostrar; la colocación es serial (1 RPC + lease
 // por orden). Subirlo exigiría paginar getSpotGridDetail + colocar por lotes entre reconciles (otra issue).
 const ABS_MAX_GRID_LEVELS = 50;
+// (CodeRabbit Major) Ventana de frescura del ancla de creación. El cron reconcilia 1/min, así que el primer
+// reconcile normal ocurre a segundos de crear el grid. Si pasó mucho más (cron parado/pausa/reanudación), el
+// `currentPrice` de creación puede haber quedado obsoleto: si el spot cayó, varios BUY anclados al precio
+// viejo quedarían POR ENCIMA del mercado y se ejecutarían al instante. Pasada esta ventana refrescamos el
+// precio en vivo (como manual/legacy) → nunca se colocan compras sobre un ancla vencida.
+const ANCHOR_MAX_AGE_MS = 5 * 60 * 1000;
 
 // ---- calculateGridLevels (PURA, exportada para tests) -------------------------------------------
 export type GridLevel = {
@@ -155,15 +161,22 @@ export function deriveAutoGrid(p: {
  * - Grid AUTO-derivado (autoDerived) con currentPrice ancla válido (> minPrice): usa ese MISMO precio con
  *   que deriveAutoGrid calculó gridCount → garantiza "prometido == colocado" (sin drift entre crear y el
  *   primer reconcile).
- * - Manual / legacy (autoDerived != true) o ancla corrupta (currentPrice ≤ minPrice, p.ej. el viejo bug ~0):
- *   `null` → el caller refresca el precio spot EN VIVO (preserva la protección del #103; no depende de un
- *   snapshot persistido que podría ser stale/corrupto).
+ * - Manual / legacy (autoDerived != true), ancla corrupta (currentPrice ≤ minPrice, p.ej. el viejo bug ~0)
+ *   o ANCLA VENCIDA (creación hace más de ANCHOR_MAX_AGE_MS, CodeRabbit): `null` → el caller refresca el
+ *   precio spot EN VIVO (preserva la protección del #103; nunca coloca compras sobre un snapshot stale).
  */
-export function pickInitialPlacementPrice(bot: { autoDerived?: boolean; currentPrice?: number; minPrice: number }): number | null {
-  if (bot.autoDerived === true && typeof bot.currentPrice === "number" && bot.currentPrice > bot.minPrice) {
+export function pickInitialPlacementPrice(
+  bot: { autoDerived?: boolean; currentPrice?: number; minPrice: number; _creationTime?: number },
+  now: number = Date.now(),
+): number | null {
+  if (
+    bot.autoDerived === true &&
+    typeof bot.currentPrice === "number" && bot.currentPrice > bot.minPrice &&
+    typeof bot._creationTime === "number" && now - bot._creationTime <= ANCHOR_MAX_AGE_MS
+  ) {
     return bot.currentPrice;
   }
-  return null;   // refrescar en vivo
+  return null;   // refrescar en vivo (manual/legacy/ancla corrupta/ancla vencida/sin timestamp)
 }
 
 // ---- helpers internos del reconcile -------------------------------------------------------------
@@ -239,7 +252,7 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
     // mismo con que deriveAutoGrid calculó gridCount → "prometido == colocado"). Los manuales y los legacy
     // (autoDerived != true) o un ancla corrupta (≤ minPrice) refrescan el precio EN VIVO → preserva la
     // protección del #103 sin reabrir el riesgo del snapshot persistido para esos bots.
-    const anchorPrice = pickInitialPlacementPrice(bot) ?? await getSpotPrice(clients.info, resolved);
+    const anchorPrice = pickInitialPlacementPrice(bot, Date.now()) ?? await getSpotPrice(clients.info, resolved);
     const { levels } = calculateGridLevels({
       currentPrice: anchorPrice,
       minPrice: bot.minPrice, gridProfitPercent: bot.gridProfitPercent, orderSize: bot.orderSize,

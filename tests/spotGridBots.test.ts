@@ -133,6 +133,14 @@ describe("persistSpotGridBot — guards (JAV-91)", () => {
       .rejects.toThrow(/gridCount/);
   });
 
+  it("(CodeRabbit) gridCount manual > 50 (ABS_MAX) → rechaza", async () => {
+    const t = makeConvexTest();
+    const hlAccountId = await seedLiveEnv(t);
+    // orderSize/investment holgados para que el ÚNICO motivo de rechazo sea el tope de niveles.
+    await expect(asUser(t).mutation(internal.spotGridBots.persistSpotGridBot, args(hlAccountId, { gridCount: 51, orderSize: 10, investmentAmount: 1000, freeQuoteBalance: 5000 })))
+      .rejects.toThrow(/gridCount/);
+  });
+
   it("(Codex ALTO) presupuesto total orderSize×gridCount > investmentAmount → rechaza", async () => {
     const t = makeConvexTest();
     const hlAccountId = await seedLiveEnv(t);

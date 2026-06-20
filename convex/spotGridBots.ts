@@ -16,6 +16,10 @@ const MAINNET_GATE_KEY = "mainnetSpotGridApproved";
 // Espejo NON-node de la constante de hyperliquidSpot.ts (no se puede importar de un módulo "use node"
 // sin contaminar este archivo). HL rechaza órdenes spot por debajo de ~$10.
 const MIN_SPOT_NOTIONAL_USD = 10;
+// Espejo NON-node de ABS_MAX_GRID_LEVELS de spotGridEngine.ts ("use node", no importable aquí sin contaminar):
+// tope duro de niveles. (CodeRabbit Major) También en MANUAL, para que un payload no persista más órdenes de
+// las que el motor coloca y el detalle/UI muestran (mismo límite que aplica el AUTO).
+const ABS_MAX_GRID_LEVELS = 50;
 
 type GridInputs = {
   minPrice: number; gridProfitPercent: number; investmentAmount: number;
@@ -45,7 +49,9 @@ function validateBaseGridInputs(a: BaseGridInputs): void {
 function validateGridInputs(a: GridInputs): void {
   validateBaseGridInputs(a);
   if (!Number.isFinite(a.orderSize) || !(a.orderSize > 0)) throw new Error("Parámetro inválido: orderSize debe ser finito > 0.");
-  if (!(Number.isInteger(a.gridCount) && a.gridCount >= 1)) throw new Error("gridCount debe ser entero ≥ 1.");
+  if (!(Number.isInteger(a.gridCount) && a.gridCount >= 1 && a.gridCount <= ABS_MAX_GRID_LEVELS)) {
+    throw new Error(`gridCount debe ser entero entre 1 y ${ABS_MAX_GRID_LEVELS}.`);
+  }
   if (a.orderSize < MIN_SPOT_NOTIONAL_USD) {
     throw new Error(`orderSize ${a.orderSize} < mínimo notional de HL (${MIN_SPOT_NOTIONAL_USD} USDC).`);
   }

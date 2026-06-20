@@ -125,26 +125,33 @@ describe("deriveAutoGrid (JAV-101)", () => {
 // (JAV-101, Codex MEDIO) pickInitialPlacementPrice: SOLO auto-grids con ancla válida usan el precio de
 // creación; manual/legacy/corrupto refrescan en vivo (null). Garantiza prometido==colocado sin reabrir #103.
 describe("pickInitialPlacementPrice (JAV-101)", () => {
-  it("auto-grid con currentPrice > minPrice → ancla a currentPrice", () => {
-    expect(pickInitialPlacementPrice({ autoDerived: true, currentPrice: 64000, minPrice: 45000 })).toBe(64000);
+  const NOW = 1_700_000_000_000;
+  const fresh = NOW - 30_000;            // creado hace 30 s → dentro de la ventana de frescura
+  it("auto-grid fresco con currentPrice > minPrice → ancla a currentPrice", () => {
+    expect(pickInitialPlacementPrice({ autoDerived: true, currentPrice: 64000, minPrice: 45000, _creationTime: fresh }, NOW)).toBe(64000);
   });
   it("auto-grid con ancla corrupta (currentPrice ≤ minPrice, p.ej. ~0) → null (refresca en vivo)", () => {
-    expect(pickInitialPlacementPrice({ autoDerived: true, currentPrice: 0.000069, minPrice: 45000 })).toBeNull();
-    expect(pickInitialPlacementPrice({ autoDerived: true, currentPrice: 45000, minPrice: 45000 })).toBeNull();
+    expect(pickInitialPlacementPrice({ autoDerived: true, currentPrice: 0.000069, minPrice: 45000, _creationTime: fresh }, NOW)).toBeNull();
+    expect(pickInitialPlacementPrice({ autoDerived: true, currentPrice: 45000, minPrice: 45000, _creationTime: fresh }, NOW)).toBeNull();
   });
   it("manual (autoDerived false) o legacy (undefined) → null (refresca en vivo, preserva #103)", () => {
-    expect(pickInitialPlacementPrice({ autoDerived: false, currentPrice: 64000, minPrice: 45000 })).toBeNull();
-    expect(pickInitialPlacementPrice({ currentPrice: 64000, minPrice: 45000 })).toBeNull();
+    expect(pickInitialPlacementPrice({ autoDerived: false, currentPrice: 64000, minPrice: 45000, _creationTime: fresh }, NOW)).toBeNull();
+    expect(pickInitialPlacementPrice({ currentPrice: 64000, minPrice: 45000, _creationTime: fresh }, NOW)).toBeNull();
   });
   it("auto sin currentPrice → null", () => {
-    expect(pickInitialPlacementPrice({ autoDerived: true, minPrice: 45000 })).toBeNull();
+    expect(pickInitialPlacementPrice({ autoDerived: true, minPrice: 45000, _creationTime: fresh }, NOW)).toBeNull();
+  });
+  it("(CodeRabbit) ancla VENCIDA (creación hace >5 min) o sin timestamp → null (refresca en vivo)", () => {
+    const stale = NOW - 6 * 60 * 1000;   // creado hace 6 min → fuera de la ventana
+    expect(pickInitialPlacementPrice({ autoDerived: true, currentPrice: 64000, minPrice: 45000, _creationTime: stale }, NOW)).toBeNull();
+    expect(pickInitialPlacementPrice({ autoDerived: true, currentPrice: 64000, minPrice: 45000 }, NOW)).toBeNull();
   });
 
   it("CONTRATO ancla: auto-grid derivado a precio A coloca gridCount en A; a un precio B drifteado puede diferir", () => {
     const p = { currentPrice: 64000, gridProfitPercent: 1, szDecimals: 5, feeRate: 0.0004, minPrice: 45000, investmentAmount: 1200 };
     const d = deriveAutoGrid(p);
     // En el ANCLA (A=64000) el motor coloca EXACTAMENTE gridCount (lo que pickInitialPlacementPrice devuelve).
-    const anchor = pickInitialPlacementPrice({ autoDerived: true, currentPrice: 64000, minPrice: 45000 })!;
+    const anchor = pickInitialPlacementPrice({ autoDerived: true, currentPrice: 64000, minPrice: 45000, _creationTime: fresh }, NOW)!;
     expect(anchor).toBe(64000);
     const atA = calculateGridLevels({ currentPrice: anchor, minPrice: p.minPrice, gridProfitPercent: p.gridProfitPercent, orderSize: d.orderSize, gridCount: d.gridCount, szDecimals: p.szDecimals, feeRate: p.feeRate });
     expect(atA.levels.length).toBe(d.gridCount);

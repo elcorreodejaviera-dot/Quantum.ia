@@ -33,7 +33,13 @@ export const createSpotGridBot = action({
     assertExpectedNetwork(a.expectedNetwork);                  // red del backend = fuente de verdad
     if (!a.confirm) throw new Error("Crear Spot Grid requiere confirmación LIVE explícita.");
     const network = hlNetwork();
-    const auto = a.auto !== false && a.gridCount === undefined;   // default AUTO salvo manual explícito
+    // (CodeRabbit Major) No dejar que gridCount/orderSize silenciosamente conviertan en MANUAL un payload que
+    // pidió `auto: true`: esa combinación es ambigua → se rechaza. AUTO es el default; sólo es MANUAL si se
+    // envía `auto: false` o se aportan niveles/tamaño explícitos (sin `auto: true`).
+    if (a.auto === true && (a.gridCount !== undefined || a.orderSize !== undefined)) {
+      throw new Error("Modo AUTO no admite gridCount ni orderSize explícitos; usa auto:false para el modo manual.");
+    }
+    const auto = a.auto !== false && a.gridCount === undefined && a.orderSize === undefined;
 
     // (Codex MEDIO #2) PREFLIGHT ANTES de tocar HL: permisos (canManageBots + canTradeLive), switches
     // live-only, gate mainnet, ownership, exclusividad de cuenta e inputs base. Si falla, NO se hace ninguna

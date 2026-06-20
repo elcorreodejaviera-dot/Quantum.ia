@@ -64,7 +64,7 @@ export function auditPool(b, live, acctCoinCount, currentHlNetwork) {
     if (ambiguous) {
       unknown('hedge_vs_exposure', 'Cobertura HL agregada por cuenta+activo: no atribuible a un bot concreto.');
     } else if (!live?.present || live.liquidityUsd == null || live.coverageUsd == null || !(live.liquidityUsd > 0)) {
-      unknown('hedge_vs_exposure', 'Sin datos en vivo suficientes para comparar hedge vs exposición.');
+      unknown('hedge_vs_exposure', 'Sin datos suficientes para comparar hedge vs exposición.');
     } else {
       const ratio = live.coverageUsd / live.liquidityUsd;
       if (ratio < 1 - HEDGE_BAND) warn('hedge_vs_exposure', `Hedge menor que la exposición (${Math.round(live.coverageUsd)} vs ${Math.round(live.liquidityUsd)} USD).`);

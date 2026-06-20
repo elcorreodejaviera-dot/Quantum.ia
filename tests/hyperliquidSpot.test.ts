@@ -123,6 +123,15 @@ describe("redondeo spot", () => {
     expect(floorSpotSize(1.999999, 2)).toBe(1.99);
   });
 
+  it("(Codex MEDIO-pr1-r3) INVARIANTE: floorSpotSize(size) <= size SIEMPRE (nunca redondea al alza)", () => {
+    // Casos límite que el redondeo de ruido rompía: valores apenas por DEBAJO de un tick → floor, no ceil.
+    expect(floorSpotSize(1.999999999, 2)).toBe(1.99);
+    expect(floorSpotSize(0.000009999999999, 5)).toBe(0);
+    for (const [size, dec] of [[1.999999999, 2], [0.000009999999999, 5], [0.123456, 4], [65432.1, 5], [0.07, 2]] as const) {
+      expect(floorSpotSize(size, dec)).toBeLessThanOrEqual(size);
+    }
+  });
+
   it("roundSpotPrice rechaza price ≤ 0", () => {
     expect(() => roundSpotPrice(0, 5, "floor")).toThrow();
   });

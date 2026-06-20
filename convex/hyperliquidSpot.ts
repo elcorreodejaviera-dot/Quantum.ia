@@ -187,15 +187,20 @@ export function formatSpotPrice(price: number, szDecimals: number, dir: "ceil" |
   return String(roundSpotPrice(price, szDecimals, dir));
 }
 
-/** Trunca un tamaño hacia abajo a szDecimals. */
+/**
+ * Trunca un tamaño hacia abajo a szDecimals. INVARIANTE DURA (money-path): el resultado NUNCA supera
+ * `size` — en PR3 el size puede venir del balance/free o de un presupuesto exacto, así que jamás debe
+ * generarse una orden mayor que lo disponible/autorizado. Por eso es floor estricto y NO se redondea
+ * al alza para "recuperar" un tick por ruido binario (Codex MEDIO-pr1-r3: ese redondeo violaba la
+ * invariante). La rara sub-truncación por ruido es conservadora y la valida igualmente
+ * `roundAndValidateSpotOrder` (min-notional) aguas abajo.
+ */
 export function floorSpotSize(size: number, szDecimals: number): number {
+  if (!(size > 0)) return 0;
   const f = 10 ** szDecimals;
-  // (Codex BAJO-pr1) Corrige el ruido binario ANTES de truncar: sin esto, un valor que debería ser
-  // p.ej. 200 puede representarse como 199.99999999 y `Math.floor` perdería un TICK entero (causando
-  // fallos evitables de min-notional). Redondeamos `size*f` a una precisión muy por debajo de un tick
-  // (1e-6 ≪ 1) para absorber sólo el ruido flotante, y luego truncamos.
-  const scaled = Math.round(size * f * 1e6) / 1e6;
-  return Math.floor(scaled) / f;
+  const r = Math.floor(size * f) / f;
+  // Defensa ante ULP: si la división deja `r` un epsilon por ENCIMA de `size`, baja un tick.
+  return r > size ? Math.max(0, Math.floor(size * f) - 1) / f : r;
 }
 
 /**

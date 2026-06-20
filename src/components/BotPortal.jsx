@@ -2,6 +2,7 @@ import React from 'react'
 import { Link } from 'react-router-dom'
 import { useUser, useClerk } from '@clerk/clerk-react'
 import BugReportButton from './BugReportButton'
+import HLAccountSelect from './HLAccountSelect'
 import { useConvexAuth, useQuery, useMutation, useAction, usePaginatedQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState, useWalletBalances, useHLAccountBalance, useHLAccountsBalances, useHLAgentExpiry, useMetaMaskSigner, executeHLTestnetOrder } from '../hooks/useHyperliquid'
@@ -2350,29 +2351,7 @@ function BotActionButton({ label, bot, busy, onConfig, onToggle, onDelete }) {
 }
 
 // Selector de cuenta HL (compartido por ambos modales). Muestra el balance de la cuenta elegida.
-function HLAccountSelect({ accounts, value, onChange }) {
-  const selected = accounts.find((a) => a.id === value) ?? null;
-  const { account: bal } = useHLAccountBalance(selected?.tradingAccountAddress ?? null);
-  return (
-    <div className="config-field">
-      <span>Wallet</span>
-      <select value={value ?? ''} onChange={(e) => onChange(e.target.value || null)}>
-        <option value="">Selecciona una cuenta…</option>
-        {accounts.map((a) => (
-          <option key={a.id} value={a.id}>
-            {(a.label ?? 'Cuenta')} ({a.tradingAccountAddress.slice(0, 6)}…{a.tradingAccountAddress.slice(-4)})
-          </option>
-        ))}
-      </select>
-      {selected && (
-        <span style={{ fontSize: 12, color: 'var(--muted)' }}
-          title="Withdrawable API (perp) y USDC spot libre. La disponibilidad real se valida al operar.">
-          {bal ? `Withdrawable ${formatUsd(bal.withdrawable)} · Spot ${formatUsd(bal.spotUsdcFree)}` : '…'}
-        </span>
-      )}
-    </div>
-  );
-}
+// (JAV-93) HLAccountSelect extraído a ./HLAccountSelect.jsx (reuso BotPortal + SpotGridView).
 
 // Toggle de modo real (solo visible con canTradeLive). Banner de beta cuando está activo.
 function RealModeToggle({ realMode, setRealMode, canTradeLive }) {
@@ -3972,6 +3951,7 @@ function Dashboard({ user, onLogout, userId }) {
             {theme === 'dark' ? 'Modo blanco' : 'Modo oscuro'}
           </button>
           {userLoaded && !isAdmin && <span className="pill faint">Solo lectura</span>}
+          <Link to="/spot-grid" className="ghost-btn" style={{ textDecoration: 'none' }}>Spot Grid</Link>
           {isAdmin && <Link to="/admin" className="ghost-btn" style={{ textDecoration: 'none' }}>Admin</Link>}
           <span className="pill">{user.name}</span>
           <button className="ghost-btn" onClick={onLogout}>Salir</button>

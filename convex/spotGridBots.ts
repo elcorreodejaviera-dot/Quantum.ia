@@ -171,6 +171,74 @@ export const getSpotGridBot = query({
   },
 });
 
+// (JAV-93) Detalle + stats de un grid para la UI. READ-ONLY, scoped por ownership. Solo escalares:
+// nunca expone la credencial ni la clave. Topes explícitos para que el coste de lectura sea acotado;
+// si se topa el cap se marca `truncated` para que la UI NO muestre un total parcial como exacto.
+export const SPOT_GRID_DETAIL_CYCLE_CAP = 500;   // tope de ciclos sumados/contados por lectura (exportado: tests de borde)
+const SPOT_GRID_DETAIL_OPEN_CAP = 50;     // tope de órdenes abiertas devueltas
+const SPOT_GRID_DETAIL_RECENT_CYCLES = 20;// ciclos recientes devueltos al detalle
+
+export const getSpotGridDetail = query({
+  args: { botId: v.id("spot_grid_bots") },
+  handler: async (ctx, { botId }) => {
+    const user = await getUserOrNull(ctx);
+    if (!user) return null;
+    const bot = await ctx.db.get(botId);
+    if (!bot || bot.userId !== user._id) return null;
+
+    // Ciclos: leemos cap+1 para distinguir "exactamente cap" de "cap+" (Codex BAJO#2); solo se cuentan/
+    // suman hasta `cap` y se marca `truncated` únicamente cuando hay MÁS que el cap.
+    const fetched = await ctx.db
+      .query("spot_grid_cycles")
+      .withIndex("by_bot_cycle", (q) => q.eq("botId", botId))
+      .order("desc")
+      .take(SPOT_GRID_DETAIL_CYCLE_CAP + 1);
+    const truncated = fetched.length > SPOT_GRID_DETAIL_CYCLE_CAP;
+    const capped = truncated ? fetched.slice(0, SPOT_GRID_DETAIL_CYCLE_CAP) : fetched;
+    const cyclesCount = capped.length;
+    const totalNetProfit = capped.reduce((s, c) => s + (c.netProfit ?? 0), 0);
+    const recentCycles = capped.slice(0, SPOT_GRID_DETAIL_RECENT_CYCLES).map((c) => ({
+      cycleId: c.cycleId, sellOrderId: c.sellOrderId ?? null, buyPrice: c.buyPrice, sellPrice: c.sellPrice ?? null,
+      quantity: c.quantity, netProfit: c.netProfit ?? null, closedAt: c.closedAt ?? null,
+    }));
+
+    // Órdenes vivas (submitting/open/partially_filled). Acumulamos hasta cap+1 para SABER si hay más que
+    // el tope (openOrdersTruncated) en vez de adivinar por "== cap"; luego devolvemos solo hasta cap.
+    const liveStatuses = ["submitting", "open", "partially_filled"] as const;
+    const collected: Array<any> = [];
+    for (const st of liveStatuses) {
+      if (collected.length > SPOT_GRID_DETAIL_OPEN_CAP) break;
+      const rows = await ctx.db
+        .query("spot_grid_orders")
+        .withIndex("by_bot_status", (q) => q.eq("botId", botId).eq("status", st))
+        .take(SPOT_GRID_DETAIL_OPEN_CAP + 1 - collected.length);
+      for (const o of rows) {
+        collected.push({
+          side: o.side, price: o.price, quantity: o.quantity, status: o.status,
+          gridLevel: o.gridLevel, filledQty: o.filledQty ?? null, cycleId: o.cycleId,
+        });
+      }
+    }
+    const openOrdersTruncated = collected.length > SPOT_GRID_DETAIL_OPEN_CAP;
+    const openOrders = openOrdersTruncated ? collected.slice(0, SPOT_GRID_DETAIL_OPEN_CAP) : collected;
+
+    return {
+      bot: {
+        _id: bot._id, symbol: bot.symbol, baseAsset: bot.baseAsset, quoteAsset: bot.quoteAsset,
+        minPrice: bot.minPrice, gridProfitPercent: bot.gridProfitPercent,
+        investmentAmount: bot.investmentAmount, orderSize: bot.orderSize, gridCount: bot.gridCount,
+        status: bot.status, network: bot.network, currentPrice: bot.currentPrice ?? null,
+        createdAt: bot.createdAt, lastReconciledAt: bot.lastReconciledAt ?? null,
+        errorMessage: bot.errorMessage ?? null,   // (Codex BAJO#1) sin hlAccountId: la UI no lo usa
+      },
+      stats: { cyclesCount, totalNetProfit, truncated, cycleCap: SPOT_GRID_DETAIL_CYCLE_CAP },
+      openOrders,
+      openOrdersTruncated,
+      recentCycles,
+    };
+  },
+});
+
 // --- Internal query para el motor (PR3) ------------------------------------------------------------
 export const getSpotGridBotInternal = internalQuery({
   args: { botId: v.id("spot_grid_bots") },

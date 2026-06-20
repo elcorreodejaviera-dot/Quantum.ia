@@ -346,11 +346,16 @@ export async function placeSpotLimit(exchange: ExchangeClient, p: SpotLimitParam
   // placeSpotLimit acepta `SpotLimitParams` crudos (priceStr/sizeStr), así que un caller (PR3) podría
   // saltarse `roundAndValidateSpotOrder` y mandar < $10 → HL rechazaría en el reconcile real. Revalidar
   // aquí garantiza que lo enviado SIEMPRE cumple el mínimo, sin depender de la disciplina del caller.
-  // `!(notional >= MIN)` cubre además priceStr/sizeStr no numéricos (NaN).
-  const notional = Number(p.priceStr) * Number(p.sizeStr);
-  if (!(notional >= MIN_SPOT_NOTIONAL_USD)) {
-    const shown = Number.isFinite(notional) ? notional.toFixed(2) : `${p.priceStr}×${p.sizeStr}`;
-    throw new Error(`placeSpotLimit: nocional ${shown} < mínimo ${MIN_SPOT_NOTIONAL_USD} USD (revalidación defensiva).`);
+  // (CodeRabbit #93) Primero price/size finitos y > 0: si no, dos negativos darían notional positivo y
+  // pasarían un `notional >= MIN` engañoso. Rechaza combinaciones inválidas ANTES de calcular el nocional.
+  const price = Number(p.priceStr);
+  const size = Number(p.sizeStr);
+  if (!(Number.isFinite(price) && Number.isFinite(size) && price > 0 && size > 0)) {
+    throw new Error(`placeSpotLimit: price/size inválidos (${p.priceStr}, ${p.sizeStr}).`);
+  }
+  const notional = price * size;
+  if (notional < MIN_SPOT_NOTIONAL_USD) {
+    throw new Error(`placeSpotLimit: nocional ${notional.toFixed(2)} < mínimo ${MIN_SPOT_NOTIONAL_USD} USD (revalidación defensiva).`);
   }
   const { signal, expiresAfter, clear } = withSpotTimeout(opts);
   try {

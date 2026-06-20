@@ -232,6 +232,18 @@ describe("placeSpotLimit (Codex MEDIO-pr1: revalida min-notional)", () => {
     ).rejects.toThrow(/mínimo/);
     expect(called).toBe(false);
   });
+
+  it("(CodeRabbit #93) rechaza price/size inválidos (negativos) aunque el notional salga positivo", async () => {
+    let called = false;
+    const exchange: any = { order: async () => { called = true; return {}; } };
+    await expect(
+      placeSpotLimit(exchange, {
+        assetId: 10107, isBuy: true, priceStr: "-100", sizeStr: "-1", // (-100)*(-1)=100 ≥ mín, pero inválido
+        cloid: "0x00112233445566778899aabbccddeeff",
+      }),
+    ).rejects.toThrow(/inválidos/);
+    expect(called).toBe(false);
+  });
 });
 
 describe("buildSpotLimitOrder", () => {

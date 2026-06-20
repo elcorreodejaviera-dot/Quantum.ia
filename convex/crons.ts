@@ -45,6 +45,13 @@ crons.interval(
   internal.cronHealth.processRearmsWithHealth,
 );
 
+// (JAV-92) Motor Spot Grid: reconcilia/coloca/mantiene órdenes LIMIT reales (money-path) bajo lease.
+crons.interval(
+  "reconcile spot grid",
+  { minutes: 1 },
+  internal.cronHealth.reconcileSpotGridWithHealth,
+);
+
 // (OBS-3b) Poda de engine_events una vez al día (retención 30d, por lotes). Best-effort.
 crons.interval(
   "prune engine events",

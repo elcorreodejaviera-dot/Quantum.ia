@@ -2,8 +2,9 @@ import { v } from "convex/values";
 import { mutation, query, internalMutation, internalQuery } from "./_generated/server";
 import type { QueryCtx, MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
-import { requireAdmin, requireBotManager, requireTradeLive, getUserOrNull, writeAdminLog } from "./helpers";
+import { requireAdmin, requireBotManager, requireTradeLive, getUserOrNull, writeAdminLog, hasPermission } from "./helpers";
 import { elog } from "./log";
+import { toHlCloid, spotGridCloidInput } from "./cloids";   // (JAV-92) cloid determinista (helper hoja, no-node)
 
 // (QSG / JAV-91) Spot Grid Live — persistencia + comandos backend. NON-node (convex-testable). NO envía
 // órdenes a HL (eso es el motor de PR3). La resolución de activo/precio/balance vía RPC vive en la
@@ -173,4 +174,252 @@ export const getSpotGridBot = query({
 export const getSpotGridBotInternal = internalQuery({
   args: { botId: v.id("spot_grid_bots") },
   handler: async (ctx, { botId }) => ctx.db.get(botId),
+});
+
+// =================================================================================================
+// (JAV-92) Motor Live — mutations/queries internas. NON-node (convex-testable). Bajo lease/CAS (fencing
+// por token, igual que trigger_arms). El motor (spotGridEngine.ts, "use node") las invoca por runMutation.
+// =================================================================================================
+
+const SPOT_GRID_LEASE_MS = 90_000;   // ventana del lease del reconcile (cubre la ronda de RPC del bot)
+
+function leaseOk(bot: any, token: string): boolean {
+  return !!bot && bot.reconcileLeaseToken === token && (bot.reconcileLeaseUntil ?? 0) > Date.now();
+}
+
+// Claima el lease de reconcile si está libre/vencido y el bot está activo (running|paused). NO stopped.
+export const claimSpotGridReconcile = internalMutation({
+  args: { botId: v.id("spot_grid_bots") },
+  handler: async (ctx, { botId }) => {
+    const bot = await ctx.db.get(botId);
+    if (!bot) return { ok: false as const };
+    if (bot.status !== "running" && bot.status !== "paused") return { ok: false as const };
+    if (bot.reconcileLeaseToken && (bot.reconcileLeaseUntil ?? 0) > Date.now()) return { ok: false as const };
+    const token = crypto.randomUUID();
+    await ctx.db.patch(botId, { reconcileLeaseToken: token, reconcileLeaseUntil: Date.now() + SPOT_GRID_LEASE_MS, updatedAt: Date.now() });
+    return { ok: true as const, token };
+  },
+});
+
+export const renewSpotGridReconcile = internalMutation({
+  args: { botId: v.id("spot_grid_bots"), token: v.string() },
+  handler: async (ctx, { botId, token }) => {
+    const bot = await ctx.db.get(botId);
+    if (!leaseOk(bot, token)) return { ok: false as const };
+    await ctx.db.patch(botId, { reconcileLeaseUntil: Date.now() + SPOT_GRID_LEASE_MS, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
+export const releaseSpotGridReconcile = internalMutation({
+  args: { botId: v.id("spot_grid_bots"), token: v.string() },
+  handler: async (ctx, { botId, token }) => {
+    const bot = await ctx.db.get(botId);
+    if (!leaseOk(bot, token)) return { ok: false as const };
+    await ctx.db.patch(botId, { reconcileLeaseToken: undefined, reconcileLeaseUntil: 0, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
+// Registra una orden como `submitting` (intent en DB ANTES de enviar a HL, ALTO#1). Lookup-before-insert
+// por `by_cloid` (idempotente: si ya existe, no duplica). Computa el cloid determinista (cloids.ts, no-node).
+export const recordSpotGridOrder = internalMutation({
+  args: {
+    botId: v.id("spot_grid_bots"), token: v.string(),
+    side: v.union(v.literal("buy"), v.literal("sell")),
+    gridLevel: v.number(), generation: v.number(), cycleId: v.number(),
+    assetId: v.number(), price: v.number(), quantity: v.number(), quoteSize: v.number(),
+    pairedOrderId: v.optional(v.id("spot_grid_orders")),
+  },
+  handler: async (ctx, a) => {
+    const bot = await ctx.db.get(a.botId);
+    if (!leaseOk(bot, a.token)) return { ok: false as const };
+    const cloid = await toHlCloid(spotGridCloidInput(String(a.botId), a.generation, a.cycleId, a.gridLevel, a.side));
+    const existing = await ctx.db.query("spot_grid_orders").withIndex("by_cloid", (q) => q.eq("cloid", cloid)).first();
+    if (existing) return { ok: true as const, orderId: existing._id, cloid, existed: true as const };
+    const now = Date.now();
+    const orderId = await ctx.db.insert("spot_grid_orders", {
+      botId: a.botId, userId: bot!.userId, cloid, assetId: a.assetId, side: a.side,
+      price: a.price, quantity: a.quantity, quoteSize: a.quoteSize, gridLevel: a.gridLevel,
+      generation: a.generation, cycleId: a.cycleId, status: "submitting",
+      remainingQty: a.quantity, attempt: 1, submittedAt: now,
+      ...(a.pairedOrderId ? { pairedOrderId: a.pairedOrderId } : {}),
+      createdAt: now,
+    });
+    return { ok: true as const, orderId, cloid, existed: false as const };
+  },
+});
+
+// Actualiza el estado observado de una orden (submitting→open/failed, fills, cancel). Por cloid, del bot.
+export const markSpotGridOrder = internalMutation({
+  args: {
+    botId: v.id("spot_grid_bots"), token: v.string(), cloid: v.string(),
+    status: v.optional(v.union(
+      v.literal("submitting"), v.literal("open"), v.literal("partially_filled"), v.literal("filled"),
+      v.literal("cancelled"), v.literal("failed"))),
+    oid: v.optional(v.string()), filledQty: v.optional(v.number()), remainingQty: v.optional(v.number()),
+    avgFillPx: v.optional(v.number()), pendingSellQty: v.optional(v.number()),
+    incAttempt: v.optional(v.boolean()), errorMessage: v.optional(v.string()),
+  },
+  handler: async (ctx, a) => {
+    const bot = await ctx.db.get(a.botId);
+    if (!leaseOk(bot, a.token)) return { ok: false as const };
+    const o = await ctx.db.query("spot_grid_orders").withIndex("by_cloid", (q) => q.eq("cloid", a.cloid)).first();
+    if (!o || o.botId !== a.botId) return { ok: false as const };
+    const now = Date.now();
+    const patch: Record<string, unknown> = { };
+    for (const k of ["oid", "filledQty", "remainingQty", "avgFillPx", "pendingSellQty", "errorMessage"] as const) {
+      if (a[k] !== undefined) patch[k] = a[k];
+    }
+    if (a.status !== undefined) {
+      patch.status = a.status;
+      if (a.status === "filled") patch.filledAt = now;
+      if (a.status === "cancelled" || a.status === "failed") patch.cancelledAt = now;
+      if (a.status === "submitting") patch.submittedAt = now;
+    }
+    if (a.incAttempt) patch.attempt = (o.attempt ?? 1) + 1;
+    await ctx.db.patch(o._id, patch);
+    return { ok: true as const };
+  },
+});
+
+export const setSpotGridStatus = internalMutation({
+  args: {
+    botId: v.id("spot_grid_bots"), token: v.string(),
+    status: v.union(v.literal("running"), v.literal("paused"), v.literal("stopped"), v.literal("error")),
+    errorMessage: v.optional(v.string()), clearLease: v.optional(v.boolean()),
+  },
+  handler: async (ctx, a) => {
+    const bot = await ctx.db.get(a.botId);
+    if (!leaseOk(bot, a.token)) return { ok: false as const };
+    const patch: Record<string, unknown> = { status: a.status, updatedAt: Date.now() };
+    if (a.errorMessage !== undefined) patch.errorMessage = a.errorMessage;
+    if (a.clearLease || a.status === "stopped") { patch.reconcileLeaseToken = undefined; patch.reconcileLeaseUntil = 0; }
+    await ctx.db.patch(a.botId, patch);
+    return { ok: true as const };
+  },
+});
+
+export const setSpotGridFillCursor = internalMutation({
+  args: { botId: v.id("spot_grid_bots"), token: v.string(), fillCursor: v.number() },
+  handler: async (ctx, { botId, token, fillCursor }) => {
+    const bot = await ctx.db.get(botId);
+    if (!leaseOk(bot, token)) return { ok: false as const };
+    await ctx.db.patch(botId, { fillCursor, lastReconciledAt: Date.now(), updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
+// (Codex #4-r2 + ALTO#3) Cierra un ciclo (SELL llenada) y repone la BUY del nivel, ATÓMICO e IDEMPOTENTE.
+// Idempotencia por orden: si la SELL ya tiene `cycleSettled`, no-op (no cierra dos ciclos ni crea dos BUYs).
+export const closeCycleAndRepost = internalMutation({
+  args: { botId: v.id("spot_grid_bots"), token: v.string(), sellCloid: v.string(), feesUsd: v.number() },
+  handler: async (ctx, { botId, token, sellCloid, feesUsd }) => {
+    const bot = await ctx.db.get(botId);
+    if (!leaseOk(bot, token)) return { ok: false as const };
+    const sell = await ctx.db.query("spot_grid_orders").withIndex("by_cloid", (q) => q.eq("cloid", sellCloid)).first();
+    if (!sell || sell.botId !== botId || sell.side !== "sell") return { ok: false as const };
+    if (sell.cycleSettled === true) return { ok: true as const, alreadySettled: true as const };  // idempotencia
+    const buy = sell.pairedOrderId ? await ctx.db.get(sell.pairedOrderId) : null;
+    const buyPrice = buy?.price ?? sell.price;                  // fallback defensivo
+    const qty = sell.filledQty ?? sell.quantity;
+    const sellPrice = sell.avgFillPx ?? sell.price;
+    const gross = (sellPrice - buyPrice) * qty;
+    const net = gross - feesUsd;
+    const now = Date.now();
+    // (a) marcar la SELL consumida + (b) incrementar cycleSeq + (c) insertar ciclo + (e) reponer BUY.
+    await ctx.db.patch(sell._id, { cycleSettled: true, status: "filled", filledAt: sell.filledAt ?? now });
+    const newCycle = (bot!.cycleSeq ?? 0) + 1;
+    await ctx.db.patch(botId, { cycleSeq: newCycle, updatedAt: now });
+    await ctx.db.insert("spot_grid_cycles", {
+      botId, userId: bot!.userId, cycleId: sell.cycleId,
+      buyOrderId: (buy?._id ?? sell._id) as Id<"spot_grid_orders">,
+      sellOrderId: sell._id, buyPrice, sellPrice, quantity: qty,
+      grossProfit: gross, fees: feesUsd, netProfit: net, closedAt: now,
+    });
+    // BUY de reposición al MISMO nivel/precio, nuevo cycleId → cloid nuevo. Estado submitting (el motor la envía).
+    const repostQuantity = buy?.quantity ?? qty;
+    const cloid = await toHlCloid(spotGridCloidInput(String(botId), bot!.generation, newCycle, sell.gridLevel, "buy"));
+    const existing = await ctx.db.query("spot_grid_orders").withIndex("by_cloid", (q) => q.eq("cloid", cloid)).first();
+    let repostOrderId = existing?._id;
+    if (!existing) {
+      repostOrderId = await ctx.db.insert("spot_grid_orders", {
+        botId, userId: bot!.userId, cloid, assetId: sell.assetId, side: "buy",
+        price: buyPrice, quantity: repostQuantity, quoteSize: buyPrice * repostQuantity,
+        gridLevel: sell.gridLevel, generation: bot!.generation, cycleId: newCycle, status: "submitting",
+        remainingQty: repostQuantity, attempt: 1, submittedAt: now, createdAt: now,
+      });
+    }
+    elog("spotgrid", "cycle_closed", { botId: String(botId), cycleId: sell.cycleId, net: Math.round(net * 100) / 100 });
+    return {
+      ok: true as const, repostOrderId, repostCloid: cloid, repostPrice: buyPrice,
+      repostQuantity, repostAssetId: sell.assetId, newCycle, netProfit: net,
+    };
+  },
+});
+
+// Internal queries para el motor.
+export const listActiveSpotGridBotsInternal = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const running = await ctx.db.query("spot_grid_bots").withIndex("by_status_updated", (q) => q.eq("status", "running")).collect();
+    const paused = await ctx.db.query("spot_grid_bots").withIndex("by_status_updated", (q) => q.eq("status", "paused")).collect();
+    return [...running, ...paused];   // reconcilia activos (paused registra fills pero no repone)
+  },
+});
+
+export const getSpotGridOrdersInternal = internalQuery({
+  args: { botId: v.id("spot_grid_bots") },
+  handler: async (ctx, { botId }) => {
+    // Solo las NO terminales (open/submitting/partially_filled) + las filled sin consumir → trabajo del reconcile.
+    const all = await ctx.db.query("spot_grid_orders").withIndex("by_bot_status", (q) => q.eq("botId", botId)).collect();
+    return all.filter((o) => o.status === "submitting" || o.status === "open" || o.status === "partially_filled"
+      || (o.status === "filled" && o.side === "sell" && o.cycleSettled !== true)
+      || (o.status === "filled" && o.side === "buy"));
+  },
+});
+
+// (Codex ALTO#2) Gate live REVALIDADO en cada reconcile: tradingEnabled + !simulationMode + el dueño SIGUE
+// con canTradeLive + (mainnet) mainnetSpotGridApproved. Devuelve {ok, reason} y la política sugerida.
+export const assertSpotGridLiveAdmissibleInternal = internalQuery({
+  args: { botId: v.id("spot_grid_bots") },
+  handler: async (ctx, { botId }) => {
+    const bot = await ctx.db.get(botId);
+    if (!bot) return { ok: false as const, reason: "bot_not_found", policy: "error" as const };
+    if (!(await getConfigBool(ctx, "tradingEnabled"))) return { ok: false as const, reason: "trading_disabled", policy: "paused" as const };
+    if (await getConfigBool(ctx, "simulationMode")) return { ok: false as const, reason: "simulation_mode", policy: "paused" as const };
+    const user = await ctx.db.get(bot.userId);
+    if (!user) return { ok: false as const, reason: "owner_not_found", policy: "error" as const };
+    if (!(await hasPermission(ctx, user, "canTradeLive"))) return { ok: false as const, reason: "no_can_trade_live", policy: "paused" as const };
+    if (bot.network === "mainnet") {
+      const gate = await ctx.db.query("system_config").withIndex("by_key", (q) => q.eq("key", MAINNET_GATE_KEY)).first();
+      if ((gate?.value as any)?.enabled !== true) return { ok: false as const, reason: "mainnet_not_approved", policy: "paused" as const };
+    }
+    return { ok: true as const, reason: "ok", policy: "running" as const };
+  },
+});
+
+// (JAV-92) Guard de `stopSpotGridBot` (la action no puede usar requireBotManager directo: no tiene db).
+// La auth se propaga al runQuery desde la action. Exige canManageBots + canTradeLive + ownership del bot.
+export const assertCanStopSpotGridInternal = internalQuery({
+  args: { botId: v.id("spot_grid_bots") },
+  handler: async (ctx, { botId }) => {
+    const user = await requireBotManager(ctx);
+    await requireTradeLive(ctx);
+    const bot = await ctx.db.get(botId);
+    if (!bot || bot.userId !== user._id) throw new Error("Bot no encontrado o ajeno.");
+    return { ok: true as const };
+  },
+});
+
+// Credencial cifrada del bot (solo para descifrar en la action node; nunca se expone a otros contextos).
+export const getSpotGridCredentialInternal = internalQuery({
+  args: { botId: v.id("spot_grid_bots") },
+  handler: async (ctx, { botId }) => {
+    const bot = await ctx.db.get(botId);
+    if (!bot) return null;
+    const cred = await ctx.db.get(bot.hlAccountId);
+    if (!cred) return null;
+    return { credential: cred, network: bot.network, userId: bot.userId };
+  },
 });

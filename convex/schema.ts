@@ -518,11 +518,17 @@ export default defineSchema({
     status: v.union(v.literal("running"), v.literal("paused"), v.literal("stopped"), v.literal("error")),
     network: v.union(v.literal("mainnet"), v.literal("testnet")),
     generation: v.number(),                    // entero, +1 por arranque (idempotencia de cloids)
+    // (JAV-92) Secuencia monótona de ciclos por bot: cada cierre de ciclo (SELL llenada) la incrementa y
+    // la BUY de reposición usa el nuevo valor en su cloid → cloid siempre único. Ausente = 0 (legacy-safe).
+    cycleSeq: v.optional(v.number()),
     fillCursor: v.optional(v.number()),        // cursor de fills procesados (reconcile PR3)
     errorMessage: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
     lastReconciledAt: v.optional(v.number()),
+    // (JAV-92) lease/fencing del reconcile (igual que trigger_arms): un solo worker por bot a la vez.
+    reconcileLeaseToken: v.optional(v.string()),
+    reconcileLeaseUntil: v.optional(v.number()),
   })
     .index("by_user", ["userId"])
     .index("by_status_updated", ["status", "updatedAt"])
@@ -542,8 +548,9 @@ export default defineSchema({
     gridLevel: v.number(),
     generation: v.number(),
     cycleId: v.number(),
+    // (JAV-92 ALTO#1) `submitting` = intent en DB ANTES de enviar a HL; nunca `open` sin confirmación HL.
     status: v.union(
-      v.literal("open"), v.literal("partially_filled"), v.literal("filled"),
+      v.literal("submitting"), v.literal("open"), v.literal("partially_filled"), v.literal("filled"),
       v.literal("cancelled"), v.literal("failed")),
     filledQty: v.optional(v.number()),
     remainingQty: v.optional(v.number()),
@@ -551,6 +558,8 @@ export default defineSchema({
     pendingSellQty: v.optional(v.number()),
     pairedOrderId: v.optional(v.id("spot_grid_orders")),
     attempt: v.optional(v.number()),
+    submittedAt: v.optional(v.number()),       // (JAV-92) instante del intent submitting → grace de retry
+    cycleSettled: v.optional(v.boolean()),     // (JAV-92 ALTO#3) SELL ya consumida por un cierre de ciclo
     errorMessage: v.optional(v.string()),
     createdAt: v.number(),
     filledAt: v.optional(v.number()),

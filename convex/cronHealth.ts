@@ -120,6 +120,13 @@ export const processRearmsWithHealth = internalAction({
     () => ctx.runAction(internal.triggerEngine.processRearms, {})),
 });
 
+// (JAV-92) Reconcile del motor Spot Grid (money-path): coloca/mantiene órdenes reales bajo lease.
+export const reconcileSpotGridWithHealth = internalAction({
+  args: {},
+  handler: async (ctx) => withCronHealth(ctx, "reconcile spot grid",
+    () => ctx.runAction(internal.spotGridEngine.reconcileAllSpotGrids, {})),
+});
+
 // (OBS-3b) Poda diaria de engine_events (best-effort vía withCronHealth, no afecta money-path).
 export const pruneEngineEventsWithHealth = internalAction({
   args: {},

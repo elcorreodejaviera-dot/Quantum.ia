@@ -988,6 +988,31 @@ export const setArmOrderObserved = internalMutation({
   },
 });
 
+// (JAV-96) Marca como `canceled` las trigger_orders de un arm cuyos CLOIDs el motor ya CONFIRMÓ muertas
+// en HL (ensureOrdersDead === true). Por CLOID exacto (NO por rol): así nunca se toca una entry_lower
+// que sigue armada en `armed_lower_only`. Solo `open`/`pending` → `canceled` (jamás filled/triggered/
+// rejected/canceled, que son terminales reales). Bajo fencing por lease. Idempotente.
+// Razón: las entradas se ponen `open` al colocarse pero al cancelarse en el cierre nadie actualizaba la
+// fila → quedaban `open` rancio en arms terminales → falso positivo `orphan_orders` en la auditoría.
+export const markArmOrdersCanceled = internalMutation({
+  args: { armId: v.id("trigger_arms"), token: v.string(), cloids: v.array(v.string()) },
+  handler: async (ctx, { armId, token, cloids }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    const now = Date.now();
+    let n = 0;
+    for (const cloid of cloids) {
+      const order = await ctx.db.query("trigger_orders").withIndex("by_cloid", (q) => q.eq("cloid", cloid)).first();
+      if (!order || order.armId !== armId) continue;                 // solo órdenes de ESTE arm
+      if (order.observedStatus !== "open" && order.observedStatus !== "pending") continue;  // nunca terminales reales
+      await ctx.db.patch(order._id, { observedStatus: "canceled", updatedAt: now });
+      n++;
+    }
+    if (n > 0) elog("arm", "orders_canceled", { armId: String(armId), n });
+    return { ok: true as const, n };
+  },
+});
+
 // (JAV-61) Crea/rota el trigger_order del TP-final (role "tp_final", reduceOnly) para un intento:
 // cloid …|tp_final:<attempt>, observedStatus pending, submittedAt limpio. Bajo claim. Devuelve cloid.
 export const prepareTpFinalOrder = internalMutation({

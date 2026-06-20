@@ -49,6 +49,13 @@ describe("checks DB-only", () => {
     const f = auditPool(bot({ arms: [{ status: "closed", network: "testnet", orders: [{ role: "sl_upper", observedStatus: "open", triggerPx: 1 }] }] }), null, {}, null);
     expect(codes(f)).toContain("orphan_orders");
   });
+  it("(JAV-96) NO orphan_orders si el arm terminal tiene sus órdenes en canceled (no rancio open)", () => {
+    const f = auditPool(bot({ arms: [{ status: "closed", network: "testnet", orders: [
+      { role: "entry_lower", observedStatus: "canceled", triggerPx: 1 },
+      { role: "sl_upper", observedStatus: "filled", triggerPx: 1 },
+    ] }] }), null, {}, null);
+    expect(codes(f)).not.toContain("orphan_orders");
+  });
 });
 
 describe("checks con snapshot live", () => {

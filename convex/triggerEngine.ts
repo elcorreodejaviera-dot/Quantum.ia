@@ -568,6 +568,8 @@ export const reconcileArm = internalAction({
               if (!(await ensureOrdersDead(info, exchange, user, assetId, nonLowerCloids))) {
                 return { skipped: "armed_lower_only_cancel_live" };   // SL/TP del short de arriba aún vivo → reintentar
               }
+              // (JAV-96) muertas confirmadas → marcar canceled SOLO las del short de arriba (NUNCA entry_lower, sigue armada).
+              await ctx.runMutation(internal.triggerArms.markArmOrdersCanceled, { armId, token, cloids: nonLowerCloids });
               const tr = await ctx.runMutation(internal.triggerArms.transitionToArmedLowerOnly, { armId, token });
               return { result: tr.ok ? "armed_lower_only" : "armed_lower_only_failed" };
             }
@@ -583,6 +585,9 @@ export const reconcileArm = internalAction({
           // ciclo cuyo mecanismo protector falló (cierre de emergencia) ni un cierre externo del usuario.
           const closeReason: "sl" | "emergency" | "disarm" | "manual" =
             arm.emergencyClosing ?? (slConfirmed ? "sl" : "manual");
+          // (JAV-96) ensureOrdersDead(allCloids)===true arriba (gate ~575) → las open/pending que queden
+          // están MUERTAS en HL: marcarlas canceled para no dejar `open` rancio que dispare orphan_orders.
+          await ctx.runMutation(internal.triggerArms.markArmOrdersCanceled, { armId, token, cloids: allCloids });
           // (Codex #1) Cerrar el arm + contar el stop + programar el rearm en UNA transacción atómica
           // (sin ventana entre cerrar y programar). La mutation conserva fencing/transición/cuarentena
           // y solo programa rearm si closeReason="sl" + config válida.
@@ -977,6 +982,8 @@ export const reconcileArm = internalAction({
         if (!(await ensureOrdersDead(info, exchange, user, assetId, entryCloids))) {
           return { skipped: "armed_lower_only_cancel_pending" };
         }
+        // (JAV-96) entry_lower confirmada muerta → marcar canceled antes de cerrar (sin `open` rancio).
+        await ctx.runMutation(internal.triggerArms.markArmOrdersCanceled, { armId, token, cloids: entryCloids });
         const ce = await ctx.runMutation(internal.triggerArms.closeArmLowerOnlyExpired, { armId, token });
         return { result: ce.ok ? (ce.rearmScheduled ? "armed_lower_only_closed_rearm" : "armed_lower_only_closed") : "armed_lower_only_close_failed" };
       }

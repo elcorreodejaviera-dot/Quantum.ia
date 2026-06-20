@@ -361,6 +361,9 @@ export default function AdminView() {
   const tradingConfig = useQuery(api.systemConfig.getConfig, { key: 'tradingEnabled' });
   const setSim = useMutation(api.systemConfig.setSimulationMode);
   const setTrading = useMutation(api.systemConfig.setTradingEnabled);
+  const sgGate = useQuery(api.spotGridBots.getMainnetSpotGridApproval, isAdmin ? {} : 'skip');
+  const setSgGate = useMutation(api.spotGridBots.setMainnetSpotGridApproval);
+  const sgGateOn = sgGate?.enabled === true;
   const simOn = simConfig?.value === true;
   const tradingOn = tradingConfig?.value === true;
 
@@ -396,9 +399,17 @@ export default function AdminView() {
         {stats?.network && <span className={`av-pill ${stats.network === 'mainnet' ? 'green' : 'amber'}`}>● {stats.network}</span>}
         <span className={`av-pill ${tradingOn ? 'green' : 'faint'}`}>{tradingOn ? 'Trading LIVE' : 'Trading OFF'}</span>
         <span className={`av-pill ${simOn ? 'amber' : 'faint'}`}>{simOn ? 'SIM ON' : 'SIM OFF'}</span>
+        <span className={`av-pill ${sgGateOn ? 'green' : 'faint'}`}>{sgGateOn ? 'Spot Grid mainnet ✓' : 'Spot Grid mainnet ✗'}</span>
         <div className="av-actions">
           <button className="av-mini" onClick={() => setSim({ enabled: !simOn })}>{simOn ? 'Desactivar SIM' : 'Activar SIM'}</button>
           <button className="av-mini" disabled={simOn} onClick={() => setTrading({ enabled: !tradingOn })}>{tradingOn ? 'Desactivar LIVE' : 'Activar LIVE'}</button>
+          <button
+            className="av-mini"
+            onClick={() => {
+              if (!sgGateOn && !window.confirm('Aprobar Spot Grid en mainnet permite crear bots que operan con DINERO REAL en Hyperliquid. ¿Continuar?')) return;
+              setSgGate({ enabled: !sgGateOn });
+            }}
+          >{sgGateOn ? 'Revocar Spot Grid mainnet' : 'Aprobar Spot Grid mainnet'}</button>
           <button className="av-kill" onClick={() => setTrading({ enabled: false })}>🛑 DETENER TODO</button>
         </div>
       </div>

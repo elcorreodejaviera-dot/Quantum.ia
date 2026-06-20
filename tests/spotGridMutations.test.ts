@@ -49,6 +49,9 @@ describe("recordSpotGridOrder — idempotencia + fencing (JAV-92)", () => {
     await t.mutation(internal.spotGridBots.claimSpotGridReconcile, { botId });
     const r = await t.mutation(internal.spotGridBots.recordSpotGridOrder, { botId, token: "intruso", side: "buy", gridLevel: 0, generation: 1, cycleId: 0, assetId: 10120, price: 2900, quantity: 0.03, quoteSize: 87 });
     expect(r.ok).toBe(false);
+    // (CodeRabbit #99) el no-op por fencing NO debe escribir en DB.
+    const count = (await t.run((ctx) => ctx.db.query("spot_grid_orders").collect())).length;
+    expect(count).toBe(0);
   });
 });
 

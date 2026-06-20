@@ -66,9 +66,12 @@ reusa `info` para lecturas. Replica el patrón de `triggerEngine.ts` (no copia e
     reintenta el envío (cloid determinista, idempotente) o `failed`; con fill → procesa el fill. Nunca queda
     fantasma.
   - Fills vía `fillCursor` + fallback por CLOID (Codex #2). Partial fills (Codex #7): acumula
-    `filledQty`/`avgFillPx`. BUY (parcial/total) → SELL pareada por `filledQty`; SELL llenada →
-    `closeCycleAndRepost`. **Sub-mínima (Codex #3-r2):** si `filledQty*sellPrice < MIN_SPOT_NOTIONAL` NO
-    coloca SELL; acumula `pendingSellQty` hasta ≥ mínimo; "polvo" al detener no se vende.
+    `filledQty`/`avgFillPx` (VWAP) y `filledFeeUsd` (fee real acumulada). BUY (parcial/total) → SELL por la
+    cantidad llenada con cloid por `tranche`; SELL llenada → `closeCycleAndRepost`. **Sub-mínima
+    (Codex #3-r2):** si `pending*sellPrice < MIN_SPOT_NOTIONAL` NO coloca SELL; acumula `pendingSellQty` Y
+    **`pendingSellCost`** (Σ sz·px) → el `costBasis` del tranche es el VWAP de SOLO lo pendiente, y la SELL
+    guarda su `costBasis` + `filledFeeUsd` para un `netProfit` por tranche SIN mezclar con otros (Codex r4/r5).
+    "Polvo" al detener no se vende.
 - **Batching/backoff (Codex #5/#10):** una ronda de lecturas por **cuenta+red**, no por bot; backoff básico.
 - **`reconcileAllSpotGrids`** (entry del cron): lista bots `running`, agrupa por `hlAccountId`, claima cada
   uno (lease), **revalida `assertSpotGridLiveAdmissible`**, reconcilia, libera. Pausa+`error` ante fallo
@@ -86,8 +89,10 @@ Patrón de `triggerArms.ts` (claim/renew/release + fencing por token):
 - **`closeCycleAndRepost` (Codex #4-r2 + ALTO#3, transaccional e idempotente por orden):** en UNA mutation:
   (a) **guard de idempotencia**: lee la SELL; si `cycleSettled === true` (o su status ya terminal-consumido)
   → **no-op** (un segundo procesado del mismo fill no cierra dos ciclos ni crea dos BUYs); (b) marca la SELL
-  `cycleSettled=true`; (c) incrementa `cycleId` atómico; (d) inserta `spot_grid_cycles` (…+`netProfit`+
-  closedAt); (e) crea la BUY de reposición con el nuevo `cycleId` (lookup-before-insert `by_cloid` y
+  `cycleSettled=true`; (c) incrementa **`cycleSeq`** (contador monótono por bot, contador ANTI-COLISIÓN del
+  cloid de reposición; `cycleId` es el id del ciclo cerrado, NO el contador); (d) inserta `spot_grid_cycles`
+  (…+`netProfit` calculado con `sell.costBasis`+closedAt); (e) crea la BUY de reposición con el nuevo
+  `cycleSeq` en el cloid (lookup-before-insert `by_cloid` y
   `by_bot_cycle`). El marcado de la SELL como consumida es la defensa primaria; `by_bot_cycle` es secundaria.
 - Internal queries: `listRunningSpotGridBotsInternal`, `getSpotGridOrdersInternal(botId)`,
   `getSpotGridCredentialInternal(botId)` (credencial cifrada, solo para descifrar en la action).

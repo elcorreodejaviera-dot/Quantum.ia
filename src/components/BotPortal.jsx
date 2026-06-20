@@ -1606,7 +1606,10 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
                     title="Eliminar esta posición spot (irreversible)"
                     onClick={() => {
                       if (window.confirm(`¿Eliminar la posición spot ${position.asset}?\nSe borrará del portal de forma permanente (no afecta tus fondos en Hyperliquid).`)) {
-                        removePositionMutation({ id: position.id }).catch((err) => console.error('removePosition failed', err));
+                        removePositionMutation({ id: position.id }).catch((err) => {
+                          console.error('removePosition failed', err);
+                          window.alert(err?.message ?? 'No se pudo eliminar la posición.');
+                        });
                       }
                     }}
                   >

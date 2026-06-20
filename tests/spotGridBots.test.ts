@@ -147,6 +147,21 @@ describe("persistSpotGridBot — guards (JAV-91)", () => {
     await expect(asUser(t).mutation(internal.spotGridBots.persistSpotGridBot, args(hlAccountId, { orderSize: 5, gridCount: 1 })))
       .rejects.toThrow(/m[ií]nimo notional|10 USDC/);
   });
+
+  it("(JAV-101) budget en cents con ceil: orderSize manual >2 decimales que se pasa del presupuesto → rechaza", async () => {
+    const t = makeConvexTest();
+    const hlAccountId = await seedLiveEnv(t);
+    // 10.004 × 3 = 30.012 > 30.00 → debe rechazar (round() lo aceptaría por error; ceil() no).
+    await expect(asUser(t).mutation(internal.spotGridBots.persistSpotGridBot, args(hlAccountId, { orderSize: 10.004, gridCount: 3, investmentAmount: 30, freeQuoteBalance: 500 })))
+      .rejects.toThrow(/[Pp]resupuesto|orderSize×gridCount/);
+  });
+
+  it("(JAV-101) budget en cents: orderSize 'feo' que SÍ cabe (10.00×3 ≤ 30.00) → acepta", async () => {
+    const t = makeConvexTest();
+    const hlAccountId = await seedLiveEnv(t);
+    const r = await asUser(t).mutation(internal.spotGridBots.persistSpotGridBot, args(hlAccountId, { orderSize: 10, gridCount: 3, investmentAmount: 30, freeQuoteBalance: 500 }));
+    expect(r.ok).toBe(true);
+  });
 });
 
 describe("preflightCreateSpotGridBot — guards ANTES de la RPC (JAV-91, Codex MEDIO #2)", () => {

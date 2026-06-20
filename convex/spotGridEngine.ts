@@ -36,6 +36,33 @@ export type GridLevel = {
  * MAX_TICK_BUMPS no cubre, se RECHAZA el nivel (grid_level_uneconomic), nunca precio absurdo ni min-notional
  * inválido.
  */
+// Tick HL-spot para un precio dado (≤5 sig figs y ≤8−szDecimals decimales).
+function spotTick(price: number, szDecimals: number): number {
+  return 10 ** -Math.max(0, Math.min(8 - szDecimals, 5 - (Math.floor(Math.log10(price)) + 1)));
+}
+
+/**
+ * (Codex ALTO#3-código / #6) FUENTE ÚNICA del precio SELL pareado: resuelve ANALÍTICAMENTE el precio que
+ * neto el objetivo de profit por ciclo tras fees buy+sell, lo redondea (ceil) y verifica con un loop
+ * ACOTADO (MEDIO#4). Devuelve `null` (grid_level_uneconomic) si no cubre o cae bajo min-notional. La usan
+ * `calculateGridLevels` Y la colocación de la SELL pareada en el reconcile → mismo cálculo, sin divergir.
+ * `targetNet` = ganancia neta objetivo en quote para ESTA cantidad (orderSize·p% para el nivel completo).
+ */
+export function solveSellPrice(buyPrice: number, quantity: number, gridProfitPercent: number, feeRate: number, szDecimals: number, targetNet: number): number | null {
+  if (!(buyPrice > 0) || !(quantity > 0)) return null;
+  const step = 1 + gridProfitPercent / 100;
+  const tick = spotTick(buyPrice, szDecimals);
+  const denom = 1 - feeRate;
+  const idealSell = denom > 0 ? (targetNet / quantity + buyPrice * (1 + feeRate)) / denom : buyPrice * step;
+  let sellPrice = roundSpotPrice(Math.max(idealSell, buyPrice * step), szDecimals, "ceil");
+  const net = (sp: number) => (sp - buyPrice) * quantity - feeRate * (buyPrice + sp) * quantity;
+  for (let b = 0; b < MAX_TICK_BUMPS; b++) {
+    if (net(sellPrice) >= targetNet - 1e-9 && sellPrice * quantity >= MIN_SPOT_NOTIONAL_USD) return sellPrice;
+    sellPrice = roundSpotPrice(sellPrice + tick, szDecimals, "ceil");
+  }
+  return null;   // grid_level_uneconomic
+}
+
 export function calculateGridLevels(p: {
   currentPrice: number; minPrice: number; gridProfitPercent: number; orderSize: number;
   gridCount: number; szDecimals: number; feeRate: number;
@@ -50,22 +77,9 @@ export function calculateGridLevels(p: {
     if (!(buyPrice > 0) || buyPrice < p.minPrice) { rejected++; continue; }
     const quantity = floorSpotSize(p.orderSize / buyPrice, p.szDecimals);
     if (!(quantity > 0) || buyPrice * quantity < MIN_SPOT_NOTIONAL_USD) { rejected++; continue; }
-    // SELL con NETO ≥ objetivo tras fees buy+sell. Se resuelve ANALÍTICAMENTE el precio que neto el objetivo
-    // (no se confía en buy*(1+p) como aproximación, Codex #6): net = (sell-buy)·qty - fee·(buy+sell)·qty.
-    // Despejando sell e igualando a targetNet → idealSell; luego ceil a tick y un loop ACOTADO de "bump un
-    // tick" como red de seguridad por el redondeo (Codex MEDIO#4). Si tras MAX_TICK_BUMPS no cubre → rechaza.
-    const tick = 10 ** -Math.max(0, Math.min(8 - p.szDecimals, 5 - (Math.floor(Math.log10(buyPrice)) + 1)));
-    const targetNet = p.orderSize * (p.gridProfitPercent / 100);   // ganancia neta objetivo por ciclo (quote)
-    const denom = 1 - p.feeRate;
-    const idealSell = denom > 0 ? (targetNet / quantity + buyPrice * (1 + p.feeRate)) / denom : buyPrice * step;
-    let sellPrice = roundSpotPrice(Math.max(idealSell, buyPrice * step), p.szDecimals, "ceil");
-    const net = (sp: number) => (sp - buyPrice) * quantity - p.feeRate * (buyPrice + sp) * quantity;
-    let ok = false;
-    for (let b = 0; b < MAX_TICK_BUMPS; b++) {
-      if (net(sellPrice) >= targetNet && sellPrice * quantity >= MIN_SPOT_NOTIONAL_USD) { ok = true; break; }
-      sellPrice = roundSpotPrice(sellPrice + tick, p.szDecimals, "ceil");
-    }
-    if (!ok) { rejected++; continue; }   // grid_level_uneconomic
+    const targetNet = quantity * buyPrice * (p.gridProfitPercent / 100);   // p% del costo real del nivel
+    const sellPrice = solveSellPrice(buyPrice, quantity, p.gridProfitPercent, p.feeRate, p.szDecimals, targetNet);
+    if (sellPrice == null) { rejected++; continue; }   // grid_level_uneconomic
     levels.push({
       idx: i, buyPrice, buyPriceStr: String(buyPrice), quantity, sizeStr: String(quantity),
       sellPrice, sellPriceStr: String(sellPrice),
@@ -85,6 +99,12 @@ async function placeOrder(ctx: any, exchange: any, args: {
   assetId: number; price: number; quantity: number; priceStr: string; sizeStr: string;
   pairedOrderId?: any; openCloids: Set<string>;
 }): Promise<{ ok: boolean; cloid?: string }> {
+  // (Codex MEDIO#6) Revalidar el gate live INMEDIATAMENTE antes de cada envío real (no solo al inicio del
+  // reconcile): un kill switch / pérdida de permiso / cambio de red entre el claim y este envío debe abortar.
+  const gate: any = await ctx.runMutation(internal.spotGridBots.renewSpotGridReconcile, { botId: args.botId, token: args.token });
+  if (!gate.ok) return { ok: false };
+  const live: any = await ctx.runQuery(internal.spotGridBots.assertSpotGridLiveAdmissibleInternal, { botId: args.botId });
+  if (!live.ok) return { ok: false };
   const rec = await ctx.runMutation(internal.spotGridBots.recordSpotGridOrder, {
     botId: args.botId, token: args.token, side: args.side, gridLevel: args.gridLevel,
     generation: args.generation, cycleId: args.cycleId, assetId: args.assetId,
@@ -165,41 +185,50 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
     }
   }
 
-  // (3) Procesar fills nuevos (por cloid propio). Avanza fillCursor al máximo time procesado.
+  // (3) Procesar fills nuevos. (Codex ALTO#2) AGREGAR por cloid ANTES de aplicar: varios fills de la MISMA
+  // orden en una ronda se suman UNA vez (no contra un snapshot viejo de filledQty). avgPx = Σ(sz·px)/Σsz.
   const byCloid = new Map(orders.map((o) => [o.cloid.toLowerCase(), o]));
+  const agg = new Map<string, { sz: number; notional: number; fee: number }>();
   let maxTime = bot.fillCursor ?? 0;
   for (const f of fills) {
     if (f.time <= (bot.fillCursor ?? 0)) continue;
     maxTime = Math.max(maxTime, f.time);
-    const o = f.cloid ? byCloid.get(f.cloid) : undefined;
-    if (!o) continue;   // no es una orden nuestra (o ya consumida)
+    if (!f.cloid) continue;
+    const a = agg.get(f.cloid) ?? { sz: 0, notional: 0, fee: 0 };
+    a.sz += f.sz; a.notional += f.sz * f.px; a.fee += Math.abs(f.fee);
+    agg.set(f.cloid, a);
+  }
+  for (const [cloid, a] of agg) {
+    const o = byCloid.get(cloid);
+    if (!o || !(a.sz > 0)) continue;   // no es una orden nuestra (o ya consumida)
     await ctx.runMutation(internal.spotGridBots.renewSpotGridReconcile, { botId, token });
+    const avgPx = a.notional / a.sz;
+    const newFilled = (o.filledQty ?? 0) + a.sz;
+    const full = newFilled >= o.quantity - 1e-9;
+    await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, {
+      botId, token, cloid: o.cloid, filledQty: newFilled, avgFillPx: avgPx,
+      remainingQty: Math.max(0, o.quantity - newFilled), status: full ? "filled" : "partially_filled",
+    });
     if (o.side === "buy") {
-      // BUY (parcial/total): acumular y colocar SELL pareada por la cantidad llenada (si running).
-      const filledQty = (o.filledQty ?? 0) + f.sz;
-      const full = filledQty >= o.quantity - 1e-12;
-      await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, {
-        botId, token, cloid: o.cloid, filledQty, avgFillPx: f.px,
-        remainingQty: Math.max(0, o.quantity - filledQty), status: full ? "filled" : "partially_filled",
-      });
+      // BUY (parcial/total): SELL pareada por lo recién llenado, con la FÓRMULA NETA (fix #3, solveSellPrice).
+      // Sub-mínima / uneconomic (Codex #3-r2): acumula `pendingSellQty` hasta poder colocar una SELL válida.
       if (isRunning) {
-        const sellRaw = roundSpotPrice(o.price * (1 + bot.gridProfitPercent / 100), szDecimals, "ceil");
-        const pending = (o.pendingSellQty ?? 0) + f.sz;
-        if (sellRaw * pending >= MIN_SPOT_NOTIONAL_USD) {
-          const sizeStr = String(floorSpotSize(pending, szDecimals));
+        const pending = floorSpotSize((o.pendingSellQty ?? 0) + a.sz, szDecimals);
+        const targetNet = pending * o.price * (bot.gridProfitPercent / 100);   // p% del costo de lo vendido
+        const sellPrice = pending > 0 ? solveSellPrice(o.price, pending, bot.gridProfitPercent, bot.feeRate, szDecimals, targetNet) : null;
+        if (sellPrice != null) {
           await placeOrder(ctx, clients.exchange, { botId, token, side: "sell", gridLevel: o.gridLevel, generation: bot.generation, cycleId: o.cycleId,
-            assetId: bot.assetId, price: sellRaw, quantity: floorSpotSize(pending, szDecimals), priceStr: String(sellRaw), sizeStr, pairedOrderId: o._id, openCloids });
+            assetId: bot.assetId, price: sellPrice, quantity: pending, priceStr: String(sellPrice), sizeStr: String(pending), pairedOrderId: o._id, openCloids });
           await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, pendingSellQty: 0 });
         } else {
-          await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, pendingSellQty: pending });   // (Codex #3-r2) acumular sub-mínima
+          await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, pendingSellQty: (o.pendingSellQty ?? 0) + a.sz });
         }
       }
-    } else {
-      // SELL llenada → cerrar ciclo + reponer BUY (idempotente). feesUsd ≈ fee del fill + fee estimada del buy.
-      const feeUsd = Math.abs(f.fee) + (fees.spotMaker * o.price * f.sz);
+    } else if (full) {
+      // (fix #1) SELL cierra el ciclo SOLO al llenarse COMPLETA (si fue parcial, se espera a más fills).
+      const feeUsd = a.fee + (bot.feeRate * o.price * newFilled);   // fee real de la SELL + estimado del BUY
       const res: any = await ctx.runMutation(internal.spotGridBots.closeCycleAndRepost, { botId, token, sellCloid: o.cloid, feesUsd: feeUsd });
-      // (ALTO#1) La reposición se insertó como `submitting` en la mutation; aquí la ENVIAMOS a HL (solo si
-      // running y no está ya viva). Idempotente por cloid. closeCycleAndRepost devuelve precio/cantidad.
+      // (ALTO#1) La reposición se insertó como `submitting`; aquí se ENVÍA a HL (solo si running y no viva).
       if (res.ok && !res.alreadySettled && res.repostCloid && isRunning && !openCloids.has(String(res.repostCloid).toLowerCase())) {
         try {
           const { priceStr, sizeStr } = roundAndValidateSpotOrder({ price: res.repostPrice, size: res.repostQuantity, szDecimals, isBuy: true });
@@ -281,15 +310,26 @@ export const stopSpotGridBot = action({
       const orders: any[] = await ctx.runQuery(internal.spotGridBots.getSpotGridOrdersInternal, { botId });
       const openOrders = await getOpenSpotOrders(info, address);
       const openCloids = new Set(openOrders.map((o) => (o.cloid ?? "").toLowerCase()).filter(Boolean));
-      for (const o of orders) {
-        if (o.status !== "open" && o.status !== "submitting" && o.status !== "partially_filled") continue;
+      const live = orders.filter((o) => o.status === "open" || o.status === "submitting" || o.status === "partially_filled");
+      let cancelFailed = false;
+      for (const o of live) {
         try {
           if (openCloids.has(o.cloid.toLowerCase())) await cancelSpotByCloid(exchange, o.assetId, o.cloid as `0x${string}`);
           await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, status: "cancelled" });
-        } catch (e) { elog("spotgrid", "cancel_failed", { botId: String(botId), err: safeError(e) }); }
+        } catch (e) { cancelFailed = true; elog("spotgrid", "cancel_failed", { botId: String(botId), err: safeError(e) }); }
+      }
+      // (Codex ALTO#5) NO marcar `stopped` si alguna cancelación falló o queda una orden propia VIVA en HL:
+      // dejaría una orden activa con el bot "detenido". Re-verificar el book y, si hay residuo, `error`+throw
+      // (el usuario reintenta Stop; el cron no repone porque no está running).
+      const after = await getOpenSpotOrders(info, address);
+      const afterCloids = new Set(after.map((o) => (o.cloid ?? "").toLowerCase()).filter(Boolean));
+      const stillLive = live.some((o) => afterCloids.has(o.cloid.toLowerCase()));
+      if (cancelFailed || stillLive) {
+        await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, { botId, token, status: "error", errorMessage: "stop incompleto: órdenes vivas sin cancelar", clearLease: true });
+        throw new Error("Stop incompleto: quedaron órdenes vivas en HL. Reintenta en unos segundos.");
       }
       await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, { botId, token, status: "stopped", clearLease: true });
-      elog("spotgrid", "stopped", { botId: String(botId), cancelled: orders.length });
+      elog("spotgrid", "stopped", { botId: String(botId), cancelled: live.length });
       return { ok: true };
     } finally {
       // setSpotGridStatus(stopped) ya limpió el lease; release es no-op si el token ya no aplica.

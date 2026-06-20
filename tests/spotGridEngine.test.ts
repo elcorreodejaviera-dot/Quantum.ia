@@ -21,10 +21,10 @@ describe("calculateGridLevels (JAV-92)", () => {
     }
   });
 
-  it("el NETO tras fees buy+sell cubre el objetivo en cada nivel", () => {
+  it("el NETO tras fees buy+sell cubre el objetivo (p% del costo real del nivel)", () => {
     const { levels } = calculateGridLevels(base);
-    const target = base.orderSize * (base.gridProfitPercent / 100);
     for (const l of levels) {
+      const target = l.quantity * l.buyPrice * (base.gridProfitPercent / 100);   // costo real, no orderSize bruto
       const net = (l.sellPrice - l.buyPrice) * l.quantity - base.feeRate * (l.buyPrice + l.sellPrice) * l.quantity;
       expect(net).toBeGreaterThanOrEqual(target - 1e-9);
     }

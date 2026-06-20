@@ -5,6 +5,7 @@ import type { Id } from "./_generated/dataModel";
 import { requireAdmin, requireBotManager, requireTradeLive, getUserOrNull, writeAdminLog, hasPermission } from "./helpers";
 import { elog } from "./log";
 import { toHlCloid, spotGridCloidInput } from "./cloids";   // (JAV-92) cloid determinista (helper hoja, no-node)
+import { hlNetwork } from "./hlNetwork";   // (JAV-92) red efectiva del backend (fuente de verdad)
 
 // (QSG / JAV-91) Spot Grid Live — persistencia + comandos backend. NON-node (convex-testable). NO envía
 // órdenes a HL (eso es el motor de PR3). La resolución de activo/precio/balance vía RPC vive en la
@@ -391,6 +392,10 @@ export const assertSpotGridLiveAdmissibleInternal = internalQuery({
     const user = await ctx.db.get(bot.userId);
     if (!user) return { ok: false as const, reason: "owner_not_found", policy: "error" as const };
     if (!(await hasPermission(ctx, user, "canTradeLive"))) return { ok: false as const, reason: "no_can_trade_live", policy: "paused" as const };
+    // (Codex ALTO#4) La red efectiva del backend DEBE coincidir con la del bot (un deploy pudo cambiar
+    // HL_NETWORK). Si no, NO operar (se firmaría/leería en la red equivocada) → pausar.
+    let net: string; try { net = hlNetwork(); } catch { return { ok: false as const, reason: "hl_network_unset", policy: "error" as const }; }
+    if (net !== bot.network) return { ok: false as const, reason: "network_mismatch", policy: "paused" as const };
     if (bot.network === "mainnet") {
       const gate = await ctx.db.query("system_config").withIndex("by_key", (q) => q.eq("key", MAINNET_GATE_KEY)).first();
       if ((gate?.value as any)?.enabled !== true) return { ok: false as const, reason: "mainnet_not_approved", policy: "paused" as const };

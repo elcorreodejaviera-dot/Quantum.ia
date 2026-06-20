@@ -21,9 +21,18 @@ describe("checks DB-only", () => {
   it("pool_no_tokenid", () => {
     expect(codes(auditPool(bot({ pool: pool({ tokenId: null }) }), null, {}))).toContain("pool_no_tokenid");
   });
-  it("arm_network_mismatch", () => {
-    const f = auditPool(bot({ arms: [liveArm({ network: "mainnet" })] }), null, {});
+  it("arm_network_mismatch: red HL del arm != red HL actual", () => {
+    const f = auditPool(bot({ arms: [liveArm({ network: "mainnet" })] }), null, {}, "testnet");
     expect(codes(f)).toContain("arm_network_mismatch");
+  });
+  it("arm_network_mismatch: misma red HL → no warn (la chain del pool NO es comparable)", () => {
+    // pool.network es la chain de la LP (p.ej. "Base"), distinta al entorno HL: no debe disparar mismatch.
+    const f = auditPool(bot({ pool: pool({ network: "Base" }), arms: [liveArm({ network: "testnet" })] }), null, {}, "testnet");
+    expect(codes(f)).not.toContain("arm_network_mismatch");
+  });
+  it("arm_network_mismatch: red HL actual desconocida → no warn", () => {
+    const f = auditPool(bot({ arms: [liveArm({ network: "mainnet" })] }), null, {}, null);
+    expect(codes(f)).not.toContain("arm_network_mismatch");
   });
   it("base_asset_unmappable", () => {
     expect(codes(auditPool(bot({ baseAsset: null }), null, {}))).toContain("base_asset_unmappable");

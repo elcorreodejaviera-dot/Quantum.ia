@@ -19,8 +19,9 @@ const driftedRel = (a, b, tol) =>
 
 // Audita UN bot. `acctCoinCount` = mapa "hlAccountId|coin" → nº de bots (para detectar ambigüedad del
 // hedge agregado). `live` = datos del snapshot para este bot ({liquidityUsd, inRange, coverageUsd,
-// present}) o null si no hay.
-export function auditPool(b, live, acctCoinCount) {
+// present}) o null si no hay. `currentHlNetwork` = red HL actual ("mainnet"|"testnet") o null si se
+// desconoce (snapshot no disponible).
+export function auditPool(b, live, acctCoinCount, currentHlNetwork) {
   const f = [];
   const warn = (code, msg) => f.push({ level: 'warn', code, msg });
   const unknown = (code, msg) => f.push({ level: 'unknown', code, msg });
@@ -34,8 +35,11 @@ export function auditPool(b, live, acctCoinCount) {
   if (b.active && !b.hlAccountId) warn('account_unlinked', 'Bot activo sin cuenta HL vinculada.');
   if (b.active && pool && pool.tokenId == null) warn('pool_no_tokenid', 'Pool sin tokenId: el motor no puede cuantificar la cobertura.');
   if (b.active && !b.baseAsset) warn('base_asset_unmappable', 'Bot activo sin activo base mapeable a HL.');
-  if (liveArm && pool && liveArm.network !== pool.network) {
-    warn('arm_network_mismatch', `Red del armado (${liveArm.network}) distinta a la del pool (${pool.network}).`);
+  // Red HL del armado vs red HL ACTUAL (mainnet/testnet). OJO: `pool.network` es la CHAIN de la LP de
+  // Uniswap ("Base"/"Arbitrum"/...), un namespace DISTINTO al entorno HL del arm → no son comparables.
+  // Solo se evalúa si conocemos la red HL actual (`currentHlNetwork`); si no, se omite (no falso positivo).
+  if (liveArm && currentHlNetwork && liveArm.network !== currentHlNetwork) {
+    warn('arm_network_mismatch', `Red HL del armado (${liveArm.network}) distinta a la red HL actual (${currentHlNetwork}).`);
   }
   if (liveArm && pool) {
     if (driftedRel(liveArm.lowerEdge, pool.minRange, EDGE_DRIFT_PCT) ||
@@ -80,7 +84,7 @@ export function verdictOf(findings) {
 
 // Audita TODOS los bots del usuario. `auditData` = getUserPoolAuditData; `liveByBot` = botId → live.
 // Detecta duplicados cuenta+coin SOBRE la data de DB (Codex BAJO#2), no sobre el snapshot.
-export function auditUserPools(auditData, liveByBot) {
+export function auditUserPools(auditData, liveByBot, currentHlNetwork) {
   const acctCoinCount = {};
   for (const b of auditData ?? []) {
     const coin = b.baseAsset ? hlCoin(b.baseAsset) : null;
@@ -90,7 +94,7 @@ export function auditUserPools(auditData, liveByBot) {
     }
   }
   return (auditData ?? []).map((b) => {
-    const findings = auditPool(b, liveByBot?.[b.botId] ?? null, acctCoinCount);
+    const findings = auditPool(b, liveByBot?.[b.botId] ?? null, acctCoinCount, currentHlNetwork);
     return { botId: b.botId, pair: b.pool?.pair ?? null, verdict: verdictOf(findings), findings };
   });
 }

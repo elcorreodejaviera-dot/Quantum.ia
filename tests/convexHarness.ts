@@ -19,6 +19,7 @@ const EXPECTED = new Set([
   "../convex/helpers.ts",
   "../convex/plans.ts",
   "../convex/hlNetwork.ts",
+  "../convex/spotGridBots.ts",
 ]);
 
 export function makeConvexTest() {
@@ -34,6 +35,7 @@ export function makeConvexTest() {
     "../convex/helpers.ts",
     "../convex/plans.ts",
     "../convex/hlNetwork.ts",
+    "../convex/spotGridBots.ts",
   ]);
   for (const k of Object.keys(modules)) {
     if (k.includes("/_generated/")) continue;   // infra de convex-test, requerida

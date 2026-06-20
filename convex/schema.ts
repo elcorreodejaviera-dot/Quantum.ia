@@ -498,4 +498,82 @@ export default defineSchema({
     .index("by_arm_role", ["armId", "role"])
     .index("by_arm_role_index", ["armId", "role", "tpIndex"])  // lookup/unicidad por TP individual
     .index("by_cloid", ["cloid"]),
+
+  // (QSG / JAV-91) Quantum Spot Grid Live — bots de grid spot en Hyperliquid. AISLADO del motor perp.
+  // Live-only (sin simulationMode). PR2: persistencia + comandos; el motor real va en PR3.
+  spot_grid_bots: defineTable({
+    userId: v.id("users"),
+    hlAccountId: v.id("hl_api_credentials"),   // cuenta HL DEDICADA (exclusiva: ningún otro bot la usa)
+    symbol: v.string(),                        // activo lógico del MVP: "BTC" | "ETH"
+    assetId: v.number(),                       // 10000 + universeIndex (resuelto por red en creación)
+    baseAsset: v.string(),                     // símbolo real en spotMeta (p.ej. "UBTC")
+    quoteAsset: v.string(),                    // "USDC"
+    minPrice: v.number(),                      // suelo del grid (no compra por debajo)
+    gridProfitPercent: v.number(),             // espaciado geométrico (% por cuadrícula)
+    investmentAmount: v.number(),              // capital total asignado (quote, USDC)
+    orderSize: v.number(),                     // quote por orden de compra
+    gridCount: v.number(),                     // nº de niveles
+    feeRate: v.number(),                       // tarifa efectiva usada en el cálculo de profit neto
+    currentPrice: v.optional(v.number()),      // último precio observado (informativo)
+    status: v.union(v.literal("running"), v.literal("paused"), v.literal("stopped"), v.literal("error")),
+    network: v.union(v.literal("mainnet"), v.literal("testnet")),
+    generation: v.number(),                    // entero, +1 por arranque (idempotencia de cloids)
+    fillCursor: v.optional(v.number()),        // cursor de fills procesados (reconcile PR3)
+    errorMessage: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    lastReconciledAt: v.optional(v.number()),
+  })
+    .index("by_user", ["userId"])
+    .index("by_status_updated", ["status", "updatedAt"])
+    .index("by_account", ["hlAccountId"]),     // exclusividad de cuenta + lookup del motor
+
+  // Órdenes del grid. Convex no impone unicidad → dedupe por lookup-before-insert en by_cloid.
+  spot_grid_orders: defineTable({
+    botId: v.id("spot_grid_bots"),
+    userId: v.id("users"),
+    cloid: v.string(),                         // 0x+32hex determinista (toHlCloid de PR1)
+    oid: v.optional(v.string()),
+    assetId: v.number(),
+    side: v.union(v.literal("buy"), v.literal("sell")),
+    price: v.number(),
+    quantity: v.number(),
+    quoteSize: v.number(),
+    gridLevel: v.number(),
+    generation: v.number(),
+    cycleId: v.number(),
+    status: v.union(
+      v.literal("open"), v.literal("partially_filled"), v.literal("filled"),
+      v.literal("cancelled"), v.literal("failed")),
+    filledQty: v.optional(v.number()),
+    remainingQty: v.optional(v.number()),
+    avgFillPx: v.optional(v.number()),
+    pendingSellQty: v.optional(v.number()),
+    pairedOrderId: v.optional(v.id("spot_grid_orders")),
+    attempt: v.optional(v.number()),
+    errorMessage: v.optional(v.string()),
+    createdAt: v.number(),
+    filledAt: v.optional(v.number()),
+    cancelledAt: v.optional(v.number()),
+  })
+    .index("by_bot_status", ["botId", "status"])
+    .index("by_cloid", ["cloid"]),
+
+  // Ciclos cerrados (compra→venta pareada) con profit neto.
+  spot_grid_cycles: defineTable({
+    botId: v.id("spot_grid_bots"),
+    userId: v.id("users"),
+    cycleId: v.number(),                       // monótono por bot
+    buyOrderId: v.id("spot_grid_orders"),
+    sellOrderId: v.optional(v.id("spot_grid_orders")),
+    buyPrice: v.number(),
+    sellPrice: v.optional(v.number()),
+    quantity: v.number(),
+    grossProfit: v.optional(v.number()),
+    fees: v.optional(v.number()),
+    netProfit: v.optional(v.number()),
+    closedAt: v.optional(v.number()),
+  })
+    .index("by_bot", ["botId"])
+    .index("by_bot_cycle", ["botId", "cycleId"]),
 });

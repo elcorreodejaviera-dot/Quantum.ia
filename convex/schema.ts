@@ -514,7 +514,11 @@ export default defineSchema({
     orderSize: v.number(),                     // quote por orden de compra
     gridCount: v.number(),                     // nº de niveles
     feeRate: v.number(),                       // tarifa efectiva usada en el cálculo de profit neto
-    currentPrice: v.optional(v.number()),      // último precio observado (informativo)
+    currentPrice: v.optional(v.number()),      // precio de CREACIÓN (ancla del grid si autoDerived) / informativo
+    // (JAV-101) true = gridCount/orderSize derivados por deriveAutoGrid desde el rango → la colocación
+    // inicial ANCLA a currentPrice (prometido==colocado). Ausente/false = manual o legacy → la colocación
+    // inicial refresca el precio spot en vivo (no depende del snapshot persistido). legacy-safe.
+    autoDerived: v.optional(v.boolean()),
     status: v.union(v.literal("running"), v.literal("paused"), v.literal("stopped"), v.literal("error")),
     network: v.union(v.literal("mainnet"), v.literal("testnet")),
     generation: v.number(),                    // entero, +1 por arranque (idempotencia de cloids)

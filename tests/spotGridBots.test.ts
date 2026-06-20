@@ -133,6 +133,14 @@ describe("persistSpotGridBot — guards (JAV-91)", () => {
       .rejects.toThrow(/gridCount/);
   });
 
+  it("(CodeRabbit) gridCount manual > 50 (ABS_MAX) → rechaza", async () => {
+    const t = makeConvexTest();
+    const hlAccountId = await seedLiveEnv(t);
+    // orderSize/investment holgados para que el ÚNICO motivo de rechazo sea el tope de niveles.
+    await expect(asUser(t).mutation(internal.spotGridBots.persistSpotGridBot, args(hlAccountId, { gridCount: 51, orderSize: 10, investmentAmount: 1000, freeQuoteBalance: 5000 })))
+      .rejects.toThrow(/gridCount/);
+  });
+
   it("(Codex ALTO) presupuesto total orderSize×gridCount > investmentAmount → rechaza", async () => {
     const t = makeConvexTest();
     const hlAccountId = await seedLiveEnv(t);
@@ -146,6 +154,28 @@ describe("persistSpotGridBot — guards (JAV-91)", () => {
     const hlAccountId = await seedLiveEnv(t);
     await expect(asUser(t).mutation(internal.spotGridBots.persistSpotGridBot, args(hlAccountId, { orderSize: 5, gridCount: 1 })))
       .rejects.toThrow(/m[ií]nimo notional|10 USDC/);
+  });
+
+  it("(JAV-101) budget en cents con ceil: orderSize 2-decimales que se pasa del presupuesto → rechaza", async () => {
+    const t = makeConvexTest();
+    const hlAccountId = await seedLiveEnv(t);
+    // 10.01 × 3 = 30.03 > 30.00 → rechaza por presupuesto (en cents: 1001×3=3003 > 3000).
+    await expect(asUser(t).mutation(internal.spotGridBots.persistSpotGridBot, args(hlAccountId, { orderSize: 10.01, gridCount: 3, investmentAmount: 30, freeQuoteBalance: 500 })))
+      .rejects.toThrow(/[Pp]resupuesto|orderSize×gridCount/);
+  });
+
+  it("(JAV-101) canonicalización: orderSize manual con >2 decimales (10.004) → rechaza", async () => {
+    const t = makeConvexTest();
+    const hlAccountId = await seedLiveEnv(t);
+    await expect(asUser(t).mutation(internal.spotGridBots.persistSpotGridBot, args(hlAccountId, { orderSize: 10.004, gridCount: 2, investmentAmount: 30, freeQuoteBalance: 500 })))
+      .rejects.toThrow(/decimales|centavos/);
+  });
+
+  it("(JAV-101) budget en cents: orderSize 'feo' que SÍ cabe (10.00×3 ≤ 30.00) → acepta", async () => {
+    const t = makeConvexTest();
+    const hlAccountId = await seedLiveEnv(t);
+    const r = await asUser(t).mutation(internal.spotGridBots.persistSpotGridBot, args(hlAccountId, { orderSize: 10, gridCount: 3, investmentAmount: 30, freeQuoteBalance: 500 }));
+    expect(r.ok).toBe(true);
   });
 });
 

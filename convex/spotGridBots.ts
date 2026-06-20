@@ -16,27 +16,55 @@ const MAINNET_GATE_KEY = "mainnetSpotGridApproved";
 // Espejo NON-node de la constante de hyperliquidSpot.ts (no se puede importar de un módulo "use node"
 // sin contaminar este archivo). HL rechaza órdenes spot por debajo de ~$10.
 const MIN_SPOT_NOTIONAL_USD = 10;
+// Espejo NON-node de ABS_MAX_GRID_LEVELS de spotGridEngine.ts ("use node", no importable aquí sin contaminar):
+// tope duro de niveles. (CodeRabbit Major) También en MANUAL, para que un payload no persista más órdenes de
+// las que el motor coloca y el detalle/UI muestran (mismo límite que aplica el AUTO).
+const ABS_MAX_GRID_LEVELS = 50;
 
 type GridInputs = {
   minPrice: number; gridProfitPercent: number; investmentAmount: number;
   orderSize: number; gridCount: number; feeRate: number;
 };
 
-// Validación PURA de parámetros del grid (sin red, sin balance). Reusada por preflight y persist.
-// (Codex ALTO) El presupuesto total del grid = orderSize × gridCount NO puede superar investmentAmount.
-// (Codex MEDIO) orderSize no puede caer bajo el mínimo notional de HL (~$10).
-function validateGridInputs(a: GridInputs): void {
-  for (const [k, val] of [["minPrice", a.minPrice], ["gridProfitPercent", a.gridProfitPercent],
-    ["investmentAmount", a.investmentAmount], ["orderSize", a.orderSize]] as const) {
-    if (!(val > 0)) throw new Error(`Parámetro inválido: ${k} debe ser > 0.`);
+type BaseGridInputs = { minPrice: number; gridProfitPercent: number; investmentAmount: number; feeRate: number };
+
+// (JAV-101) Validación de los inputs base que NO dependen del nº de niveles. La usa el preflight en modo
+// AUTO (donde gridCount/orderSize aún no existen — se derivan tras leer el precio spot) y la reusa
+// validateGridInputs (modo manual / persist). gridProfitPercent acotado a [0.5, 10] (mismo rango que el
+// form y que deriveAutoGrid); feeRate finito ≥ 0.
+function validateBaseGridInputs(a: BaseGridInputs): void {
+  for (const [k, val] of [["minPrice", a.minPrice], ["investmentAmount", a.investmentAmount]] as const) {
+    if (!Number.isFinite(val) || !(val > 0)) throw new Error(`Parámetro inválido: ${k} debe ser finito > 0.`);
   }
-  if (!(Number.isInteger(a.gridCount) && a.gridCount >= 1)) throw new Error("gridCount debe ser entero ≥ 1.");
-  if (a.feeRate < 0) throw new Error("feeRate no puede ser negativo.");
+  if (!Number.isFinite(a.gridProfitPercent) || !(a.gridProfitPercent >= 0.5 && a.gridProfitPercent <= 10)) {
+    throw new Error("gridProfitPercent debe estar entre 0.5 y 10.");
+  }
+  if (!Number.isFinite(a.feeRate) || a.feeRate < 0) throw new Error("feeRate no puede ser negativo.");
+}
+
+// Validación PURA completa de parámetros del grid (sin red, sin balance). Reusada por preflight (manual) y
+// persist. (Codex ALTO) presupuesto orderSize×gridCount ≤ investmentAmount. (Codex MEDIO) orderSize ≥ min
+// notional de HL (~$10). (JAV-101) El budget-check se hace en CENTAVOS con redondeo CONSERVADOR (ceil) para
+// no falso-aceptar un orderSize manual con >2 decimales (p.ej. 10.004×3 > 30.00) ni falso-rechazar por ULP.
+function validateGridInputs(a: GridInputs): void {
+  validateBaseGridInputs(a);
+  if (!Number.isFinite(a.orderSize) || !(a.orderSize > 0)) throw new Error("Parámetro inválido: orderSize debe ser finito > 0.");
+  if (!(Number.isInteger(a.gridCount) && a.gridCount >= 1 && a.gridCount <= ABS_MAX_GRID_LEVELS)) {
+    throw new Error(`gridCount debe ser entero entre 1 y ${ABS_MAX_GRID_LEVELS}.`);
+  }
   if (a.orderSize < MIN_SPOT_NOTIONAL_USD) {
     throw new Error(`orderSize ${a.orderSize} < mínimo notional de HL (${MIN_SPOT_NOTIONAL_USD} USDC).`);
   }
-  if (a.orderSize * a.gridCount > a.investmentAmount) {
-    throw new Error(`Presupuesto del grid (orderSize×gridCount = ${a.orderSize * a.gridCount}) supera investmentAmount (${a.investmentAmount}).`);
+  // (JAV-101 / Codex) Canonicalización: orderSize debe ser un nº exacto de centavos (≤2 decimales). El AUTO
+  // ya lo garantiza (floorQuoteForBudget); en MANUAL rechazamos un tamaño "fantasma" con >2 decimales
+  // (p.ej. 10.004) para no persistir ni operar con centavos que no existen.
+  if (Math.abs(a.orderSize * 100 - Math.round(a.orderSize * 100)) > 1e-9) {
+    throw new Error("orderSize: máximo 2 decimales (centavos).");
+  }
+  const invCents = Math.floor(a.investmentAmount * 100 + 1e-6);
+  const orderCents = Math.ceil(a.orderSize * 100 - 1e-6);
+  if (orderCents * a.gridCount > invCents) {
+    throw new Error(`Presupuesto del grid (orderSize×gridCount) supera investmentAmount (${a.investmentAmount}).`);
   }
 }
 
@@ -108,11 +136,22 @@ export const preflightCreateSpotGridBot = internalQuery({
     hlAccountId: v.id("hl_api_credentials"),
     network: v.union(v.literal("mainnet"), v.literal("testnet")),
     minPrice: v.number(), gridProfitPercent: v.number(), investmentAmount: v.number(),
-    orderSize: v.number(), gridCount: v.number(), feeRate: v.number(),
+    feeRate: v.number(),
+    // (JAV-101) En modo AUTO el nº de niveles se deriva tras leer el precio spot → gridCount/orderSize
+    // aún no existen aquí. En modo manual sí se envían y se validan completos antes de tocar HL.
+    auto: v.optional(v.boolean()),
+    orderSize: v.optional(v.number()), gridCount: v.optional(v.number()),
   },
   handler: async (ctx, a) => {
     const { cred } = await assertCreateGuards(ctx, a.hlAccountId, a.network);
-    validateGridInputs(a);
+    if (a.auto) {
+      validateBaseGridInputs(a);   // sin count: el resto se valida en persist tras derivar
+    } else {
+      if (a.orderSize === undefined || a.gridCount === undefined) {
+        throw new Error("Modo manual requiere orderSize y gridCount.");
+      }
+      validateGridInputs({ ...a, orderSize: a.orderSize, gridCount: a.gridCount });
+    }
     return { tradingAccountAddress: cred.tradingAccountAddress };
   },
 });
@@ -125,6 +164,7 @@ export const persistSpotGridBot = internalMutation({
     minPrice: v.number(), gridProfitPercent: v.number(), investmentAmount: v.number(),
     orderSize: v.number(), gridCount: v.number(), feeRate: v.number(),
     currentPrice: v.number(), freeQuoteBalance: v.number(),
+    autoDerived: v.optional(v.boolean()),   // (JAV-101) gridCount/orderSize derivados del rango → ancla a currentPrice
     network: v.union(v.literal("mainnet"), v.literal("testnet")),
   },
   handler: async (ctx, a) => {
@@ -140,6 +180,7 @@ export const persistSpotGridBot = internalMutation({
       baseAsset: a.baseAsset, quoteAsset: a.quoteAsset, minPrice: a.minPrice,
       gridProfitPercent: a.gridProfitPercent, investmentAmount: a.investmentAmount, orderSize: a.orderSize,
       gridCount: a.gridCount, feeRate: a.feeRate, currentPrice: a.currentPrice,
+      autoDerived: a.autoDerived === true,
       status: "running", network: a.network, generation: 1,
       createdAt: now, updatedAt: now,
     });

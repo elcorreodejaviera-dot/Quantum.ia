@@ -204,16 +204,21 @@ describe("getSpotPrice (Codex BAJO-pr1: alinea ctxs por POSICIÓN del universe, 
     ],
   };
 
-  it("lee ctxs[posición], no ctxs[universeIndex]", async () => {
-    const ctxs = [{ midPx: "3000" }, { midPx: "65000" }]; // pos 0→UETH, pos 1→UBTC
+  it("empareja el ctx por `coin` (= universe.name), NO por posición (los ctxs van desalineados como en HL real)", async () => {
+    // ctxs desalineados respecto a `universe` (más entradas, otro orden) — replica el bug real del #103.
+    const ctxs = [
+      { coin: "OTHER/USDC", midPx: "0.001" },
+      { coin: "UETH/USDC", midPx: "3000" },
+      { coin: "UBTC/USDC", midPx: "65000" },
+    ];
     const info: any = { spotMetaAndAssetCtxs: async () => [meta, ctxs] };
-    const btc = resolveSpotAssetFromMeta(meta, "BTC", "mainnet"); // UBTC, universeIndex 107 (pos 1)
-    // Si usara ctxs[107] sería undefined → NaN → throw. Debe tomar ctxs[1] = 65000.
+    const btc = resolveSpotAssetFromMeta(meta, "BTC", "mainnet"); // UBTC, name "UBTC/USDC"
+    // Por posición tomaría el ctx equivocado; por `coin` toma UBTC/USDC = 65000.
     expect(await getSpotPrice(info, btc)).toBe(65000);
   });
 
   it("usa markPx si midPx no está disponible", async () => {
-    const ctxs = [{ midPx: "3000" }, { markPx: "64000" }];
+    const ctxs = [{ coin: "UETH/USDC", midPx: "3000" }, { coin: "UBTC/USDC", markPx: "64000" }];
     const info: any = { spotMetaAndAssetCtxs: async () => [meta, ctxs] };
     const btc = resolveSpotAssetFromMeta(meta, "BTC", "mainnet");
     expect(await getSpotPrice(info, btc)).toBe(64000);

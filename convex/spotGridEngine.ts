@@ -21,6 +21,16 @@ import {
 const SUBMIT_GRACE_MS = 30_000;     // (Codex BAJO#2) espera antes de reintentar un `submitting` colgado
 const MAX_SUBMIT_ATTEMPTS = 5;      // tras esto, la orden submitting → failed
 const MAX_TICK_BUMPS = 20;          // (Codex MEDIO#4) tope del loop de profit neto
+// (JAV-101) Tope absoluto de niveles del grid: alineado con el cap de lectura de getSpotGridDetail (~50)
+// para NO crear más órdenes reales de las que la UI puede mostrar; la colocación es serial (1 RPC + lease
+// por orden). Subirlo exigiría paginar getSpotGridDetail + colocar por lotes entre reconciles (otra issue).
+const ABS_MAX_GRID_LEVELS = 50;
+// (CodeRabbit Major) Ventana de frescura del ancla de creación. El cron reconcilia 1/min, así que el primer
+// reconcile normal ocurre a segundos de crear el grid. Si pasó mucho más (cron parado/pausa/reanudación), el
+// `currentPrice` de creación puede haber quedado obsoleto: si el spot cayó, varios BUY anclados al precio
+// viejo quedarían POR ENCIMA del mercado y se ejecutarían al instante. Pasada esta ventana refrescamos el
+// precio en vivo (como manual/legacy) → nunca se colocan compras sobre un ancla vencida.
+const ANCHOR_MAX_AGE_MS = 5 * 60 * 1000;
 
 // ---- calculateGridLevels (PURA, exportada para tests) -------------------------------------------
 export type GridLevel = {
@@ -86,6 +96,87 @@ export function calculateGridLevels(p: {
     });
   }
   return { levels, rejected };
+}
+
+// (JAV-101) Tamaño por orden en CENTAVOS ENTEROS para que orderSize×gridCount ≤ investment sea exacto
+// (sin ULP de coma flotante). `orderCents = floor(invCents / n)` ⇒ orderCents·n ≤ invCents por construcción.
+export function floorQuoteForBudget(investmentAmount: number, n: number): { orderSize: number; orderCents: number; invCents: number } {
+  const invCents = Math.floor(investmentAmount * 100 + 1e-6);
+  const orderCents = Math.floor(invCents / n);
+  return { orderSize: orderCents / 100, orderCents, invCents };
+}
+
+/**
+ * (JAV-101, PURA, exportada para tests) Deriva el nº de niveles del grid (estilo BingX Infinity) a partir
+ * del RANGO (suelo→precio) y el profit%, topado por el capital (mínimo $10/orden de HL) y por ABS_MAX_GRID_LEVELS.
+ * El recuento NO se fija por la fórmula cerrada: SIMULA con `calculateGridLevels` (la misma lógica pura del
+ * motor: roundSpotPrice floor + rechazo de niveles bajo el suelo o min-notional) y baja `n` hasta que el motor
+ * acepta EXACTAMENTE `n` niveles → lo prometido == lo que se coloca. `orderSize` por centavos enteros (mismo
+ * valor que persiste y revalida). Lanza con mensaje claro si el rango/capital no dan ≥2 niveles válidos.
+ */
+export function deriveAutoGrid(p: {
+  currentPrice: number; minPrice: number; gridProfitPercent: number;
+  investmentAmount: number; szDecimals: number; feeRate: number; minNotional?: number;
+}): { gridCount: number; orderSize: number; capped: boolean; coveredFloor: number; nFull: number; nCapital: number; minNotEff: number } {
+  const minNotional = p.minNotional ?? MIN_SPOT_NOTIONAL_USD;
+  for (const [k, val] of [["currentPrice", p.currentPrice], ["minPrice", p.minPrice],
+    ["investmentAmount", p.investmentAmount], ["gridProfitPercent", p.gridProfitPercent]] as const) {
+    if (!Number.isFinite(val) || !(val > 0)) throw new Error(`deriveAutoGrid: ${k} debe ser finito > 0.`);
+  }
+  if (!Number.isFinite(p.feeRate) || p.feeRate < 0) throw new Error("deriveAutoGrid: feeRate debe ser finito ≥ 0.");
+  if (!(p.gridProfitPercent >= 0.5 && p.gridProfitPercent <= 10)) throw new Error("deriveAutoGrid: gridProfitPercent fuera de [0.5, 10].");
+  if (!(p.minPrice < p.currentPrice)) throw new Error("deriveAutoGrid: el suelo (minPrice) debe estar por debajo del precio actual.");
+
+  const step = 1 + p.gridProfitPercent / 100;
+  const sizeTick = 10 ** (-p.szDecimals);
+  const minNotEff = minNotional + p.currentPrice * sizeTick;   // colchón por truncado de tamaño (peor caso = precio más alto)
+  const nFull = Math.floor(Math.log(p.currentPrice / p.minPrice) / Math.log(step));   // niveles para cubrir suelo→precio
+  const nCapital = Math.floor(p.investmentAmount / minNotEff);                         // máx que permite el capital con colchón
+  if (nFull < 2) throw new Error("deriveAutoGrid: rango demasiado estrecho para ≥2 niveles con este profit% (sube el % o baja el suelo).");
+  if (nCapital < 2) throw new Error("deriveAutoGrid: capital insuficiente para ≥2 órdenes respetando el mínimo de HL (sube la inversión).");
+  const nCand = Math.min(nFull, nCapital, ABS_MAX_GRID_LEVELS);
+
+  // ORÁCULO: baja n desde nCand hasta que calculateGridLevels acepte EXACTAMENTE n. Aceptación monótona al
+  // bajar n (menos profundidad + mayor orderSize) → el primer n que cumple es el MAYOR válido.
+  let chosen = 0;
+  let chosenLevels: GridLevel[] = [];
+  for (let n = nCand; n >= 2; n--) {
+    const orderSize = floorQuoteForBudget(p.investmentAmount, n).orderSize;
+    if (orderSize < minNotional) continue;   // el truncado lo dejó bajo el mínimo → prueba un n menor
+    const { levels } = calculateGridLevels({
+      currentPrice: p.currentPrice, minPrice: p.minPrice, gridProfitPercent: p.gridProfitPercent,
+      orderSize, gridCount: n, szDecimals: p.szDecimals, feeRate: p.feeRate,
+    });
+    if (levels.length === n) { chosen = n; chosenLevels = levels; break; }
+  }
+  if (chosen < 2) throw new Error("deriveAutoGrid: no se pueden colocar ni 2 niveles válidos (ajusta suelo/%/capital).");
+  const orderSize = floorQuoteForBudget(p.investmentAmount, chosen).orderSize;   // EXACTO el que va a persist
+  const coveredFloor = chosenLevels[chosenLevels.length - 1].buyPrice;            // último nivel REALMENTE aceptado
+  const capped = nFull > Math.min(nCapital, ABS_MAX_GRID_LEVELS) || chosen < nCand;
+  return { gridCount: chosen, orderSize, capped, coveredFloor, nFull, nCapital, minNotEff };
+}
+
+/**
+ * (JAV-101, PURA, exportada para tests) Decide el precio de la COLOCACIÓN INICIAL.
+ * - Grid AUTO-derivado (autoDerived) con currentPrice ancla válido (> minPrice): usa ese MISMO precio con
+ *   que deriveAutoGrid calculó gridCount → garantiza "prometido == colocado" (sin drift entre crear y el
+ *   primer reconcile).
+ * - Manual / legacy (autoDerived != true), ancla corrupta (currentPrice ≤ minPrice, p.ej. el viejo bug ~0)
+ *   o ANCLA VENCIDA (creación hace más de ANCHOR_MAX_AGE_MS, CodeRabbit): `null` → el caller refresca el
+ *   precio spot EN VIVO (preserva la protección del #103; nunca coloca compras sobre un snapshot stale).
+ */
+export function pickInitialPlacementPrice(
+  bot: { autoDerived?: boolean; currentPrice?: number; minPrice: number; _creationTime?: number },
+  now: number = Date.now(),
+): number | null {
+  if (
+    bot.autoDerived === true &&
+    typeof bot.currentPrice === "number" && bot.currentPrice > bot.minPrice &&
+    typeof bot._creationTime === "number" && now - bot._creationTime <= ANCHOR_MAX_AGE_MS
+  ) {
+    return bot.currentPrice;
+  }
+  return null;   // refrescar en vivo (manual/legacy/ancla corrupta/ancla vencida/sin timestamp)
 }
 
 // ---- helpers internos del reconcile -------------------------------------------------------------
@@ -157,12 +248,13 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
 
   // (1) Colocación inicial: bot running sin órdenes de la generación actual.
   if (isRunning && !orders.some((o) => o.generation === bot.generation)) {
-    // (FIX money-path, Codex MEDIO) NO confiar en `bot.currentPrice` persistido para la colocación
-    // inicial: un valor rancio/corrupto (p.ej. el del bug de getSpotPrice que guardaba ~0) envenenaría
-    // los niveles y NO se autocorrige tras redeploy. Refrescamos SIEMPRE el precio en vivo aquí.
-    const currentPrice = await getSpotPrice(clients.info, resolved);
+    // (JAV-101, Codex MEDIO) SOLO los grids AUTO-derivados anclan a su `currentPrice` de creación (el
+    // mismo con que deriveAutoGrid calculó gridCount → "prometido == colocado"). Los manuales y los legacy
+    // (autoDerived != true) o un ancla corrupta (≤ minPrice) refrescan el precio EN VIVO → preserva la
+    // protección del #103 sin reabrir el riesgo del snapshot persistido para esos bots.
+    const anchorPrice = pickInitialPlacementPrice(bot, Date.now()) ?? await getSpotPrice(clients.info, resolved);
     const { levels } = calculateGridLevels({
-      currentPrice,
+      currentPrice: anchorPrice,
       minPrice: bot.minPrice, gridProfitPercent: bot.gridProfitPercent, orderSize: bot.orderSize,
       gridCount: bot.gridCount, szDecimals, feeRate: bot.feeRate,
     });

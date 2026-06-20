@@ -76,6 +76,17 @@ async function assertCreateGuards(
 }
 
 // --- Gate mainnet: aprobación admin sellada (Codex #2-r3) -----------------------------------------
+// Lectura admin del gate de mainnet (para que el Panel de Admin muestre ON/OFF).
+// Solo admin; devuelve el value del gate o null si nunca se fijó.
+export const getMainnetSpotGridApproval = query({
+  args: {},
+  handler: async (ctx) => {
+    await requireAdmin(ctx);
+    const gate = await ctx.db.query("system_config").withIndex("by_key", (q) => q.eq("key", MAINNET_GATE_KEY)).first();
+    return (gate?.value as { enabled?: boolean; approvedAt?: number; approvedBy?: string } | undefined) ?? null;
+  },
+});
+
 export const setMainnetSpotGridApproval = mutation({
   args: { enabled: v.boolean() },
   handler: async (ctx, { enabled }) => {

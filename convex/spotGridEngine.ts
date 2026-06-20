@@ -157,8 +157,12 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
 
   // (1) Colocación inicial: bot running sin órdenes de la generación actual.
   if (isRunning && !orders.some((o) => o.generation === bot.generation)) {
+    // (FIX money-path, Codex MEDIO) NO confiar en `bot.currentPrice` persistido para la colocación
+    // inicial: un valor rancio/corrupto (p.ej. el del bug de getSpotPrice que guardaba ~0) envenenaría
+    // los niveles y NO se autocorrige tras redeploy. Refrescamos SIEMPRE el precio en vivo aquí.
+    const currentPrice = await getSpotPrice(clients.info, resolved);
     const { levels } = calculateGridLevels({
-      currentPrice: bot.currentPrice ?? (await getSpotPrice(clients.info, resolved)),
+      currentPrice,
       minPrice: bot.minPrice, gridProfitPercent: bot.gridProfitPercent, orderSize: bot.orderSize,
       gridCount: bot.gridCount, szDecimals, feeRate: bot.feeRate,
     });

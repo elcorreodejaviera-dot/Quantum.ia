@@ -301,8 +301,10 @@ export async function getSpotPrice(info: InfoClient, resolved: ResolvedSpotAsset
   // daba 0.000069 en vez de ~63.895). Cada ctx trae su propia etiqueta `coin` ("@<universeIndex>");
   // emparejamos por el `name` del universe (= ese coin), no por el índice posicional.
   const uni = (meta.universe ?? []).find((u: any) => Number(u.index) === resolved.universeIndex);
-  const coin = uni?.name ?? `@${resolved.universeIndex}`;
-  const ctx = (ctxs ?? []).find((c: any) => c?.coin === coin);
+  // (Codex BAJO) Si el universeIndex ya no existe en el meta actual, fallar LIMPIO en vez de buscar
+  // por un coin sintético "@idx" que podría matchear un ctx que NO corresponde al par resuelto.
+  if (!uni?.name) throw new Error(`Precio spot no disponible para ${resolved.symbol}.`);
+  const ctx = (ctxs ?? []).find((c: any) => c?.coin === uni.name);
   const mid = ctx?.midPx != null ? Number(ctx.midPx) : NaN;
   const mark = ctx?.markPx != null ? Number(ctx.markPx) : NaN;
   const px = Number.isFinite(mid) ? mid : mark;

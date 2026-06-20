@@ -27,14 +27,20 @@ JAV-90 (`convex/hyperliquidSpot.ts`, ya mergeado) y el helper CLOID (`convex/clo
 CLOID enviado a HL = `0x` + 32 hex (16 bytes) vía `toHlCloid` (`convex/cloids.ts`). Input =
 `botId|generation|cycleId|level|side` (`spotGridCloidInput`). NO SHA-256 completo.
 
-## 3. `convex/spotGridBots.ts`
-- **`createSpotGridBot`** — guard live completo (Codex #3): **`requireBotManager` (canManageBots) +
+## 3. Backend — flujo de creación DIVIDIDO en 2 archivos (CodeRabbit #95)
+La creación NO vive en un solo archivo: la **action** (RPC HL) está aislada en `convex/spotGridActions.ts`
+("use node") y los **guards/persistencia** en `convex/spotGridBots.ts` (NON-node, convex-testable).
+- **`createSpotGridBot`** (action, `spotGridActions.ts`) — `requireAuth` + `assertExpectedNetwork` +
+  confirm LIVE → corre el **preflight** ANTES de cualquier RPC → lecturas PÚBLICAS de HL (resolver activo
+  por red, precio, balance; SIN clave) → delega en `persistSpotGridBot`.
+- **`preflightCreateSpotGridBot`** (internalQuery) y **`persistSpotGridBot`** (internalMutation) en
+  `spotGridBots.ts` comparten `assertCreateGuards`: **`requireBotManager` (canManageBots) +
   `requireTradeLive` (canTradeLive)** — crear/activar infraestructura de bots es permiso de GESTIÓN;
   `canTradeLive` autoriza operar real pero NO crear bots por sí solo, así que se exigen AMBOS (Codex
-  JAV-91 r-plan ALTO). + `systemConfig.tradingEnabled` ON + `!simulationMode` global + red esperada
-  (`assertExpectedNetwork`) + flag de confirmación LIVE explícita. **Gate mainnet (Codex #2-r3/#1-r4):** lee `by_key`
-  `"mainnetSpotGridApproved"` y rechaza `network==="mainnet"` si `value?.enabled !== true`. Valida
-  allowlist (resolver de PR1 por red), inputs > 0, balance. Scoping por `userId`.
+  ALTO). + `tradingEnabled` ON + `!simulationMode` global + red (`assertExpectedNetwork` en la action).
+  **Gate mainnet:** `by_key` `"mainnetSpotGridApproved"`, rechaza `mainnet` si `value?.enabled !== true`.
+  Inputs (`validateGridInputs`: >0, gridCount entero≥1, `orderSize≥$10`, `orderSize×gridCount≤investment`);
+  balance≥investment en persist. Scoping por `userId`.
   - **🔑 INVARIANTE CUENTA HL EXCLUSIVA (decisión usuario 2026-06-20, JAV-89/JAV-91):** rechazar una
     `hlAccountId` cuya `tradingAccountAddress` ya use **cualquier bot IL/Trading (`bots`)** o **otro
     `spot_grid_bots`**. En HL spot y perp viven en la MISMA wallet → compartir cuenta mezclaría órdenes/
@@ -50,7 +56,9 @@ NO envía/cancela órdenes en HL (PR3). NO motor ni cron (PR3). NO UI (PR4). NO 
 `leverage.ts`.
 
 ## Tests (convex-test + pure)
-- `createSpotGridBot`: guard rechaza si SIN `canManageBots` o SIN `canTradeLive` (ambos requeridos) /
+- El harness convex-test congela **`preflightCreateSpotGridBot` / `persistSpotGridBot`** (NON-node); la
+  action Node (`spotGridActions.ts`) queda FUERA del harness (su lógica es delgada: preflight→RPC→persist).
+- preflight/persist: rechazan si SIN `canManageBots` o SIN `canTradeLive` (ambos requeridos) /
   trading off / simulationMode / red incorrecta / sin confirm.
 - Gate mainnet: rechaza mainnet sin `mainnetSpotGridApproved.enabled=true`; acepta tras aprobación.
 - **Exclusividad de cuenta:** rechaza `hlAccountId` ya usada por un `bots` o por otro `spot_grid_bots`.

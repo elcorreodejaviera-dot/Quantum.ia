@@ -148,12 +148,19 @@ describe("persistSpotGridBot — guards (JAV-91)", () => {
       .rejects.toThrow(/m[ií]nimo notional|10 USDC/);
   });
 
-  it("(JAV-101) budget en cents con ceil: orderSize manual >2 decimales que se pasa del presupuesto → rechaza", async () => {
+  it("(JAV-101) budget en cents con ceil: orderSize 2-decimales que se pasa del presupuesto → rechaza", async () => {
     const t = makeConvexTest();
     const hlAccountId = await seedLiveEnv(t);
-    // 10.004 × 3 = 30.012 > 30.00 → debe rechazar (round() lo aceptaría por error; ceil() no).
-    await expect(asUser(t).mutation(internal.spotGridBots.persistSpotGridBot, args(hlAccountId, { orderSize: 10.004, gridCount: 3, investmentAmount: 30, freeQuoteBalance: 500 })))
+    // 10.01 × 3 = 30.03 > 30.00 → rechaza por presupuesto (en cents: 1001×3=3003 > 3000).
+    await expect(asUser(t).mutation(internal.spotGridBots.persistSpotGridBot, args(hlAccountId, { orderSize: 10.01, gridCount: 3, investmentAmount: 30, freeQuoteBalance: 500 })))
       .rejects.toThrow(/[Pp]resupuesto|orderSize×gridCount/);
+  });
+
+  it("(JAV-101) canonicalización: orderSize manual con >2 decimales (10.004) → rechaza", async () => {
+    const t = makeConvexTest();
+    const hlAccountId = await seedLiveEnv(t);
+    await expect(asUser(t).mutation(internal.spotGridBots.persistSpotGridBot, args(hlAccountId, { orderSize: 10.004, gridCount: 2, investmentAmount: 30, freeQuoteBalance: 500 })))
+      .rejects.toThrow(/decimales|centavos/);
   });
 
   it("(JAV-101) budget en cents: orderSize 'feo' que SÍ cabe (10.00×3 ≤ 30.00) → acepta", async () => {

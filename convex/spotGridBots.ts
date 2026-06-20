@@ -49,6 +49,12 @@ function validateGridInputs(a: GridInputs): void {
   if (a.orderSize < MIN_SPOT_NOTIONAL_USD) {
     throw new Error(`orderSize ${a.orderSize} < mínimo notional de HL (${MIN_SPOT_NOTIONAL_USD} USDC).`);
   }
+  // (JAV-101 / Codex) Canonicalización: orderSize debe ser un nº exacto de centavos (≤2 decimales). El AUTO
+  // ya lo garantiza (floorQuoteForBudget); en MANUAL rechazamos un tamaño "fantasma" con >2 decimales
+  // (p.ej. 10.004) para no persistir ni operar con centavos que no existen.
+  if (Math.abs(a.orderSize * 100 - Math.round(a.orderSize * 100)) > 1e-9) {
+    throw new Error("orderSize: máximo 2 decimales (centavos).");
+  }
   const invCents = Math.floor(a.investmentAmount * 100 + 1e-6);
   const orderCents = Math.ceil(a.orderSize * 100 - 1e-6);
   if (orderCents * a.gridCount > invCents) {

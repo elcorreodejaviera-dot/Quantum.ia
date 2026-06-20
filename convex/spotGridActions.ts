@@ -70,7 +70,7 @@ export const createSpotGridBot = action({
       assetId: resolved.assetId, baseAsset: resolved.baseAsset, quoteAsset: resolved.quoteAsset,
       minPrice: a.minPrice, gridProfitPercent: a.gridProfitPercent, investmentAmount: a.investmentAmount,
       orderSize, gridCount, feeRate: a.feeRate,
-      currentPrice, freeQuoteBalance: bal.free, network,
+      currentPrice, freeQuoteBalance: bal.free, autoDerived: auto, network,
     });
     return { ...res, gridCount, orderSize, capped, coveredFloor };
   },

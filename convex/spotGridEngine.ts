@@ -150,6 +150,22 @@ export function deriveAutoGrid(p: {
   return { gridCount: chosen, orderSize, capped, coveredFloor, nFull, nCapital, minNotEff };
 }
 
+/**
+ * (JAV-101, PURA, exportada para tests) Decide el precio de la COLOCACIÓN INICIAL.
+ * - Grid AUTO-derivado (autoDerived) con currentPrice ancla válido (> minPrice): usa ese MISMO precio con
+ *   que deriveAutoGrid calculó gridCount → garantiza "prometido == colocado" (sin drift entre crear y el
+ *   primer reconcile).
+ * - Manual / legacy (autoDerived != true) o ancla corrupta (currentPrice ≤ minPrice, p.ej. el viejo bug ~0):
+ *   `null` → el caller refresca el precio spot EN VIVO (preserva la protección del #103; no depende de un
+ *   snapshot persistido que podría ser stale/corrupto).
+ */
+export function pickInitialPlacementPrice(bot: { autoDerived?: boolean; currentPrice?: number; minPrice: number }): number | null {
+  if (bot.autoDerived === true && typeof bot.currentPrice === "number" && bot.currentPrice > bot.minPrice) {
+    return bot.currentPrice;
+  }
+  return null;   // refrescar en vivo
+}
+
 // ---- helpers internos del reconcile -------------------------------------------------------------
 
 type Clients = { info: any; exchange: any; address: string };
@@ -219,14 +235,11 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
 
   // (1) Colocación inicial: bot running sin órdenes de la generación actual.
   if (isRunning && !orders.some((o) => o.generation === bot.generation)) {
-    // (JAV-101, Codex MEDIO) ANCLA al precio de CREACIÓN (`bot.currentPrice`), que es el MISMO con el
-    // que `deriveAutoGrid` derivó gridCount/orderSize → garantiza "prometido == colocado" (los niveles
-    // que coloca el motor == los que la action prometió, sin drift entre crear y el 1er reconcile).
-    // getSpotPrice ya está corregido (#103) → `bot.currentPrice` es fiable. GUARD anti-corrupto: si por
-    // cualquier razón es inválido (≤ minPrice, p.ej. el viejo bug ~0), refrescamos en vivo (no envenena).
-    const anchorPrice = (bot.currentPrice > bot.minPrice)
-      ? bot.currentPrice
-      : await getSpotPrice(clients.info, resolved);
+    // (JAV-101, Codex MEDIO) SOLO los grids AUTO-derivados anclan a su `currentPrice` de creación (el
+    // mismo con que deriveAutoGrid calculó gridCount → "prometido == colocado"). Los manuales y los legacy
+    // (autoDerived != true) o un ancla corrupta (≤ minPrice) refrescan el precio EN VIVO → preserva la
+    // protección del #103 sin reabrir el riesgo del snapshot persistido para esos bots.
+    const anchorPrice = pickInitialPlacementPrice(bot) ?? await getSpotPrice(clients.info, resolved);
     const { levels } = calculateGridLevels({
       currentPrice: anchorPrice,
       minPrice: bot.minPrice, gridProfitPercent: bot.gridProfitPercent, orderSize: bot.orderSize,

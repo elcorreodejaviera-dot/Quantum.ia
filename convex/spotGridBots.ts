@@ -158,6 +158,7 @@ export const persistSpotGridBot = internalMutation({
     minPrice: v.number(), gridProfitPercent: v.number(), investmentAmount: v.number(),
     orderSize: v.number(), gridCount: v.number(), feeRate: v.number(),
     currentPrice: v.number(), freeQuoteBalance: v.number(),
+    autoDerived: v.optional(v.boolean()),   // (JAV-101) gridCount/orderSize derivados del rango → ancla a currentPrice
     network: v.union(v.literal("mainnet"), v.literal("testnet")),
   },
   handler: async (ctx, a) => {
@@ -173,6 +174,7 @@ export const persistSpotGridBot = internalMutation({
       baseAsset: a.baseAsset, quoteAsset: a.quoteAsset, minPrice: a.minPrice,
       gridProfitPercent: a.gridProfitPercent, investmentAmount: a.investmentAmount, orderSize: a.orderSize,
       gridCount: a.gridCount, feeRate: a.feeRate, currentPrice: a.currentPrice,
+      autoDerived: a.autoDerived === true,
       status: "running", network: a.network, generation: 1,
       createdAt: now, updatedAt: now,
     });

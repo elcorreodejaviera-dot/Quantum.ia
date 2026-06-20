@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { calculateGridLevels, deriveAutoGrid, floorQuoteForBudget } from "../convex/spotGridEngine";
+import { calculateGridLevels, deriveAutoGrid, floorQuoteForBudget, pickInitialPlacementPrice } from "../convex/spotGridEngine";
 
 // (JAV-92) Niveles del grid: geométrico, profit NETO post-rounding ≥ objetivo, min-notional, loop acotado.
 
@@ -119,5 +119,37 @@ describe("deriveAutoGrid (JAV-101)", () => {
     const d = deriveAutoGrid({ ...btc, feeRate: 0.005, minPrice: 45000, investmentAmount: 1200 });
     const { levels } = calculateGridLevels({ currentPrice: btc.currentPrice, minPrice: 45000, gridProfitPercent: btc.gridProfitPercent, orderSize: d.orderSize, gridCount: d.gridCount, szDecimals: btc.szDecimals, feeRate: 0.005 });
     expect(levels.length).toBe(d.gridCount);
+  });
+});
+
+// (JAV-101, Codex MEDIO) pickInitialPlacementPrice: SOLO auto-grids con ancla válida usan el precio de
+// creación; manual/legacy/corrupto refrescan en vivo (null). Garantiza prometido==colocado sin reabrir #103.
+describe("pickInitialPlacementPrice (JAV-101)", () => {
+  it("auto-grid con currentPrice > minPrice → ancla a currentPrice", () => {
+    expect(pickInitialPlacementPrice({ autoDerived: true, currentPrice: 64000, minPrice: 45000 })).toBe(64000);
+  });
+  it("auto-grid con ancla corrupta (currentPrice ≤ minPrice, p.ej. ~0) → null (refresca en vivo)", () => {
+    expect(pickInitialPlacementPrice({ autoDerived: true, currentPrice: 0.000069, minPrice: 45000 })).toBeNull();
+    expect(pickInitialPlacementPrice({ autoDerived: true, currentPrice: 45000, minPrice: 45000 })).toBeNull();
+  });
+  it("manual (autoDerived false) o legacy (undefined) → null (refresca en vivo, preserva #103)", () => {
+    expect(pickInitialPlacementPrice({ autoDerived: false, currentPrice: 64000, minPrice: 45000 })).toBeNull();
+    expect(pickInitialPlacementPrice({ currentPrice: 64000, minPrice: 45000 })).toBeNull();
+  });
+  it("auto sin currentPrice → null", () => {
+    expect(pickInitialPlacementPrice({ autoDerived: true, minPrice: 45000 })).toBeNull();
+  });
+
+  it("CONTRATO ancla: auto-grid derivado a precio A coloca gridCount en A; a un precio B drifteado puede diferir", () => {
+    const p = { currentPrice: 64000, gridProfitPercent: 1, szDecimals: 5, feeRate: 0.0004, minPrice: 45000, investmentAmount: 1200 };
+    const d = deriveAutoGrid(p);
+    // En el ANCLA (A=64000) el motor coloca EXACTAMENTE gridCount (lo que pickInitialPlacementPrice devuelve).
+    const anchor = pickInitialPlacementPrice({ autoDerived: true, currentPrice: 64000, minPrice: 45000 })!;
+    expect(anchor).toBe(64000);
+    const atA = calculateGridLevels({ currentPrice: anchor, minPrice: p.minPrice, gridProfitPercent: p.gridProfitPercent, orderSize: d.orderSize, gridCount: d.gridCount, szDecimals: p.szDecimals, feeRate: p.feeRate });
+    expect(atA.levels.length).toBe(d.gridCount);
+    // A un precio B muy por debajo (drift), el mismo gridCount puede recortarse contra el suelo → justifica anclar.
+    const atB = calculateGridLevels({ currentPrice: 47000, minPrice: p.minPrice, gridProfitPercent: p.gridProfitPercent, orderSize: d.orderSize, gridCount: d.gridCount, szDecimals: p.szDecimals, feeRate: p.feeRate });
+    expect(atB.levels.length).toBeLessThan(d.gridCount);
   });
 });

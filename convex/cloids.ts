@@ -22,6 +22,8 @@ export async function toHlCloid(input: string): Promise<`0x${string}`> {
 /**
  * Cloid determinista de una orden de spot grid. El input incluye `generation` y `cycleId` para que
  * la reposición de un mismo nivel NUNCA colisione con órdenes/fills de ciclos anteriores (Codex #1).
+ * `tranche` (JAV-92) distingue múltiples SELL del MISMO BUY cuando se llena por partes ≥ min-notional
+ * (sin él, dos SELL de tranches del mismo nivel/ciclo colisionarían). Las BUY usan tranche 0.
  */
 export function spotGridCloidInput(
   botId: string,
@@ -29,6 +31,7 @@ export function spotGridCloidInput(
   cycleId: number,
   level: number,
   side: "buy" | "sell",
+  tranche: number = 0,
 ): string {
-  return `${botId}:${generation}:${cycleId}:${level}:${side}`;
+  return `${botId}:${generation}:${cycleId}:${level}:${side}:${tranche}`;
 }

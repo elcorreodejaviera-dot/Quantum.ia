@@ -388,5 +388,52 @@ export async function cancelSpotByCloid(
   }
 }
 
+// --- Lecturas de estado de órdenes (JAV-92, motor) -----------------------------------------------
+// SIEMPRE por `tradingAccountAddress` (cuenta principal), NUNCA la agent wallet (Codex #9).
+
+export type OpenSpotOrder = { cloid: string | null; oid: string | null; coin: string; side: string; sz: number; limitPx: number };
+
+/** Órdenes abiertas (resting) de la cuenta. Para idempotencia (leer antes de crear) y reconcile. */
+export async function getOpenSpotOrders(info: InfoClient, tradingAccountAddress: string): Promise<OpenSpotOrder[]> {
+  const oo = (await info.frontendOpenOrders({ user: tradingAccountAddress as `0x${string}` })) as any[];
+  return (oo ?? []).map((o) => ({
+    cloid: typeof o?.cloid === "string" ? o.cloid.toLowerCase() : null,
+    oid: o?.oid != null ? String(o.oid) : null,
+    coin: String(o?.coin ?? ""), side: String(o?.side ?? ""),
+    sz: Number(o?.sz ?? 0), limitPx: Number(o?.limitPx ?? 0),
+  }));
+}
+
+export type SpotFill = { cloid: string | null; oid: string | null; coin: string; side: string; sz: number; px: number; time: number; fee: number };
+
+/** Fills del usuario (para avanzar `fillCursor`). `sinceMs` filtra por tiempo cuando se conoce el cursor. */
+export async function getSpotFills(info: InfoClient, tradingAccountAddress: string, sinceMs?: number): Promise<SpotFill[]> {
+  const user = tradingAccountAddress as `0x${string}`;
+  const raw = (sinceMs != null
+    ? await info.userFillsByTime({ user, startTime: sinceMs })
+    : await info.userFills({ user })) as any[];
+  return (raw ?? []).map((f) => ({
+    cloid: typeof f?.cloid === "string" ? f.cloid.toLowerCase() : null,
+    oid: f?.oid != null ? String(f.oid) : null,
+    coin: String(f?.coin ?? ""), side: String(f?.side ?? ""),
+    sz: Number(f?.sz ?? 0), px: Number(f?.px ?? 0),
+    time: Number(f?.time ?? 0), fee: Number(f?.fee ?? 0),
+  }));
+}
+
+export type SpotOrderStatus = "open" | "filled" | "canceled" | "triggered" | "rejected" | "unknown" | "notfound";
+
+/**
+ * Estado de una orden por CLOID (fallback del reconcile, Codex #2). HL acepta el cloid en el campo `oid`
+ * de `orderStatus` (mismo patrón que el motor perp). "notfound" si HL no la conoce.
+ */
+export async function getSpotOrderStatusByCloid(info: InfoClient, tradingAccountAddress: string, cloid: `0x${string}`): Promise<SpotOrderStatus> {
+  const r = (await info.orderStatus({ user: tradingAccountAddress as `0x${string}`, oid: cloid })) as any;
+  if (r?.status !== "order") return "notfound";
+  const s = r?.order?.status;
+  if (s === "open" || s === "filled" || s === "canceled" || s === "triggered" || s === "rejected") return s;
+  return "unknown";
+}
+
 // Re-export para que el connector y el motor (PR3) compartan el mismo cloid determinista.
 export { toHlCloid, spotGridCloidInput };

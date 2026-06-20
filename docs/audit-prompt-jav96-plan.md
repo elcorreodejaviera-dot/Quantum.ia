@@ -14,7 +14,7 @@ El check `orphan_orders` (`src/lib/poolAudit.js:51`) marca falso positivo: lee
 se ponen `open` al colocarse (`triggerEngine.ts:372`) pero al cancelarse en cierre/disarm
 (`ensureOrdersDead`/`cancelByCloid`) nunca se pasan a `canceled` → quedan `open` rancio en arms
 terminales. Fix propuesto (Opción A): marcar `observedStatus:"canceled"` SOLO donde `ensureOrdersDead`
-ya confirmó muerte, vía nueva `markArmOrdersCanceled(armId, token, roles?)` bajo lease.
+ya confirmó muerte, vía nueva `markArmOrdersCanceled(armId, token, cloids: string[])` bajo lease.
 
 ## Verifica (CRÍTICO primero)
 

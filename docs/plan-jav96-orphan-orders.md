@@ -56,10 +56,10 @@ marcar en llamadas a `ensureOrdersDead` cuyo retorno se IGNORA (best-effort).**
   (~952), ambos con retorno comprobado → marcar SOLO esos cloids (NUNCA `entry_lower`, sigue armada).
   Cierre por expiración → `closeArmLowerOnlyExpired` (`triggerArms.ts:484`): marcar las cancelables
   confirmadas muertas.
-- **Disarm pre-fill** — `if (!(await ensureOrdersDead(entryCloids)))` (~923, comprobado) → antes de
-  `settleArm(... "disarmed")` (engine ~927) → `markArmOrdersCanceled(armId, token, entryCloids)`.
-- **`failed` por prueba negativa** — `ensureOrdersDead(entryCloids)` (~977, comprobado) → antes de
-  `settleArm(... "failed")` (engine ~984) → marcar `entryCloids`.
+- **Disarm pre-fill** (~923→927) y **`failed` por prueba negativa** (~941/~984): **YA marcan `canceled`
+  hoy** vía `setArmOrderObserved(..., "canceled")` por entrada (bucle existente del motor). → **NO
+  requieren wiring nuevo** (al implementar se confirmó). El wiring NUEVO de esta PR se limita por tanto a
+  los **3 puntos** de arriba (cierre flat, transición `armed_lower_only`, cierre `armed_lower_only`).
 - ⛔ **N5 defensa pausa (~420): NO marcar aquí** (Codex r2 #2). Ese punto solo hace `cancelByCloid`
   best-effort tras pausa, SIN prueba negativa. El marcado lo hará el reconcile de `wantDisarm`, que sí
   pasa por `ensureOrdersDead(entryCloids) === true` (disarm pre-fill, arriba).

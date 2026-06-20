@@ -18,7 +18,9 @@ async function seedOrder(ctx: MutationCtx, armId: Id<"trigger_arms">, cloid: str
   });
 }
 
-const LEASE = { reconcileLeaseToken: "owner", reconcileLeaseUntil: Date.now() + 60_000 };
+// Lease FRESCO por test (no a nivel de módulo): si la suite tarda >60s, un lease fijo calculado al
+// cargar el archivo expiraría y haría flakear el fencing (CodeRabbit #94).
+const lease = () => ({ reconcileLeaseToken: "owner", reconcileLeaseUntil: Date.now() + 60_000 });
 const obs = (t: any, id: Id<"trigger_orders">) => t.run((ctx: MutationCtx) => ctx.db.get(id)).then((o: any) => o?.observedStatus);
 
 describe("markArmOrdersCanceled (JAV-96)", () => {
@@ -26,7 +28,7 @@ describe("markArmOrdersCanceled (JAV-96)", () => {
     const t = makeConvexTest();
     const seeded = await t.run(async (ctx) => {
       const base = await seedBase(ctx);
-      const armId = await seedTriggerArm(ctx, base, { status: "closed", ...LEASE });
+      const armId = await seedTriggerArm(ctx, base, { status: "closed", ...lease() });
       const oOpen = await seedOrder(ctx, armId, "0xopen", { role: "entry_lower", observedStatus: "open" });
       const oPending = await seedOrder(ctx, armId, "0xpending", { role: "entry_upper", observedStatus: "pending" });
       const oFilled = await seedOrder(ctx, armId, "0xfilled", { role: "sl_upper", observedStatus: "filled" });
@@ -53,7 +55,7 @@ describe("markArmOrdersCanceled (JAV-96)", () => {
     const t = makeConvexTest();
     const { armId, oOpen } = await t.run(async (ctx) => {
       const base = await seedBase(ctx);
-      const armId = await seedTriggerArm(ctx, base, { status: "closed", ...LEASE });
+      const armId = await seedTriggerArm(ctx, base, { status: "closed", ...lease() });
       const oOpen = await seedOrder(ctx, armId, "0xopen", { observedStatus: "open" });
       return { armId, oOpen };
     });
@@ -66,7 +68,7 @@ describe("markArmOrdersCanceled (JAV-96)", () => {
     const t = makeConvexTest();
     const { armA, oB } = await t.run(async (ctx) => {
       const base = await seedBase(ctx);
-      const armA = await seedTriggerArm(ctx, base, { status: "closed", ...LEASE });
+      const armA = await seedTriggerArm(ctx, base, { status: "closed", ...lease() });
       const armB = await seedTriggerArm(ctx, base, { status: "armed", generation: 2 });
       const oB = await seedOrder(ctx, armB, "0xb", { observedStatus: "open" });
       return { armA, oB };

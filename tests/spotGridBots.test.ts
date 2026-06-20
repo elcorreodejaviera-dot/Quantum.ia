@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { internal, api } from "../convex/_generated/api";
+import { SPOT_GRID_DETAIL_CYCLE_CAP } from "../convex/spotGridBots";
 import { makeConvexTest } from "./convexHarness";
 import { seedCredential } from "./fixtures";
 import type { MutationCtx } from "../convex/_generated/server";
@@ -271,7 +272,35 @@ describe("pause/list/get — ownership (JAV-91, Codex BAJO)", () => {
     expect(d?.stats.truncated).toBe(false);
     expect(d?.recentCycles.length).toBe(2);
     expect(d?.openOrders.some((o: any) => o.status === "open")).toBe(true);
-    // Nunca expone credencial/clave: hlAccountId es el id, pero no hay campos de clave.
-    expect(JSON.stringify(d)).not.toMatch(/encryptedPrivateKey|authTag/);
+    // Nunca expone credencial/clave (ni hlAccountId): solo escalares.
+    expect(JSON.stringify(d)).not.toMatch(/encryptedPrivateKey|authTag|hlAccountId/);
+  });
+
+  it("getSpotGridDetail: borde de truncado — exactamente cap (false) vs cap+1 (true, cyclesCount===cap)", async () => {
+    const cap = SPOT_GRID_DETAIL_CYCLE_CAP;
+    async function detailWith(nCycles: number) {
+      const t = makeConvexTest();
+      const { userId, botId } = await seedBotFor(t, "owner1");
+      await t.run(async (ctx: MutationCtx) => {
+        const now = Date.now();
+        const buyId = await ctx.db.insert("spot_grid_orders", {
+          botId, userId, cloid: "0xb", assetId: 10107, side: "buy", price: 50000, quantity: 0.001,
+          quoteSize: 50, gridLevel: 0, generation: 1, cycleId: 0, status: "filled", createdAt: now,
+        });
+        for (let i = 0; i < nCycles; i++) {
+          await ctx.db.insert("spot_grid_cycles", {
+            botId, userId, cycleId: i, buyOrderId: buyId, buyPrice: 50000, sellPrice: 50500,
+            quantity: 0.001, netProfit: 1, closedAt: now + i,
+          });
+        }
+      });
+      return await as(t, "owner1").query(api.spotGridBots.getSpotGridDetail, { botId });
+    }
+    const exact = await detailWith(cap);
+    expect(exact?.stats.truncated).toBe(false);                 // exactamente cap → NO truncado
+    expect(exact?.stats.cyclesCount).toBe(cap);
+    const over = await detailWith(cap + 1);
+    expect(over?.stats.truncated).toBe(true);                   // cap+1 → truncado
+    expect(over?.stats.cyclesCount).toBe(cap);                  // cuenta tope al cap, no cap+1
   });
 });

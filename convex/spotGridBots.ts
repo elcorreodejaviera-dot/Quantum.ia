@@ -174,7 +174,7 @@ export const getSpotGridBot = query({
 // (JAV-93) Detalle + stats de un grid para la UI. READ-ONLY, scoped por ownership. Solo escalares:
 // nunca expone la credencial ni la clave. Topes explícitos para que el coste de lectura sea acotado;
 // si se topa el cap se marca `truncated` para que la UI NO muestre un total parcial como exacto.
-const SPOT_GRID_DETAIL_CYCLE_CAP = 500;   // tope de ciclos sumados/contados por lectura
+export const SPOT_GRID_DETAIL_CYCLE_CAP = 500;   // tope de ciclos sumados/contados por lectura (exportado: tests de borde)
 const SPOT_GRID_DETAIL_OPEN_CAP = 50;     // tope de órdenes abiertas devueltas
 const SPOT_GRID_DETAIL_RECENT_CYCLES = 20;// ciclos recientes devueltos al detalle
 
@@ -202,22 +202,25 @@ export const getSpotGridDetail = query({
       quantity: c.quantity, netProfit: c.netProfit ?? null, closedAt: c.closedAt ?? null,
     }));
 
-    // Órdenes vivas (submitting/open/partially_filled), tope explícito.
+    // Órdenes vivas (submitting/open/partially_filled). Acumulamos hasta cap+1 para SABER si hay más que
+    // el tope (openOrdersTruncated) en vez de adivinar por "== cap"; luego devolvemos solo hasta cap.
     const liveStatuses = ["submitting", "open", "partially_filled"] as const;
-    const openOrders: Array<any> = [];
+    const collected: Array<any> = [];
     for (const st of liveStatuses) {
-      if (openOrders.length >= SPOT_GRID_DETAIL_OPEN_CAP) break;
+      if (collected.length > SPOT_GRID_DETAIL_OPEN_CAP) break;
       const rows = await ctx.db
         .query("spot_grid_orders")
         .withIndex("by_bot_status", (q) => q.eq("botId", botId).eq("status", st))
-        .take(SPOT_GRID_DETAIL_OPEN_CAP - openOrders.length);
+        .take(SPOT_GRID_DETAIL_OPEN_CAP + 1 - collected.length);
       for (const o of rows) {
-        openOrders.push({
+        collected.push({
           side: o.side, price: o.price, quantity: o.quantity, status: o.status,
           gridLevel: o.gridLevel, filledQty: o.filledQty ?? null, cycleId: o.cycleId,
         });
       }
     }
+    const openOrdersTruncated = collected.length > SPOT_GRID_DETAIL_OPEN_CAP;
+    const openOrders = openOrdersTruncated ? collected.slice(0, SPOT_GRID_DETAIL_OPEN_CAP) : collected;
 
     return {
       bot: {
@@ -230,6 +233,7 @@ export const getSpotGridDetail = query({
       },
       stats: { cyclesCount, totalNetProfit, truncated, cycleCap: SPOT_GRID_DETAIL_CYCLE_CAP },
       openOrders,
+      openOrdersTruncated,
       recentCycles,
     };
   },

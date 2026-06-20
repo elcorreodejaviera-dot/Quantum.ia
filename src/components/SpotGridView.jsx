@@ -264,7 +264,7 @@ function GridDetail({ botId }) {
   if (detail === undefined) return <p className="sg-muted">Cargando…</p>
   if (detail === null) return <p className="sg-muted">Grid no encontrado o sin acceso.</p>
 
-  const { bot, stats, openOrders, recentCycles } = detail
+  const { bot, stats, openOrders, openOrdersTruncated, recentCycles } = detail
 
   async function onPause() {
     setBusy('pause'); setError(null)
@@ -307,7 +307,7 @@ function GridDetail({ botId }) {
       </div>
 
       <div className="sg-section">
-        <h2>ÓRDENES ABIERTAS {openOrders.length >= 50 ? '(50+)' : `(${openOrders.length})`}</h2>
+        <h2>ÓRDENES ABIERTAS {openOrdersTruncated ? `(${openOrders.length}+)` : `(${openOrders.length})`}</h2>
         {openOrders.length === 0 && <p className="sg-muted">Sin órdenes vivas.</p>}
         {openOrders.length > 0 && (
           <table className="sg-table">

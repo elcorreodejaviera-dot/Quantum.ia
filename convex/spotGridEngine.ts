@@ -216,8 +216,10 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
     const full = newFilled >= o.quantity - 1e-9;
     // (Codex MEDIO#3) VWAP ACUMULADO entre rondas (no solo el batch): (prevQty·prevAvg + Σbatch)/newQty.
     const vwap = newFilled > 0 ? (prevFilled * (o.avgFillPx ?? 0) + a.notional) / newFilled : a.notional / a.sz;
+    // (Codex r5 MEDIO#1) Fee REAL ACUMULADA de TODOS los fills de la orden (multi-ronda), no solo el batch.
+    const newFee = (o.filledFeeUsd ?? 0) + a.fee;
     await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, {
-      botId, token, cloid: o.cloid, filledQty: newFilled, avgFillPx: vwap,
+      botId, token, cloid: o.cloid, filledQty: newFilled, avgFillPx: vwap, filledFeeUsd: newFee,
       remainingQty: Math.max(0, o.quantity - newFilled), status: full ? "filled" : "partially_filled",
     });
     if (o.side === "buy") {
@@ -248,7 +250,9 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
       }
     } else if (full) {
       // (fix #1) SELL cierra el ciclo SOLO al llenarse COMPLETA (si fue parcial, se espera a más fills).
-      const feeUsd = a.fee + (bot.feeRate * o.price * newFilled);   // fee real de la SELL + estimado del BUY
+      // (Codex r5 MEDIO#1) feesUsd = fee REAL ACUMULADA de la SELL (todas las rondas, recién persistida en
+      // newFee) + fee estimada del BUY de ese tranche (feeRate·costBasis·qty).
+      const feeUsd = newFee + (bot.feeRate * (o.costBasis ?? o.price) * newFilled);
       const res: any = await ctx.runMutation(internal.spotGridBots.closeCycleAndRepost, { botId, token, sellCloid: o.cloid, feesUsd: feeUsd });
       // (ALTO#1) La reposición se insertó como `submitting`; aquí se ENVÍA a HL vía gatedPlace (gate + idempotente).
       if (res.ok && !res.alreadySettled && res.repostCloid && isRunning) {

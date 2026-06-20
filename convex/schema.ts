@@ -566,6 +566,8 @@ export default defineSchema({
     // ESTA SELL concreta (lo usa el netProfit del ciclo, sin contaminar con otros tranches).
     pendingSellCost: v.optional(v.number()),
     costBasis: v.optional(v.number()),
+    filledFeeUsd: v.optional(v.number()),      // (JAV-92 r5) fee REAL acumulada de TODOS los fills de la orden
+                                               // (multi-ronda) → netProfit del ciclo no se infla con fees parciales
     errorMessage: v.optional(v.string()),
     createdAt: v.number(),
     filledAt: v.optional(v.number()),

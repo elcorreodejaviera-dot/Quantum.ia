@@ -262,7 +262,8 @@ export const markSpotGridOrder = internalMutation({
       v.literal("cancelled"), v.literal("failed"))),
     oid: v.optional(v.string()), filledQty: v.optional(v.number()), remainingQty: v.optional(v.number()),
     avgFillPx: v.optional(v.number()), pendingSellQty: v.optional(v.number()), pendingSellCost: v.optional(v.number()),
-    sellTranche: v.optional(v.number()), incAttempt: v.optional(v.boolean()), errorMessage: v.optional(v.string()),
+    filledFeeUsd: v.optional(v.number()), sellTranche: v.optional(v.number()),
+    incAttempt: v.optional(v.boolean()), errorMessage: v.optional(v.string()),
   },
   handler: async (ctx, a) => {
     const bot = await ctx.db.get(a.botId);
@@ -271,7 +272,7 @@ export const markSpotGridOrder = internalMutation({
     if (!o || o.botId !== a.botId) return { ok: false as const };
     const now = Date.now();
     const patch: Record<string, unknown> = { };
-    for (const k of ["oid", "filledQty", "remainingQty", "avgFillPx", "pendingSellQty", "pendingSellCost", "sellTranche", "errorMessage"] as const) {
+    for (const k of ["oid", "filledQty", "remainingQty", "avgFillPx", "pendingSellQty", "pendingSellCost", "filledFeeUsd", "sellTranche", "errorMessage"] as const) {
       if (a[k] !== undefined) patch[k] = a[k];
     }
     if (a.status !== undefined) {

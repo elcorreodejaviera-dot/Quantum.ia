@@ -60,7 +60,7 @@ reusa `info` para lecturas. Replica el patrón de `triggerEngine.ts` (no copia e
   (lookup-before-insert `by_cloid`) → `placeSpotLimit` → `markSpotGridOrder("open", oid)` SOLO si HL confirma.
   cloid = `toHlCloid(spotGridCloidInput(botId,generation,cycleId,level,"buy"))`. Lee `getOpenSpotOrders` ANTES
   (idempotente: si el cloid ya está vivo en HL, no reenvía).
-- **`reconcileSpotGridBot`** (por bot, bajo lease; revalida gate al entrar): 
+- **`reconcileSpotGridBot`** (por bot, bajo lease; revalida gate al entrar):
   - **(ALTO#1) Resuelve `submitting`:** por cada orden en `submitting`, confirma por CLOID
     (`getSpotOrderStatusByCloid`/`getOpenSpotOrders`): viva en HL → `open`; muerta sin fill tras grace →
     reintenta el envío (cloid determinista, idempotente) o `failed`; con fill → procesa el fill. Nunca queda

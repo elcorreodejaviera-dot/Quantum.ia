@@ -364,6 +364,7 @@ export default function AdminView() {
   const sgGate = useQuery(api.spotGridBots.getMainnetSpotGridApproval, isAdmin ? {} : 'skip');
   const setSgGate = useMutation(api.spotGridBots.setMainnetSpotGridApproval);
   const sgGateOn = sgGate?.enabled === true;
+  const [sgGatePending, setSgGatePending] = React.useState(false);
   const simOn = simConfig?.value === true;
   const tradingOn = tradingConfig?.value === true;
 
@@ -405,11 +406,18 @@ export default function AdminView() {
           <button className="av-mini" disabled={simOn} onClick={() => setTrading({ enabled: !tradingOn })}>{tradingOn ? 'Desactivar LIVE' : 'Activar LIVE'}</button>
           <button
             className="av-mini"
-            onClick={() => {
+            disabled={sgGatePending}
+            onClick={async () => {
+              if (sgGatePending) return;
               if (!sgGateOn && !window.confirm('Aprobar Spot Grid en mainnet permite crear bots que operan con DINERO REAL en Hyperliquid. ¿Continuar?')) return;
-              setSgGate({ enabled: !sgGateOn });
+              setSgGatePending(true);
+              try {
+                await setSgGate({ enabled: !sgGateOn });
+              } finally {
+                setSgGatePending(false);
+              }
             }}
-          >{sgGateOn ? 'Revocar Spot Grid mainnet' : 'Aprobar Spot Grid mainnet'}</button>
+          >{sgGatePending ? 'Aplicando…' : (sgGateOn ? 'Revocar Spot Grid mainnet' : 'Aprobar Spot Grid mainnet')}</button>
           <button className="av-kill" onClick={() => setTrading({ enabled: false })}>🛑 DETENER TODO</button>
         </div>
       </div>

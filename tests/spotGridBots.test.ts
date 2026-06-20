@@ -196,3 +196,47 @@ describe("setMainnetSpotGridApproval (JAV-91)", () => {
     expect(log.some((l: any) => l.action === "set_mainnet_spot_grid_approval")).toBe(true);
   });
 });
+
+describe("pause/list/get — ownership (JAV-91, Codex BAJO)", () => {
+  async function seedBotFor(t: any, clerkId: string) {
+    return await t.run(async (ctx: MutationCtx) => {
+      const userId = await seedUser(ctx, ["canManageBots", "canTradeLive"], "viewer", clerkId);
+      const hlAccountId = await seedCredential(ctx, userId);
+      const now = Date.now();
+      const botId = await ctx.db.insert("spot_grid_bots", {
+        userId, hlAccountId, symbol: "BTC", assetId: 10107, baseAsset: "UBTC", quoteAsset: "USDC",
+        minPrice: 50000, gridProfitPercent: 1, investmentAmount: 100, orderSize: 20, gridCount: 5,
+        feeRate: 0.0004, status: "running", network: "testnet", generation: 1, createdAt: now, updatedAt: now,
+      });
+      return { userId, botId };
+    });
+  }
+  const as = (t: any, clerkId: string) => t.withIdentity({ subject: clerkId });
+
+  it("pauseSpotGridBot: el dueño pausa (running → paused)", async () => {
+    const t = makeConvexTest();
+    const { botId } = await seedBotFor(t, "owner1");
+    await as(t, "owner1").mutation(api.spotGridBots.pauseSpotGridBot, { botId });
+    expect((await t.run((ctx: MutationCtx) => ctx.db.get(botId)))?.status).toBe("paused");
+  });
+
+  it("pauseSpotGridBot: un usuario ajeno NO puede pausar", async () => {
+    const t = makeConvexTest();
+    const { botId } = await seedBotFor(t, "owner1");
+    await t.run(async (ctx: MutationCtx) => { await seedUser(ctx, ["canManageBots", "canTradeLive"], "viewer", "intruso"); });
+    await expect(as(t, "intruso").mutation(api.spotGridBots.pauseSpotGridBot, { botId }))
+      .rejects.toThrow(/ajeno|no encontrado/i);
+  });
+
+  it("listSpotGridBots / getSpotGridBot: solo devuelven los del dueño", async () => {
+    const t = makeConvexTest();
+    const { botId } = await seedBotFor(t, "owner1");
+    await seedBotFor(t, "owner2");                       // bot de OTRO usuario
+    const mine = await as(t, "owner1").query(api.spotGridBots.listSpotGridBots, {});
+    expect(mine.length).toBe(1);
+    expect(mine[0]._id).toBe(botId);
+    // owner2 NO ve el bot de owner1 por getSpotGridBot.
+    expect(await as(t, "owner2").query(api.spotGridBots.getSpotGridBot, { botId })).toBeNull();
+    expect((await as(t, "owner1").query(api.spotGridBots.getSpotGridBot, { botId }))?._id).toBe(botId);
+  });
+});

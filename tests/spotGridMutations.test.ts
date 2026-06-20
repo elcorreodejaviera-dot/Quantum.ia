@@ -91,6 +91,25 @@ describe("SELL por tranche — varias del mismo BUY NO colisionan (JAV-92 r2#1/r
   });
 });
 
+describe("netProfit por tranche usa costBasis, no el VWAP del BUY (JAV-92 r4)", () => {
+  it("una SELL con costBasis propio liquida el ciclo con ESE costo, no el avgFillPx del BUY", async () => {
+    const t = makeConvexTest();
+    const { botId, sellCloid } = await t.run(async (ctx) => {
+      const s = await seedGridBot(ctx);
+      // BUY con VWAP total 2900 (mezcla barato+caro), pero ESTE tranche se compró a 2950.
+      const buyId = await seedOrder(ctx, s.botId, s.userId, "0xbuyT", { side: "buy", price: 2900, quantity: 0.06, status: "partially_filled", filledQty: 0.06, avgFillPx: 2900 });
+      await seedOrder(ctx, s.botId, s.userId, "0xsellT", { side: "sell", price: 3000, quantity: 0.03, status: "filled", filledQty: 0.03, avgFillPx: 3000, pairedOrderId: buyId, cycleId: 0, costBasis: 2950 });
+      return { ...s, sellCloid: "0xsellT" };
+    });
+    const token = (await t.mutation(internal.spotGridBots.claimSpotGridReconcile, { botId })).token!;
+    await t.mutation(internal.spotGridBots.closeCycleAndRepost, { botId, token, sellCloid, feesUsd: 0.01 });
+    const cyc = await t.run((ctx) => ctx.db.query("spot_grid_cycles").withIndex("by_bot", (q) => q.eq("botId", botId)).first());
+    // netProfit con costBasis 2950 (NO 2900): (3000-2950)*0.03 - 0.01 = 1.49 (no 2.99).
+    expect(cyc?.buyPrice).toBe(2950);
+    expect(cyc?.netProfit).toBeCloseTo((3000 - 2950) * 0.03 - 0.01, 6);
+  });
+});
+
 describe("gate live — red HL efectiva ≠ bot.network (JAV-92 ALTO#4/r3#1)", () => {
   it("HL_NETWORK del backend distinta a la del bot → paused/network_mismatch", async () => {
     const prev = process.env.HL_NETWORK;

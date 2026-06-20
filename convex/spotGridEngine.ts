@@ -117,7 +117,7 @@ async function gatedPlace(ctx: any, exchange: any, botId: any, token: string, p:
 async function placeOrder(ctx: any, exchange: any, args: {
   botId: any; token: string; side: "buy" | "sell"; gridLevel: number; generation: number; cycleId: number;
   assetId: number; price: number; quantity: number; priceStr: string; sizeStr: string;
-  pairedOrderId?: any; tranche?: number; openCloids: Set<string>;
+  pairedOrderId?: any; tranche?: number; costBasis?: number; openCloids: Set<string>;
 }): Promise<{ ok: boolean; cloid?: string }> {
   const rec = await ctx.runMutation(internal.spotGridBots.recordSpotGridOrder, {
     botId: args.botId, token: args.token, side: args.side, gridLevel: args.gridLevel,
@@ -125,6 +125,7 @@ async function placeOrder(ctx: any, exchange: any, args: {
     price: args.price, quantity: args.quantity, quoteSize: args.price * args.quantity,
     ...(args.pairedOrderId ? { pairedOrderId: args.pairedOrderId } : {}),
     ...(args.tranche !== undefined ? { tranche: args.tranche } : {}),
+    ...(args.costBasis !== undefined ? { costBasis: args.costBasis } : {}),
   });
   if (!rec.ok) return { ok: false };
   try {
@@ -225,17 +226,24 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
       // cloid de la SELL lleva `tranche` (= nº de SELL ya emitidas para este BUY) → varias SELL del mismo
       // BUY no colisionan (resuelve r2#1). Sub-mínima: se acumula en `pendingSellQty` hasta poder vender.
       if (isRunning) {
-        const sellQty = floorSpotSize((o.pendingSellQty ?? 0) + a.sz, szDecimals);
-        const basis = vwap > 0 ? vwap : o.price;                       // costo real (VWAP de compra)
+        // (Codex r4 ALTO#1) Acumular CANTIDAD y COSTO real de la base pendiente por vender (Σ sz·px de los
+        // fills sin SELL). El basis del tranche = VWAP de SOLO lo pendiente, no de todo el BUY.
+        const pendQty = (o.pendingSellQty ?? 0) + a.sz;
+        const pendCost = (o.pendingSellCost ?? 0) + a.notional;
+        const sellQty = floorSpotSize(pendQty, szDecimals);
+        const basis = pendQty > 0 ? pendCost / pendQty : o.price;       // VWAP de la base pendiente
         const targetNet = sellQty * basis * (bot.gridProfitPercent / 100);
         const sellPrice = sellQty > 0 ? solveSellPrice(basis, sellQty, bot.gridProfitPercent, bot.feeRate, szDecimals, targetNet) : null;
         if (sellPrice != null && sellQty * sellPrice >= MIN_SPOT_NOTIONAL_USD) {
           const tranche = o.sellTranche ?? 0;
+          // SELL lleva su propio costBasis (= VWAP de lo vendido) para un netProfit limpio por tranche.
           await placeOrder(ctx, clients.exchange, { botId, token, side: "sell", gridLevel: o.gridLevel, generation: bot.generation, cycleId: o.cycleId,
-            assetId: bot.assetId, price: sellPrice, quantity: sellQty, priceStr: String(sellPrice), sizeStr: String(sellQty), pairedOrderId: o._id, tranche, openCloids });
-          await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, pendingSellQty: 0, sellTranche: tranche + 1 });
+            assetId: bot.assetId, price: sellPrice, quantity: sellQty, priceStr: String(sellPrice), sizeStr: String(sellQty), pairedOrderId: o._id, tranche, costBasis: basis, openCloids });
+          // Restar lo vendido del pendiente (la fracción no vendida conserva su costo proporcional al mismo VWAP).
+          const remQty = Math.max(0, pendQty - sellQty);
+          await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, pendingSellQty: remQty, pendingSellCost: basis * remQty, sellTranche: tranche + 1 });
         } else {
-          await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, pendingSellQty: (o.pendingSellQty ?? 0) + a.sz });
+          await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, pendingSellQty: pendQty, pendingSellCost: pendCost });
         }
       }
     } else if (full) {

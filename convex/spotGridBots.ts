@@ -231,6 +231,7 @@ export const recordSpotGridOrder = internalMutation({
     gridLevel: v.number(), generation: v.number(), cycleId: v.number(),
     assetId: v.number(), price: v.number(), quantity: v.number(), quoteSize: v.number(),
     pairedOrderId: v.optional(v.id("spot_grid_orders")), tranche: v.optional(v.number()),
+    costBasis: v.optional(v.number()),
   },
   handler: async (ctx, a) => {
     const bot = await ctx.db.get(a.botId);
@@ -245,6 +246,7 @@ export const recordSpotGridOrder = internalMutation({
       generation: a.generation, cycleId: a.cycleId, status: "submitting",
       remainingQty: a.quantity, attempt: 1, submittedAt: now,
       ...(a.pairedOrderId ? { pairedOrderId: a.pairedOrderId } : {}),
+      ...(a.costBasis !== undefined ? { costBasis: a.costBasis } : {}),
       createdAt: now,
     });
     return { ok: true as const, orderId, cloid, existed: false as const };
@@ -259,8 +261,8 @@ export const markSpotGridOrder = internalMutation({
       v.literal("submitting"), v.literal("open"), v.literal("partially_filled"), v.literal("filled"),
       v.literal("cancelled"), v.literal("failed"))),
     oid: v.optional(v.string()), filledQty: v.optional(v.number()), remainingQty: v.optional(v.number()),
-    avgFillPx: v.optional(v.number()), pendingSellQty: v.optional(v.number()), sellTranche: v.optional(v.number()),
-    incAttempt: v.optional(v.boolean()), errorMessage: v.optional(v.string()),
+    avgFillPx: v.optional(v.number()), pendingSellQty: v.optional(v.number()), pendingSellCost: v.optional(v.number()),
+    sellTranche: v.optional(v.number()), incAttempt: v.optional(v.boolean()), errorMessage: v.optional(v.string()),
   },
   handler: async (ctx, a) => {
     const bot = await ctx.db.get(a.botId);
@@ -269,7 +271,7 @@ export const markSpotGridOrder = internalMutation({
     if (!o || o.botId !== a.botId) return { ok: false as const };
     const now = Date.now();
     const patch: Record<string, unknown> = { };
-    for (const k of ["oid", "filledQty", "remainingQty", "avgFillPx", "pendingSellQty", "sellTranche", "errorMessage"] as const) {
+    for (const k of ["oid", "filledQty", "remainingQty", "avgFillPx", "pendingSellQty", "pendingSellCost", "sellTranche", "errorMessage"] as const) {
       if (a[k] !== undefined) patch[k] = a[k];
     }
     if (a.status !== undefined) {
@@ -322,8 +324,10 @@ export const closeCycleAndRepost = internalMutation({
     if (!sell || sell.botId !== botId || sell.side !== "sell") return { ok: false as const };
     if (sell.cycleSettled === true) return { ok: true as const, alreadySettled: true as const };  // idempotencia
     const buy = sell.pairedOrderId ? await ctx.db.get(sell.pairedOrderId) : null;
-    // (Codex MEDIO#3) netProfit con el COSTO REAL: VWAP de compra (avgFillPx) y de venta (avgFillPx).
-    const buyCost = (buy && buy.avgFillPx) ? buy.avgFillPx : (buy?.price ?? sell.price);
+    // (Codex r4 MEDIO#2) netProfit con el COSTO REAL DE ESTE TRANCHE: `sell.costBasis` (VWAP de la base
+    // vendida en ESTA SELL), no el VWAP de todo el BUY (que contaminaría con otros tranches). Fallbacks
+    // defensivos. Precio de venta = VWAP de la SELL.
+    const buyCost = sell.costBasis ?? (buy?.avgFillPx ?? buy?.price ?? sell.price);
     const qty = sell.filledQty ?? sell.quantity;
     const sellPrice = sell.avgFillPx ?? sell.price;
     const gross = (sellPrice - buyCost) * qty;

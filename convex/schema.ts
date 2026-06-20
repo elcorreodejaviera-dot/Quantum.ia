@@ -561,6 +561,11 @@ export default defineSchema({
     submittedAt: v.optional(v.number()),       // (JAV-92) instante del intent submitting → grace de retry
     cycleSettled: v.optional(v.boolean()),     // (JAV-92 ALTO#3) SELL ya consumida por un cierre de ciclo
     sellTranche: v.optional(v.number()),       // (JAV-92) nº de SELL ya emitidas para ESTE BUY (cloid por tranche)
+    // (JAV-92 r4) Costo real de la base AÚN no vendida de un BUY (Σ sz·px de los fills sin SELL), para que
+    // cada tranche se valore con su VWAP correcto, no el de todo el BUY. `costBasis` = VWAP de compra de
+    // ESTA SELL concreta (lo usa el netProfit del ciclo, sin contaminar con otros tranches).
+    pendingSellCost: v.optional(v.number()),
+    costBasis: v.optional(v.number()),
     errorMessage: v.optional(v.string()),
     createdAt: v.number(),
     filledAt: v.optional(v.number()),

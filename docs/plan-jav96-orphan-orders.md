@@ -3,6 +3,9 @@
 > Rev.2 (tras Codex NO-GO r1): helper por **CLOID exacto** (no por rol), enumeración COMPLETA de
 > rutas de terminalización y de los puntos `ensureOrdersDead===true`, y tests convex de cierre/disarm/
 > armed_lower_only.
+> Rev.3 (tras Codex NO-GO r2): marcar SOLO donde el retorno de `ensureOrdersDead` se COMPRUEBA `=== true`;
+> excluido el ~614 (best-effort en cierre de emergencia) y N5 ~420 (cancelByCloid best-effort sin prueba
+> negativa) — esos los cubre el gate/reconcile que sí verifica muerte.
 
 ## Objetivo
 Que un arm terminal no deje filas `trigger_orders` con `observedStatus:"open"` rancio cuando la orden
@@ -39,19 +42,27 @@ Pools" deje de dar falso positivo **y** quede como detector fiable de huérfanos
   pending}` → patch a `canceled` + `updatedAt`. **NUNCA** toca `filled`/`triggered`/`rejected`/`canceled`.
 - Idempotente. `elog("arm","orders_canceled",{ armId, n })` (OBS-3, solo escalares; NO loguear cloids).
 
-### 2. Llamarla en TODOS los puntos donde `ensureOrdersDead(...cloids...) === true` precede una transición terminal/parcial (`convex/triggerEngine.ts`)
-Pasar EXACTAMENTE los cloids recién confirmados muertos (Codex r1 #4):
-- **Cierre flat normal** — gate `ensureOrdersDead(allCloids)` (líneas ~575 y ~614) → antes de
-  `closeArmAndScheduleRearm` (`triggerArms.ts:700`) → `markArmOrdersCanceled(armId, token, allCloids)`.
+### 2. Llamarla SOLO donde el booleano de `ensureOrdersDead(...) === true` se COMPRUEBA (prueba negativa real) y precede una transición terminal/parcial (`convex/triggerEngine.ts`)
+Pasar EXACTAMENTE los cloids recién confirmados muertos (Codex r1 #4). **Regla dura (Codex r2 #1): NO
+marcar en llamadas a `ensureOrdersDead` cuyo retorno se IGNORA (best-effort).**
+- **Cierre flat normal** — gate `if (!(await ensureOrdersDead(allCloids))) return ...` (línea ~575,
+  retorno comprobado) → antes de `closeArmAndScheduleRearm` (`triggerArms.ts:700`) →
+  `markArmOrdersCanceled(armId, token, allCloids)`.
+  - ⛔ **NO** marcar en la línea ~614: ahí `ensureOrdersDead(allCloids)` es **best-effort** (retorno
+    IGNORADO) dentro del cierre de EMERGENCIA, que luego hace market close reduceOnly. El arm de
+    emergencia alcanza `closed` por el gate (1) (~575) que sí exige `=== true` → el marcado ocurre ahí,
+    no en ~614.
 - **Transición a `armed_lower_only`** — `ensureOrdersDead(nonLowerCloids)` (~568) y `(deadCloids)`
-  (~952) → marcar SOLO esos cloids (NUNCA `entry_lower`, sigue armada). Cierre por expiración →
-  `closeArmLowerOnlyExpired` (`triggerArms.ts:484`): marcar las cancelables confirmadas muertas.
-- **Disarm pre-fill** — `ensureOrdersDead(entryCloids)` (~923) → antes de `settleArm(... "disarmed")`
-  (engine ~927) → `markArmOrdersCanceled(armId, token, entryCloids)`.
-- **`failed` por prueba negativa** — `ensureOrdersDead(entryCloids)` (~977) → antes de
+  (~952), ambos con retorno comprobado → marcar SOLO esos cloids (NUNCA `entry_lower`, sigue armada).
+  Cierre por expiración → `closeArmLowerOnlyExpired` (`triggerArms.ts:484`): marcar las cancelables
+  confirmadas muertas.
+- **Disarm pre-fill** — `if (!(await ensureOrdersDead(entryCloids)))` (~923, comprobado) → antes de
+  `settleArm(... "disarmed")` (engine ~927) → `markArmOrdersCanceled(armId, token, entryCloids)`.
+- **`failed` por prueba negativa** — `ensureOrdersDead(entryCloids)` (~977, comprobado) → antes de
   `settleArm(... "failed")` (engine ~984) → marcar `entryCloids`.
-- **N5 defensa pausa** (~420, cancela ambas entradas tras pausa): marcar esas entradas (o dejar que el
-  reconcile de disarm lo haga; evitar duplicar — decidir con Codex).
+- ⛔ **N5 defensa pausa (~420): NO marcar aquí** (Codex r2 #2). Ese punto solo hace `cancelByCloid`
+  best-effort tras pausa, SIN prueba negativa. El marcado lo hará el reconcile de `wantDisarm`, que sí
+  pasa por `ensureOrdersDead(entryCloids) === true` (disarm pre-fill, arriba).
 
 ### 3. Rutas de terminalización SIN órdenes "open" (confirmar que NO necesitan cambio)
 Terminalizan con entradas en `pending` (nunca enviadas a HL) → no generan `open` rancio y el audit no

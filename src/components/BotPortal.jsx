@@ -1273,6 +1273,7 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
   const positionsFromDb = useQuery(api.spot_positions.listMyPositions);
   const addPositionMutation = useMutation(api.spot_positions.addPosition);
   const updatePositionMutation = useMutation(api.spot_positions.updatePosition);
+  const removePositionMutation = useMutation(api.spot_positions.removePosition);
   const recordPurchaseMutation = useMutation(api.spot_positions.recordPurchase);
   const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
   // (JAV-57 #1) Sin datos demo: el estado autenticado arranca VACÍO y se llena solo desde Convex.
@@ -1599,6 +1600,17 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
                   </button>
                   <button className="mini-btn" onClick={() => toggleAsset(position.asset)}>
                     Bot {isOpen ? '▲' : '▼'}
+                  </button>
+                  <button
+                    className="mini-btn danger"
+                    title="Eliminar esta posición spot (irreversible)"
+                    onClick={() => {
+                      if (window.confirm(`¿Eliminar la posición spot ${position.asset}?\nSe borrará del portal de forma permanente (no afecta tus fondos en Hyperliquid).`)) {
+                        removePositionMutation({ id: position.id }).catch((err) => console.error('removePosition failed', err));
+                      }
+                    }}
+                  >
+                    🗑 Eliminar
                   </button>
                   <span className="pill">{position.protector?.active ? 'Bot activo' : 'Bot pausado'}</span>
                 </div>

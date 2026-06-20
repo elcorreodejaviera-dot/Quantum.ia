@@ -1058,6 +1058,15 @@ button {
   color: var(--amber);
 }
 
+/* (JAV-97) Acción destructiva: eliminar posición spot. */
+.mini-btn.danger {
+  border-color: rgba(255, 70, 70, 0.5);
+  color: #ff6b6b;
+}
+.mini-btn.danger:hover {
+  background: rgba(255, 70, 70, 0.1);
+}
+
 /* Break Even block */
 .be-block {
   border: 1px solid var(--line);

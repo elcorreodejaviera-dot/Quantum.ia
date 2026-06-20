@@ -28,9 +28,11 @@ CLOID enviado a HL = `0x` + 32 hex (16 bytes) vía `toHlCloid` (`convex/cloids.t
 `botId|generation|cycleId|level|side` (`spotGridCloidInput`). NO SHA-256 completo.
 
 ## 3. `convex/spotGridBots.ts`
-- **`createSpotGridBot`** — guard live completo (Codex #3): `requireTradeLive` +
-  `systemConfig.tradingEnabled` ON + `!simulationMode` global + red esperada (`assertExpectedNetwork`) +
-  flag de confirmación LIVE explícita. **Gate mainnet (Codex #2-r3/#1-r4):** lee `by_key`
+- **`createSpotGridBot`** — guard live completo (Codex #3): **`requireBotManager` (canManageBots) +
+  `requireTradeLive` (canTradeLive)** — crear/activar infraestructura de bots es permiso de GESTIÓN;
+  `canTradeLive` autoriza operar real pero NO crear bots por sí solo, así que se exigen AMBOS (Codex
+  JAV-91 r-plan ALTO). + `systemConfig.tradingEnabled` ON + `!simulationMode` global + red esperada
+  (`assertExpectedNetwork`) + flag de confirmación LIVE explícita. **Gate mainnet (Codex #2-r3/#1-r4):** lee `by_key`
   `"mainnetSpotGridApproved"` y rechaza `network==="mainnet"` si `value?.enabled !== true`. Valida
   allowlist (resolver de PR1 por red), inputs > 0, balance. Scoping por `userId`.
   - **🔑 INVARIANTE CUENTA HL EXCLUSIVA (decisión usuario 2026-06-20, JAV-89/JAV-91):** rechazar una
@@ -48,7 +50,8 @@ NO envía/cancela órdenes en HL (PR3). NO motor ni cron (PR3). NO UI (PR4). NO 
 `leverage.ts`.
 
 ## Tests (convex-test + pure)
-- `createSpotGridBot`: guard live rechaza si trading off / simulationMode / red incorrecta / sin confirm.
+- `createSpotGridBot`: guard rechaza si SIN `canManageBots` o SIN `canTradeLive` (ambos requeridos) /
+  trading off / simulationMode / red incorrecta / sin confirm.
 - Gate mainnet: rechaza mainnet sin `mainnetSpotGridApproved.enabled=true`; acepta tras aprobación.
 - **Exclusividad de cuenta:** rechaza `hlAccountId` ya usada por un `bots` o por otro `spot_grid_bots`.
 - Validación de inputs (>0), allowlist por red (reusa resolver PR1), balance insuficiente.
@@ -57,6 +60,6 @@ NO envía/cancela órdenes en HL (PR3). NO motor ni cron (PR3). NO UI (PR4). NO 
 - Ownership por `userId` en list/get/pause.
 
 ## DoD
-`npm run typecheck` OK · guard live + gate mainnet + exclusividad de cuenta · ownership por userId · **sin
+`npm run typecheck` OK · guard `canManageBots` + `canTradeLive` + gate mainnet + exclusividad de cuenta · ownership por userId · **sin
 enviar órdenes** · tests verdes · `convex deploy` (tablas nuevas) + verificar `HL_NETWORK=mainnet`.
 Flujo: plan → GO Codex → implementar → GO Codex código → PR → CodeRabbit → merge → deploy.

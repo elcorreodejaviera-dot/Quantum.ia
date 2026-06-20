@@ -14,9 +14,11 @@ Responde **GO / NO-GO** con hallazgos numerados (ALTO/MEDIO/BAJO).
    mainnet sobre `system_config {key,value}` cubren lo que PR3 (motor) necesitará? ¿Índices suficientes
    (`by_user`, `by_status_updated`, `by_account`, `by_bot_status`, `by_cloid`, `by_bot_cycle`)?
    ¿Falta algún campo para idempotencia/reconcile (generation, cycleId, fillCursor, pendingSellQty)?
-2. **Guard live + gate mainnet.** `createSpotGridBot`: requireTradeLive + tradingEnabled + !simulationMode
-   + assertExpectedNetwork + confirm explícito; mainnet rechazado salvo `mainnetSpotGridApproved.enabled`.
-   ¿Algún hueco? ¿`setMainnetSpotGridApproval` bien protegido (requireAdmin + writeAdminLog)?
+2. **Guard live + permiso de gestión + gate mainnet.** `createSpotGridBot`: **requireBotManager
+   (canManageBots) + requireTradeLive (canTradeLive) — AMBOS** (crear bots es permiso de gestión, no
+   basta canTradeLive) + tradingEnabled + !simulationMode + assertExpectedNetwork + confirm explícito;
+   mainnet rechazado salvo `mainnetSpotGridApproved.enabled`. ¿Algún hueco? ¿`setMainnetSpotGridApproval`
+   bien protegido (requireAdmin + writeAdminLog)?
 3. **🔑 Invariante cuenta HL exclusiva.** ¿El plan exige rechazar una `hlAccountId` cuya
    `tradingAccountAddress` ya use cualquier `bots` (IL/Trading) o `spot_grid_bots`? ¿Es correcta la
    justificación (spot y perp comparten wallet en HL)? ¿Cómo verificar exclusividad eficientemente

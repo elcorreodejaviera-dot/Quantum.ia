@@ -161,6 +161,26 @@ export const pauseSpotGridBot = mutation({
   },
 });
 
+// Elimina un grid DETENIDO (limpieza UI). Solo el dueño; SOLO si status==="stopped"
+// (detener ya canceló las órdenes vivas en HL). Borra en cascada órdenes y ciclos del bot.
+// NO toca HL (no money-path): solo limpia filas de un bot ya parado.
+export const deleteSpotGridBot = mutation({
+  args: { botId: v.id("spot_grid_bots") },
+  handler: async (ctx, { botId }) => {
+    const user = await requireBotManager(ctx);
+    const bot = await ctx.db.get(botId);
+    if (!bot || bot.userId !== user._id) throw new Error("Bot no encontrado o ajeno.");
+    if (bot.status !== "stopped") throw new Error("Solo se puede eliminar un grid detenido. Deténlo primero.");
+    const orders = await ctx.db.query("spot_grid_orders").withIndex("by_bot_status", (q) => q.eq("botId", botId)).collect();
+    for (const o of orders) await ctx.db.delete(o._id);
+    const cycles = await ctx.db.query("spot_grid_cycles").withIndex("by_bot", (q) => q.eq("botId", botId)).collect();
+    for (const c of cycles) await ctx.db.delete(c._id);
+    await ctx.db.delete(botId);
+    await writeAdminLog(ctx, user.clerkId, "delete_spot_grid_bot", { botId: String(botId), orders: orders.length, cycles: cycles.length });
+    return { ok: true as const, orders: orders.length, cycles: cycles.length };
+  },
+});
+
 // --- Lecturas por-usuario --------------------------------------------------------------------------
 export const listSpotGridBots = query({
   args: {},

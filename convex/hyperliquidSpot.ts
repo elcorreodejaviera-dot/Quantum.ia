@@ -296,8 +296,15 @@ export async function resolveSpotAsset(
 /** Precio mid (o mark como respaldo) del par spot resuelto, vía spotMetaAndAssetCtxs. */
 export async function getSpotPrice(info: InfoClient, resolved: ResolvedSpotAsset): Promise<number> {
   const [meta, ctxs] = (await info.spotMetaAndAssetCtxs()) as [any, any[]];
-  const pos = (meta.universe ?? []).findIndex((u: any) => Number(u.index) === resolved.universeIndex);
-  const ctx = pos >= 0 ? ctxs[pos] : undefined;
+  // (FIX money-path) Los asset ctxs NO están alineados por posición con meta.universe
+  // (HL devuelve longitudes distintas → ctxs[pos] leía el precio de OTRO par; p.ej. UBTC/USDC
+  // daba 0.000069 en vez de ~63.895). Cada ctx trae su propia etiqueta `coin` ("@<universeIndex>");
+  // emparejamos por el `name` del universe (= ese coin), no por el índice posicional.
+  const uni = (meta.universe ?? []).find((u: any) => Number(u.index) === resolved.universeIndex);
+  // (Codex BAJO) Si el universeIndex ya no existe en el meta actual, fallar LIMPIO en vez de buscar
+  // por un coin sintético "@idx" que podría matchear un ctx que NO corresponde al par resuelto.
+  if (!uni?.name) throw new Error(`Precio spot no disponible para ${resolved.symbol}.`);
+  const ctx = (ctxs ?? []).find((c: any) => c?.coin === uni.name);
   const mid = ctx?.midPx != null ? Number(ctx.midPx) : NaN;
   const mark = ctx?.markPx != null ? Number(ctx.markPx) : NaN;
   const px = Number.isFinite(mid) ? mid : mark;

@@ -86,7 +86,7 @@ export default function SpotGridView() {
           {selectedId === '__new__' || (Array.isArray(bots) && bots.length === 0)
             ? <CreateGridForm onCreated={(id) => setSelectedId(id)} />
             : selectedId
-              ? <GridDetail botId={selectedId} />
+              ? <GridDetail botId={selectedId} onDeleted={() => setSelectedId(null)} />
               : <p className="sg-muted">Selecciona un grid o crea uno nuevo.</p>}
         </main>
       </div>
@@ -246,10 +246,11 @@ function CreateGridForm({ onCreated }) {
 // ----------------------------------------------------------------------------------------------------
 // Detalle del grid: stats + órdenes + ciclos + acciones + tarjeta para compartir
 // ----------------------------------------------------------------------------------------------------
-function GridDetail({ botId }) {
+function GridDetail({ botId, onDeleted }) {
   const detail = useQuery(api.spotGridBots.getSpotGridDetail, { botId })
   const pauseBot = useMutation(api.spotGridBots.pauseSpotGridBot)
   const stopBot = useAction(api.spotGridEngine.stopSpotGridBot)
+  const deleteBot = useMutation(api.spotGridBots.deleteSpotGridBot)
   const [shareOpen, setShareOpen] = React.useState(false)
   const [busy, setBusy] = React.useState(null)
   const [error, setError] = React.useState(null)
@@ -275,6 +276,12 @@ function GridDetail({ botId }) {
     setBusy('stop'); setError(null)
     try { await stopBot({ botId, expectedNetwork: HL_NETWORK }) }
     catch (e) { setError(e?.message ?? String(e)) } finally { setBusy(null) }
+  }
+  async function onDelete() {
+    if (!window.confirm('Eliminar este grid detenido borrará su historial de órdenes y ciclos. ¿Continuar?')) return
+    setBusy('delete'); setError(null)
+    try { await deleteBot({ botId }); onDeleted?.() }   // al borrar, el padre limpia la selección y este componente se desmonta
+    catch (e) { setError(e?.message ?? String(e)); setBusy(null) }
   }
 
   return (
@@ -303,6 +310,11 @@ function GridDetail({ botId }) {
         <button className="sg-danger" disabled={bot.status === 'stopped' || !!busy} onClick={onStop}>
           {busy === 'stop' ? '…' : 'Detener'}
         </button>
+        {bot.status === 'stopped' && (
+          <button className="sg-danger" disabled={!!busy} onClick={onDelete}>
+            {busy === 'delete' ? '…' : 'Eliminar'}
+          </button>
+        )}
         <small className="sg-muted">Pausar NO cancela las órdenes vivas; detener sí.</small>
       </div>
 

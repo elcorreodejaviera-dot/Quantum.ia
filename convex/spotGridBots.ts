@@ -230,12 +230,12 @@ export const recordSpotGridOrder = internalMutation({
     side: v.union(v.literal("buy"), v.literal("sell")),
     gridLevel: v.number(), generation: v.number(), cycleId: v.number(),
     assetId: v.number(), price: v.number(), quantity: v.number(), quoteSize: v.number(),
-    pairedOrderId: v.optional(v.id("spot_grid_orders")),
+    pairedOrderId: v.optional(v.id("spot_grid_orders")), tranche: v.optional(v.number()),
   },
   handler: async (ctx, a) => {
     const bot = await ctx.db.get(a.botId);
     if (!leaseOk(bot, a.token)) return { ok: false as const };
-    const cloid = await toHlCloid(spotGridCloidInput(String(a.botId), a.generation, a.cycleId, a.gridLevel, a.side));
+    const cloid = await toHlCloid(spotGridCloidInput(String(a.botId), a.generation, a.cycleId, a.gridLevel, a.side, a.tranche ?? 0));
     const existing = await ctx.db.query("spot_grid_orders").withIndex("by_cloid", (q) => q.eq("cloid", cloid)).first();
     if (existing) return { ok: true as const, orderId: existing._id, cloid, existed: true as const };
     const now = Date.now();
@@ -259,7 +259,7 @@ export const markSpotGridOrder = internalMutation({
       v.literal("submitting"), v.literal("open"), v.literal("partially_filled"), v.literal("filled"),
       v.literal("cancelled"), v.literal("failed"))),
     oid: v.optional(v.string()), filledQty: v.optional(v.number()), remainingQty: v.optional(v.number()),
-    avgFillPx: v.optional(v.number()), pendingSellQty: v.optional(v.number()),
+    avgFillPx: v.optional(v.number()), pendingSellQty: v.optional(v.number()), sellTranche: v.optional(v.number()),
     incAttempt: v.optional(v.boolean()), errorMessage: v.optional(v.string()),
   },
   handler: async (ctx, a) => {
@@ -269,7 +269,7 @@ export const markSpotGridOrder = internalMutation({
     if (!o || o.botId !== a.botId) return { ok: false as const };
     const now = Date.now();
     const patch: Record<string, unknown> = { };
-    for (const k of ["oid", "filledQty", "remainingQty", "avgFillPx", "pendingSellQty", "errorMessage"] as const) {
+    for (const k of ["oid", "filledQty", "remainingQty", "avgFillPx", "pendingSellQty", "sellTranche", "errorMessage"] as const) {
       if (a[k] !== undefined) patch[k] = a[k];
     }
     if (a.status !== undefined) {
@@ -341,8 +341,9 @@ export const closeCycleAndRepost = internalMutation({
       grossProfit: gross, fees: feesUsd, netProfit: net, closedAt: now,
     });
     // BUY de reposición al MISMO nivel y al precio LÍMITE del nivel (no el VWAP), nuevo cycleId → cloid nuevo.
-    // Cantidad = la del BUY original del nivel (la SELL solo se coloca con el BUY 100% lleno → casan).
-    const repostQuantity = buy?.quantity ?? qty;
+    // Cantidad = la REALMENTE vendida en esta SELL (puede ser un tranche parcial del BUY) → re-compra justo
+    // lo vendido, sin sobre-reponer (Codex r2#2).
+    const repostQuantity = qty;
     const cloid = await toHlCloid(spotGridCloidInput(String(botId), bot!.generation, newCycle, sell.gridLevel, "buy"));
     const existing = await ctx.db.query("spot_grid_orders").withIndex("by_cloid", (q) => q.eq("cloid", cloid)).first();
     let repostOrderId = existing?._id;

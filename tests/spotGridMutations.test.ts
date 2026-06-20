@@ -75,3 +75,46 @@ describe("closeCycleAndRepost — idempotente por SELL consumida (JAV-92 ALTO#3)
     expect(reposts[0].cycleId).toBe(1);                  // nuevo cycleId
   });
 });
+
+describe("SELL por tranche — varias del mismo BUY NO colisionan (JAV-92 r2#1/r3#2)", () => {
+  it("recordSpotGridOrder con tranche distinto → cloid distinto, dos órdenes", async () => {
+    const t = makeConvexTest();
+    const { botId } = await t.run((ctx) => seedGridBot(ctx));
+    const token = (await t.mutation(internal.spotGridBots.claimSpotGridReconcile, { botId })).token!;
+    const common = { botId, token, side: "sell" as const, gridLevel: 0, generation: 1, cycleId: 0, assetId: 10120, price: 2950, quantity: 0.03, quoteSize: 88.5 };
+    const r0 = await t.mutation(internal.spotGridBots.recordSpotGridOrder, { ...common, tranche: 0 });
+    const r1 = await t.mutation(internal.spotGridBots.recordSpotGridOrder, { ...common, tranche: 1 });
+    expect(r1.existed).toBe(false);
+    expect(r0.cloid).not.toEqual(r1.cloid);   // tranche distinto → cloid distinto (sin colisión)
+    const subs = await t.run((ctx) => ctx.db.query("spot_grid_orders").withIndex("by_bot_status", (q) => q.eq("botId", botId).eq("status", "submitting")).collect());
+    expect(subs.length).toBe(2);
+  });
+});
+
+describe("gate live — red HL efectiva ≠ bot.network (JAV-92 ALTO#4/r3#1)", () => {
+  it("HL_NETWORK del backend distinta a la del bot → paused/network_mismatch", async () => {
+    const prev = process.env.HL_NETWORK;
+    process.env.HL_NETWORK = "testnet";
+    try {
+      const t = makeConvexTest();
+      const botId = await t.run(async (ctx: MutationCtx) => {
+        const base = await seedBase(ctx);
+        await ctx.db.insert("user_permissions", { userId: base.userId, permission: "canTradeLive", granted: true, grantedAt: Date.now() });
+        await ctx.db.insert("system_config", { key: "tradingEnabled", value: true });
+        await ctx.db.insert("system_config", { key: "simulationMode", value: false });
+        const now = Date.now();
+        return await ctx.db.insert("spot_grid_bots", {
+          userId: base.userId, hlAccountId: base.hlAccountId, symbol: "BTC", assetId: 10107, baseAsset: "UBTC",
+          quoteAsset: "USDC", minPrice: 50000, gridProfitPercent: 1, investmentAmount: 100, orderSize: 100,
+          gridCount: 5, feeRate: 0.0004, status: "running", network: "mainnet", generation: 1, createdAt: now, updatedAt: now,
+        });
+      });
+      const r: any = await t.query(internal.spotGridBots.assertSpotGridLiveAdmissibleInternal, { botId });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe("network_mismatch");
+      expect(r.policy).toBe("paused");
+    } finally {
+      if (prev === undefined) delete process.env.HL_NETWORK; else process.env.HL_NETWORK = prev;
+    }
+  });
+});

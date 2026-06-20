@@ -9,7 +9,7 @@ import { v } from "convex/values";
 import { action, internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { decryptPrivateKey } from "./hlCredentialActions";
-import { hlIsTestnet } from "./hlNetwork";
+import { hlIsTestnet, hlNetwork } from "./hlNetwork";
 import { elog, safeError } from "./log";
 import {
   makeSpotClients, resolveSpotAsset, getSpotPrice, getSpotBalance, getUserFees,
@@ -117,13 +117,14 @@ async function gatedPlace(ctx: any, exchange: any, botId: any, token: string, p:
 async function placeOrder(ctx: any, exchange: any, args: {
   botId: any; token: string; side: "buy" | "sell"; gridLevel: number; generation: number; cycleId: number;
   assetId: number; price: number; quantity: number; priceStr: string; sizeStr: string;
-  pairedOrderId?: any; openCloids: Set<string>;
+  pairedOrderId?: any; tranche?: number; openCloids: Set<string>;
 }): Promise<{ ok: boolean; cloid?: string }> {
   const rec = await ctx.runMutation(internal.spotGridBots.recordSpotGridOrder, {
     botId: args.botId, token: args.token, side: args.side, gridLevel: args.gridLevel,
     generation: args.generation, cycleId: args.cycleId, assetId: args.assetId,
     price: args.price, quantity: args.quantity, quoteSize: args.price * args.quantity,
     ...(args.pairedOrderId ? { pairedOrderId: args.pairedOrderId } : {}),
+    ...(args.tranche !== undefined ? { tranche: args.tranche } : {}),
   });
   if (!rec.ok) return { ok: false };
   try {
@@ -219,17 +220,22 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
       remainingQty: Math.max(0, o.quantity - newFilled), status: full ? "filled" : "partially_filled",
     });
     if (o.side === "buy") {
-      // (Codex ALTO#1/#2) La SELL pareada se coloca SOLO cuando el BUY se llena COMPLETO → UNA SELL por
-      // (nivel,ciclo), cloid único, sin colisión por tranches, y la reposición casa con la cantidad real.
-      // Mientras el BUY esté parcial se espera; el remanente sin completar al detener queda como balance.
-      if (full && isRunning) {
-        const sellQty = floorSpotSize(newFilled, szDecimals);
+      // (Codex #7/#3-r2/r3#2) SELL pareada por la cantidad REALMENTE llenada, en cuanto el acumulado
+      // `pendingSellQty` alcanza el min-notional — NO se espera al BUY 100% (evita inventario sin TP). El
+      // cloid de la SELL lleva `tranche` (= nº de SELL ya emitidas para este BUY) → varias SELL del mismo
+      // BUY no colisionan (resuelve r2#1). Sub-mínima: se acumula en `pendingSellQty` hasta poder vender.
+      if (isRunning) {
+        const sellQty = floorSpotSize((o.pendingSellQty ?? 0) + a.sz, szDecimals);
         const basis = vwap > 0 ? vwap : o.price;                       // costo real (VWAP de compra)
         const targetNet = sellQty * basis * (bot.gridProfitPercent / 100);
         const sellPrice = sellQty > 0 ? solveSellPrice(basis, sellQty, bot.gridProfitPercent, bot.feeRate, szDecimals, targetNet) : null;
-        if (sellPrice != null) {
+        if (sellPrice != null && sellQty * sellPrice >= MIN_SPOT_NOTIONAL_USD) {
+          const tranche = o.sellTranche ?? 0;
           await placeOrder(ctx, clients.exchange, { botId, token, side: "sell", gridLevel: o.gridLevel, generation: bot.generation, cycleId: o.cycleId,
-            assetId: bot.assetId, price: sellPrice, quantity: sellQty, priceStr: String(sellPrice), sizeStr: String(sellQty), pairedOrderId: o._id, openCloids });
+            assetId: bot.assetId, price: sellPrice, quantity: sellQty, priceStr: String(sellPrice), sizeStr: String(sellQty), pairedOrderId: o._id, tranche, openCloids });
+          await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, pendingSellQty: 0, sellTranche: tranche + 1 });
+        } else {
+          await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, pendingSellQty: (o.pendingSellQty ?? 0) + a.sz });
         }
       }
     } else if (full) {
@@ -310,6 +316,10 @@ export const stopSpotGridBot = action({
       const credInfo: any = await ctx.runQuery(internal.spotGridBots.getSpotGridCredentialInternal, { botId });
       if (!credInfo) throw new Error("Bot/credencial no encontrados.");
       if (credInfo.network !== expectedNetwork) throw new Error(`Red incompatible: ${expectedNetwork} vs ${credInfo.network}.`);
+      // (Codex ALTO#1-r3) La red EFECTIVA del backend DEBE coincidir con la del bot: si no, los clientes
+      // (hlIsTestnet) leerían/cancelarían en la red equivocada y marcaríamos stopped dejando órdenes vivas
+      // en la red correcta. Abortar antes de tocar HL.
+      if (hlNetwork() !== credInfo.network) throw new Error(`HL_NETWORK del backend (${hlNetwork()}) ≠ red del bot (${credInfo.network}); no se opera.`);
       const privKey = decryptPrivateKey(credInfo.credential);
       const { info, exchange } = makeSpotClients(privKey as `0x${string}`, hlIsTestnet());
       const address = credInfo.credential.tradingAccountAddress;

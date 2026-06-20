@@ -560,6 +560,7 @@ export default defineSchema({
     attempt: v.optional(v.number()),
     submittedAt: v.optional(v.number()),       // (JAV-92) instante del intent submitting → grace de retry
     cycleSettled: v.optional(v.boolean()),     // (JAV-92 ALTO#3) SELL ya consumida por un cierre de ciclo
+    sellTranche: v.optional(v.number()),       // (JAV-92) nº de SELL ya emitidas para ESTE BUY (cloid por tranche)
     errorMessage: v.optional(v.string()),
     createdAt: v.number(),
     filledAt: v.optional(v.number()),

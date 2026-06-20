@@ -13,6 +13,12 @@ Depende de JAV-92 (motor) → **rama YA rebasada sobre master con JAV-92 mergead
 > del motor), NO `spotGridActions`; rama rebasada sobre master con JAV-92. (2) `HLAccountSelect` se EXTRAE a
 > `src/components/HLAccountSelect.jsx` (compartido) e importan BotPortal y SpotGridView (no se duplica). (3)
 > Tarjeta de compartir = **canvas propio** (sin dependencia nueva). (4) Límites concretos en `getSpotGridDetail`.
+>
+> **Rev.2.1 (GO de Codex, 2 BAJO de implementación):** (a) cuando `cyclesCount`/`totalNetProfit` toquen el
+> tope `.take(500)`, la UI debe marcarlo **explícitamente como truncado** ("≥500 ciclos", "profit parcial
+> hasta 500 ciclos") — nunca mostrar un total truncado como si fuera exacto. (b) La descarga de la tarjeta:
+> intentar `navigator.clipboard.write` si existe, pero **siempre** ofrecer fallback `canvas.toBlob` +
+> `<a download>` PNG si clipboard no existe o falla.
 
 ## 1. Backend — query read-only de detalle/stats (`convex/spotGridBots.ts`, NON-node)
 - **`getSpotGridDetail(botId)`** (query, scoped por `getUserOrNull` + ownership): devuelve el bot +

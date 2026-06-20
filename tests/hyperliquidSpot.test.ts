@@ -9,6 +9,8 @@ import {
   roundAndValidateSpotOrder,
   buildSpotLimitOrder,
   withSpotTimeout,
+  getSpotPrice,
+  placeSpotLimit,
   SPOT_ASSET_ID_OFFSET,
 } from "../convex/hyperliquidSpot";
 
@@ -176,6 +178,50 @@ describe("withSpotTimeout (Codex #3-pr1-r2: timeout local SIEMPRE)", () => {
     const t = withSpotTimeout({ expiresAfter: exp });
     expect(t.expiresAfter).toBe(exp);
     t.clear();
+  });
+});
+
+describe("getSpotPrice (Codex BAJO-pr1: alinea ctxs por POSICIÓN del universe, no por index)", () => {
+  // universe.index con huecos/desordenados; ctxs alineados por posición del array (no por index).
+  const meta = {
+    tokens: [
+      { name: "USDC", szDecimals: 8, index: 0 },
+      { name: "UBTC", szDecimals: 5, index: 50 },
+      { name: "UETH", szDecimals: 4, index: 200 },
+    ],
+    universe: [
+      { tokens: [200, 0], name: "UETH/USDC", index: 120 }, // pos 0
+      { tokens: [50, 0], name: "UBTC/USDC", index: 107 },  // pos 1
+    ],
+  };
+
+  it("lee ctxs[posición], no ctxs[universeIndex]", async () => {
+    const ctxs = [{ midPx: "3000" }, { midPx: "65000" }]; // pos 0→UETH, pos 1→UBTC
+    const info: any = { spotMetaAndAssetCtxs: async () => [meta, ctxs] };
+    const btc = resolveSpotAssetFromMeta(meta, "BTC", "mainnet"); // UBTC, universeIndex 107 (pos 1)
+    // Si usara ctxs[107] sería undefined → NaN → throw. Debe tomar ctxs[1] = 65000.
+    expect(await getSpotPrice(info, btc)).toBe(65000);
+  });
+
+  it("usa markPx si midPx no está disponible", async () => {
+    const ctxs = [{ midPx: "3000" }, { markPx: "64000" }];
+    const info: any = { spotMetaAndAssetCtxs: async () => [meta, ctxs] };
+    const btc = resolveSpotAssetFromMeta(meta, "BTC", "mainnet");
+    expect(await getSpotPrice(info, btc)).toBe(64000);
+  });
+});
+
+describe("placeSpotLimit (Codex MEDIO-pr1: revalida min-notional)", () => {
+  it("rechaza nocional < mínimo SIN llamar a exchange.order", async () => {
+    let called = false;
+    const exchange: any = { order: async () => { called = true; return {}; } };
+    await expect(
+      placeSpotLimit(exchange, {
+        assetId: 10107, isBuy: true, priceStr: "100", sizeStr: "0.05", // $5 < $10
+        cloid: "0x00112233445566778899aabbccddeeff",
+      }),
+    ).rejects.toThrow(/mínimo/);
+    expect(called).toBe(false);
   });
 });
 

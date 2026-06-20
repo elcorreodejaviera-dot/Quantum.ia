@@ -190,7 +190,12 @@ export function formatSpotPrice(price: number, szDecimals: number, dir: "ceil" |
 /** Trunca un tamaño hacia abajo a szDecimals. */
 export function floorSpotSize(size: number, szDecimals: number): number {
   const f = 10 ** szDecimals;
-  return Math.floor(size * f) / f;
+  // (Codex BAJO-pr1) Corrige el ruido binario ANTES de truncar: sin esto, un valor que debería ser
+  // p.ej. 200 puede representarse como 199.99999999 y `Math.floor` perdería un TICK entero (causando
+  // fallos evitables de min-notional). Redondeamos `size*f` a una precisión muy por debajo de un tick
+  // (1e-6 ≪ 1) para absorber sólo el ruido flotante, y luego truncamos.
+  const scaled = Math.round(size * f * 1e6) / 1e6;
+  return Math.floor(scaled) / f;
 }
 
 /**
@@ -332,6 +337,16 @@ export async function getUserFees(info: InfoClient, tradingAccountAddress: strin
  * Devuelve el status crudo del primer order.
  */
 export async function placeSpotLimit(exchange: ExchangeClient, p: SpotLimitParams, opts?: SpotRpcOpts) {
+  // (Codex MEDIO-pr1) Revalidación defensiva del min-notional con los valores que REALMENTE se envían.
+  // placeSpotLimit acepta `SpotLimitParams` crudos (priceStr/sizeStr), así que un caller (PR3) podría
+  // saltarse `roundAndValidateSpotOrder` y mandar < $10 → HL rechazaría en el reconcile real. Revalidar
+  // aquí garantiza que lo enviado SIEMPRE cumple el mínimo, sin depender de la disciplina del caller.
+  // `!(notional >= MIN)` cubre además priceStr/sizeStr no numéricos (NaN).
+  const notional = Number(p.priceStr) * Number(p.sizeStr);
+  if (!(notional >= MIN_SPOT_NOTIONAL_USD)) {
+    const shown = Number.isFinite(notional) ? notional.toFixed(2) : `${p.priceStr}×${p.sizeStr}`;
+    throw new Error(`placeSpotLimit: nocional ${shown} < mínimo ${MIN_SPOT_NOTIONAL_USD} USD (revalidación defensiva).`);
+  }
   const { signal, expiresAfter, clear } = withSpotTimeout(opts);
   try {
     const resp = (await exchange.order(buildSpotLimitOrder(p) as any, { signal, expiresAfter } as any)) as any;

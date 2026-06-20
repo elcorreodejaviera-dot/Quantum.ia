@@ -261,7 +261,9 @@ function PoolAuditPanel({ audit, live }) {
     const coin = b.baseAsset ? hlCoin(b.baseAsset) : null;
     const cov = (live && b.hlAccountId && live.coverageByAccountCoin) ? live.coverageByAccountCoin[b.hlAccountId] : null;
     liveByBot[b.botId] = {
-      liquidityUsd: live?.positions?.[b.botId]?.liquidityUsd ?? null,
+      // (JAV-99) Fallback al LP persistido (initialLiquidityUsd) cuando la lectura LIVE de liquidez no
+      // llega — igual que la tarjeta — para que hedge_vs_exposure compare en vez de decir "sin datos".
+      liquidityUsd: live?.positions?.[b.botId]?.liquidityUsd ?? b.pool?.initialLiquidityUsd ?? null,
       inRange: live?.positions?.[b.botId]?.inRange ?? null,
       coverageUsd: (cov && coin && cov[coin] != null) ? cov[coin] : null,
       present: !!live?.positions?.[b.botId],

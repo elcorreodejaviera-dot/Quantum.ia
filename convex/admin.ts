@@ -259,6 +259,9 @@ type AuditArmView = {
 type AuditPoolView = {
   poolId: Id<"pools">; pair: string; network: string; tokenId: number | null;
   minRange: number; maxRange: number; closed: boolean;
+  // (JAV-99) Valor LP persistido (primera observación). Fallback de exposición cuando la lectura LIVE
+  // de liquidez falla, para que hedge_vs_exposure pueda comparar igual que la tarjeta (no "sin datos").
+  initialLiquidityUsd: number | null;
 };
 type AuditBotView = {
   botId: Id<"bots">; active: boolean; hlAccountId: Id<"hl_api_credentials"> | null;
@@ -277,6 +280,7 @@ export const getUserPoolAuditData = query({
         if (p) pool = {
           poolId: p._id, pair: p.pair, network: p.network, tokenId: p.tokenId ?? null,
           minRange: p.minRange, maxRange: p.maxRange, closed: p.closed === true,
+          initialLiquidityUsd: Number.isFinite(p.initialLiquidityUsd) ? (p.initialLiquidityUsd as number) : null,
         };
       }
       const armDocs = await ctx.db.query("trigger_arms")

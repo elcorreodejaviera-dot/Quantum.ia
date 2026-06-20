@@ -384,46 +384,46 @@ function SpotGridShareCard({ bot, stats, onClose }) {
     const { d, h, m } = durationParts(bot.createdAt)
     const profit = Number(stats.totalNetProfit) || 0
 
-    // Fondo degradado.
+    // Fondo degradado (paleta del portal: --bg → --panel, modo oscuro).
     const g = ctx.createLinearGradient(0, 0, W, H)
-    g.addColorStop(0, '#0b1020'); g.addColorStop(1, '#13203a')
+    g.addColorStop(0, '#050505'); g.addColorStop(1, '#101010')
     ctx.fillStyle = g; ctx.fillRect(0, 0, W, H)
 
-    // Borde sutil.
-    ctx.strokeStyle = 'rgba(80,200,160,0.35)'; ctx.lineWidth = 2
+    // Borde sutil (--green tenue).
+    ctx.strokeStyle = 'rgba(0,200,5,0.35)'; ctx.lineWidth = 2
     ctx.strokeRect(8, 8, W - 16, H - 16)
 
     // Branding.
     ctx.textBaseline = 'alphabetic'
-    ctx.fillStyle = '#fff'; ctx.font = 'bold 26px system-ui, sans-serif'
+    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 26px system-ui, sans-serif'
     ctx.fillText('Quantum.ia', 36, 56)
-    ctx.fillStyle = '#7fe0c0'; ctx.font = '15px system-ui, sans-serif'
+    ctx.fillStyle = '#00c805'; ctx.font = '15px system-ui, sans-serif'
     ctx.fillText(`${bot.symbol}/${bot.quoteAsset} · Spot Grid Infinity`, 36, 82)
 
     // Ganancias totales (héroe).
-    ctx.fillStyle = '#9aa6c0'; ctx.font = '14px system-ui, sans-serif'
+    ctx.fillStyle = '#b7bdb9'; ctx.font = '14px system-ui, sans-serif'
     ctx.fillText('Ganancias totales', 36, 150)
-    ctx.fillStyle = profit >= 0 ? '#37d39b' : '#ff6b6b'
+    ctx.fillStyle = profit >= 0 ? '#00c805' : '#ff5000'
     ctx.font = 'bold 56px system-ui, sans-serif'
     const profitTxt = (profit >= 0 ? '+' : '-') + '$' + Math.abs(profit).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
     ctx.fillText(profitTxt, 36, 206)
     if (stats.truncated) {
-      ctx.fillStyle = '#9aa6c0'; ctx.font = '12px system-ui, sans-serif'
+      ctx.fillStyle = '#b7bdb9'; ctx.font = '12px system-ui, sans-serif'
       ctx.fillText(`(parcial, ≥${stats.cycleCap} ciclos)`, 36, 228)
     }
 
     // Métricas inferiores.
     function metric(x, label, value) {
-      ctx.fillStyle = '#9aa6c0'; ctx.font = '13px system-ui, sans-serif'
+      ctx.fillStyle = '#b7bdb9'; ctx.font = '13px system-ui, sans-serif'
       ctx.fillText(label, x, 290)
-      ctx.fillStyle = '#fff'; ctx.font = 'bold 20px system-ui, sans-serif'
+      ctx.fillStyle = '#ffffff'; ctx.font = 'bold 20px system-ui, sans-serif'
       ctx.fillText(value, x, 316)
     }
     metric(36, 'Duración', `${d}d ${h}h ${m}m`)
     const pairedTxt = stats.truncated ? `≥${stats.cycleCap}` : String(stats.cyclesCount)
     metric(260, 'Órdenes emparejadas', pairedTxt)
 
-    ctx.fillStyle = '#5566'; ctx.font = '12px system-ui, sans-serif'
+    ctx.fillStyle = '#747a76'; ctx.font = '12px system-ui, sans-serif'
     ctx.fillText('quantum.ia', W - 120, H - 28)
   }, [bot, stats])
 
@@ -479,63 +479,63 @@ function SpotGridShareCard({ bot, stats, onClose }) {
 function SpotGridStyles() {
   return (
     <style>{`
-      .sg-wrap { max-width: 1100px; margin: 0 auto; padding: 16px; color: var(--text, #e8edf6); }
-      .sg-top { display: flex; align-items: center; gap: 16px; padding: 10px 0 18px; border-bottom: 1px solid rgba(255,255,255,.08); }
+      .sg-wrap { max-width: 1100px; margin: 0 auto; padding: 16px; color: var(--text); }
+      .sg-top { display: flex; align-items: center; gap: 16px; padding: 10px 0 18px; border-bottom: 1px solid var(--line); }
       .sg-brand { font-size: 18px; }
       .sg-tabs { display: flex; gap: 10px; margin-left: auto; }
-      .sg-tab { color: #9aa6c0; text-decoration: none; font-size: 14px; }
-      .sg-tab.active { color: #37d39b; }
-      .sg-pill { font-size: 12px; padding: 2px 10px; border-radius: 999px; background: rgba(255,255,255,.06); }
-      .sg-pill.green, .sg-pill.sg-running { color: #37d39b; }
-      .sg-pill.amber, .sg-pill.sg-paused { color: #f4b740; }
-      .sg-pill.sg-error { color: #ff6b6b; }
-      .sg-pill.sg-stopped { color: #9aa6c0; }
+      .sg-tab { color: var(--muted); text-decoration: none; font-size: 14px; }
+      .sg-tab.active { color: var(--green); }
+      .sg-pill { font-size: 12px; padding: 2px 10px; border-radius: 999px; background: color-mix(in srgb, var(--text) 6%, transparent); }
+      .sg-pill.green, .sg-pill.sg-running { color: var(--green); }
+      .sg-pill.amber, .sg-pill.sg-paused { color: var(--amber); }
+      .sg-pill.sg-error { color: var(--red); }
+      .sg-pill.sg-stopped { color: var(--muted); }
       .sg-grid { display: grid; grid-template-columns: 220px 1fr; gap: 18px; margin-top: 18px; }
       .sg-side { display: flex; flex-direction: column; gap: 6px; }
-      .sg-shead h2 { font-size: 12px; letter-spacing: .08em; color: #9aa6c0; margin: 0 0 6px; }
-      .sg-listitem { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; background: rgba(255,255,255,.04); border: 1px solid transparent; border-radius: 10px; color: inherit; cursor: pointer; text-align: left; }
-      .sg-listitem.active { border-color: rgba(55,211,155,.5); background: rgba(55,211,155,.08); }
-      .sg-listitem.sg-new { color: #37d39b; justify-content: center; }
+      .sg-shead h2 { font-size: 12px; letter-spacing: .08em; color: var(--muted); margin: 0 0 6px; }
+      .sg-listitem { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; color: inherit; cursor: pointer; text-align: left; }
+      .sg-listitem.active { border-color: color-mix(in srgb, var(--green) 45%, transparent); background: color-mix(in srgb, var(--green) 10%, transparent); }
+      .sg-listitem.sg-new { color: var(--green); justify-content: center; }
       .sg-li-pair { font-weight: 600; }
-      .sg-dot { width: 9px; height: 9px; border-radius: 50%; background: #9aa6c0; }
-      .sg-dot.sg-running { background: #37d39b; } .sg-dot.sg-paused { background: #f4b740; }
-      .sg-dot.sg-error { background: #ff6b6b; } .sg-dot.sg-stopped { background: #556; }
-      .sg-panel { background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.07); border-radius: 14px; padding: 22px; }
+      .sg-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+      .sg-dot.sg-running { background: var(--green); } .sg-dot.sg-paused { background: var(--amber); }
+      .sg-dot.sg-error { background: var(--red); } .sg-dot.sg-stopped { background: var(--faint); }
+      .sg-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 22px; }
       .sg-panel h1 { font-size: 22px; margin: 0 0 6px; }
-      .sg-muted { color: #9aa6c0; font-size: 13px; }
+      .sg-muted { color: var(--muted); font-size: 13px; }
       .sg-form { display: flex; flex-direction: column; gap: 12px; max-width: 420px; margin-top: 14px; }
-      .sg-field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #c7d0e0; }
-      .sg-field input, .sg-field select { background: rgba(0,0,0,.25); border: 1px solid rgba(255,255,255,.12); border-radius: 8px; padding: 9px 10px; color: #fff; font-size: 14px; }
+      .sg-field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+      .sg-field input, .sg-field select { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; color: var(--text); font-size: 14px; }
       .sg-seg { display: flex; gap: 6px; }
-      .sg-seg button { flex: 1; padding: 8px; border-radius: 8px; border: 1px solid rgba(255,255,255,.12); background: rgba(0,0,0,.2); color: #c7d0e0; cursor: pointer; }
-      .sg-seg button.on { border-color: #37d39b; color: #37d39b; background: rgba(55,211,155,.08); }
-      .sg-adv { display: flex; flex-direction: column; gap: 12px; border-left: 2px solid rgba(255,255,255,.08); padding-left: 12px; }
-      .sg-link { background: none; border: none; color: #7fe0c0; cursor: pointer; text-align: left; padding: 0; font-size: 13px; }
-      .sg-primary { background: #37d39b; color: #06241b; border: none; border-radius: 9px; padding: 11px 16px; font-weight: 700; cursor: pointer; }
+      .sg-seg button { flex: 1; padding: 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--muted); cursor: pointer; }
+      .sg-seg button.on { border-color: var(--green); color: var(--green); background: color-mix(in srgb, var(--green) 10%, transparent); }
+      .sg-adv { display: flex; flex-direction: column; gap: 12px; border-left: 2px solid var(--line); padding-left: 12px; }
+      .sg-link { background: none; border: none; color: var(--green); cursor: pointer; text-align: left; padding: 0; font-size: 13px; }
+      .sg-primary { background: var(--green); color: #050505; border: none; border-radius: 9px; padding: 11px 16px; font-weight: 700; cursor: pointer; }
       .sg-primary:disabled { opacity: .5; cursor: default; }
-      .sg-ghost { background: rgba(255,255,255,.06); color: #e8edf6; border: 1px solid rgba(255,255,255,.14); border-radius: 9px; padding: 9px 14px; cursor: pointer; }
-      .sg-danger { background: rgba(255,107,107,.12); color: #ff8a8a; border: 1px solid rgba(255,107,107,.4); border-radius: 9px; padding: 9px 14px; cursor: pointer; }
+      .sg-ghost { background: color-mix(in srgb, var(--text) 6%, transparent); color: var(--text); border: 1px solid var(--line); border-radius: 9px; padding: 9px 14px; cursor: pointer; }
+      .sg-danger { background: color-mix(in srgb, var(--red) 12%, transparent); color: var(--red); border: 1px solid color-mix(in srgb, var(--red) 40%, transparent); border-radius: 9px; padding: 9px 14px; cursor: pointer; }
       .sg-danger:disabled, .sg-ghost:disabled { opacity: .5; cursor: default; }
-      .sg-error { color: #ff6b6b; font-size: 13px; }
-      .sg-warn { color: #f4b740; font-size: 12px; }
+      .sg-error { color: var(--red); font-size: 13px; }
+      .sg-warn { color: var(--amber); font-size: 12px; }
       .sg-detail-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
       .sg-detail-head h1 { margin: 0; }
       .sg-detail-head .sg-ghost { margin-left: auto; }
       .sg-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 18px 0; }
-      .sg-kpi { background: rgba(0,0,0,.2); border: 1px solid rgba(255,255,255,.07); border-radius: 12px; padding: 14px; }
-      .sg-kpi-label { font-size: 12px; color: #9aa6c0; }
+      .sg-kpi { background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+      .sg-kpi-label { font-size: 12px; color: var(--muted); }
       .sg-kpi-val { font-size: 24px; font-weight: 700; margin: 4px 0; }
-      .sg-kpi-val.accent { color: #37d39b; }
-      .sg-kpi-sub { font-size: 11px; color: #9aa6c0; }
+      .sg-kpi-val.accent { color: var(--green); }
+      .sg-kpi-sub { font-size: 11px; color: var(--muted); }
       .sg-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
       .sg-section { margin-top: 22px; }
-      .sg-section h2 { font-size: 12px; letter-spacing: .08em; color: #9aa6c0; }
+      .sg-section h2 { font-size: 12px; letter-spacing: .08em; color: var(--muted); }
       .sg-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-      .sg-table th { text-align: left; color: #9aa6c0; font-weight: 500; padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,.08); }
-      .sg-table td { padding: 7px 8px; border-bottom: 1px solid rgba(255,255,255,.04); }
-      .sg-buy { color: #37d39b; } .sg-sell { color: #ff8a8a; }
+      .sg-table th { text-align: left; color: var(--muted); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+      .sg-table td { padding: 7px 8px; border-bottom: 1px solid var(--line); }
+      .sg-buy { color: var(--green); } .sg-sell { color: var(--red); }
       .sg-modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; z-index: 50; padding: 16px; }
-      .sg-modal { background: #121a2c; border: 1px solid rgba(255,255,255,.12); border-radius: 14px; padding: 22px; max-width: 480px; }
+      .sg-modal { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 22px; max-width: 480px; }
       .sg-modal.sg-share { max-width: 640px; }
       .sg-modal h2 { margin: 0 0 12px; }
       .sg-modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }

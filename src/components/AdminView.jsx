@@ -267,7 +267,7 @@ function PoolAuditPanel({ audit, live }) {
       present: !!live?.positions?.[b.botId],
     };
   }
-  const results = auditUserPools(audit, liveByBot).filter((r) => r.findings.length > 0);
+  const results = auditUserPools(audit, liveByBot, live?.network ?? null).filter((r) => r.findings.length > 0);
   return (
     <div className="av-audit">
       <div className="av-audit-head">AUDITORÍA DE POOLS

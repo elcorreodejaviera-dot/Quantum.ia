@@ -53,6 +53,16 @@ export const revokeById = mutation({
     if (await hasNonTerminalArmForAccount(ctx, id)) {
       throw new Error("La cuenta tiene cobertura automática activa; pausa/cierra el trigger antes de revocar.");
     }
+    // JAV-102 (ALTO money-path): tampoco revocar con un Spot Grid vivo (no-`stopped`) en la cuenta —
+    // perderíamos la clave privada para cancelar/reconciliar sus órdenes resting (fondos atascados en HL).
+    const liveGrid = (await ctx.db
+      .query("spot_grid_bots")
+      .withIndex("by_account", (q) => q.eq("hlAccountId", id))
+      .collect())
+      .find((g) => g.status !== "stopped");
+    if (liveGrid) {
+      throw new Error("La cuenta tiene un Spot Grid activo; deténlo antes de revocar.");
+    }
     const linked = await ctx.db
       .query("bots")
       .withIndex("by_user_account", (q) => q.eq("userId", user._id).eq("hlAccountId", id))

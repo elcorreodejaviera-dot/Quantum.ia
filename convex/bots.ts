@@ -313,25 +313,51 @@ export const getOrCreatePoolBot = mutation({
       throw new Error("Pasar un bot a modo real requiere el permiso canTradeLive.");
     }
 
-    // Exclusividad de cuenta: 1 cuenta = 1 bot (ownership + ningún otro bot la usa).
-    if (hlAccountId) {
-      const cred = await ctx.db.get(hlAccountId);
-      if (!cred || cred.userId !== user._id) {
-        throw new Error("La cuenta Hyperliquid no existe o no te pertenece.");
+    // Estado resultante (upsert de estado completo): la cuenta resultante conserva la existente si
+    // el arg viene vacío (CodeRabbit: un update parcial no debe borrar/invalidar la cuenta activa).
+    // Se computa ANTES del guard para validar la cuenta RESULTANTE: un update que OMITE hlAccountId
+    // pero mantiene la cuenta del bot también debe respetar la exclusividad (Codex r2).
+    const resultingHlAccountId = hlAccountId ?? existingBot?.hlAccountId;
+
+    // Exclusividad de cuenta (JAV-102): la cobertura COMPARTE cuenta SOLO entre pares distintos.
+    // En la misma wallet HL pueden convivir BTC/USDC + ETH/USDC (distinto baseAsset = distinta coin =
+    // distinto order book → sin fills ambiguos ni cancelaciones cruzadas), pero NUNCA el mismo par dos
+    // veces ni junto a un Spot Grid (el grid exige cuenta dedicada total). Riesgo aceptado por producto:
+    // los pares comparten collateral cross a nivel cuenta (una pérdida fuerte en un par merma el margen
+    // del otro) — se avisa al usuario en la UI al compartir cuenta. Nota: la credencial NO tiene `network`
+    // (1 credencial = 1 red en la práctica); la clave de unicidad es (cuenta, baseAsset), no incluye red.
+    if (resultingHlAccountId) {
+      // Ownership: solo re-validar cuando el arg viene explícito. Una cuenta ya persistida en el bot
+      // existente no se re-comprueba (pasó este guard al vincularse, y bot.userId === user._id).
+      if (hlAccountId) {
+        const cred = await ctx.db.get(hlAccountId);
+        if (!cred || cred.userId !== user._id) {
+          throw new Error("La cuenta Hyperliquid no existe o no te pertenece.");
+        }
       }
       const usingAccount = await ctx.db
         .query("bots")
         .withIndex("by_user_account", (q) =>
-          q.eq("userId", user._id).eq("hlAccountId", hlAccountId))
+          q.eq("userId", user._id).eq("hlAccountId", resultingHlAccountId))
         .collect();
-      if (usingAccount.some((b) => b._id !== existingBot?._id)) {
-        throw new Error("Esa cuenta ya está asignada a otro bot.");
+      // Mismo par (mismo baseAsset) en otra cobertura de la cuenta → rechazo (excluye el propio bot en
+      // un upsert). Aplica a ambos kind (il/trading): mismo activo = misma posición = interferencia.
+      if (usingAccount.some((b) => b._id !== existingBot?._id && b.baseAsset === baseAsset)) {
+        throw new Error(
+          `Esta cuenta de Hyperliquid ya tiene una cobertura para ${baseAsset}/USDC. Para cubrir ` +
+          `este par usá otra cuenta; para esta cuenta podés cubrir un par distinto.`,
+        );
+      }
+      // Grid vivo en la cuenta → rechazo (exclusividad total del Spot Grid).
+      const linkedGrid = (await ctx.db
+        .query("spot_grid_bots")
+        .withIndex("by_account", (q) => q.eq("hlAccountId", resultingHlAccountId))
+        .collect())
+        .find((g) => g.status !== "stopped");
+      if (linkedGrid) {
+        throw new Error("Esta cuenta está vinculada a un Spot Grid. Para una cobertura, usá una cuenta distinta.");
       }
     }
-
-    // Estado resultante (upsert de estado completo): la cuenta resultante conserva la existente si
-    // el arg viene vacío (CodeRabbit: un update parcial no debe borrar/invalidar la cuenta activa).
-    const resultingHlAccountId = hlAccountId ?? existingBot?.hlAccountId;
     const willBeActive = active ?? existingBot?.active ?? false;
     if (willBeActive) await assertActivatablePoolBot(ctx, poolId, resultingHlAccountId, user._id);
     // JAV-44: no reactivar mientras se está cancelando un trigger (pausa en curso).

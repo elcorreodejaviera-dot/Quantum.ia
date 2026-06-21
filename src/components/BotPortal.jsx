@@ -2501,6 +2501,11 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
         </p>
 
         <HLAccountSelect accounts={accounts} value={hlAccountId} onChange={setHlAccountId} />
+        <p className="network" style={{ fontSize: 11, marginTop: 4, opacity: 0.8 }}>
+          ℹ️ Una cuenta puede cubrir varios pares distintos, pero comparten el margen de la cuenta:
+          una pérdida fuerte en un par reduce el margen disponible del otro. Un Spot Grid necesita
+          cuenta dedicada.
+        </p>
 
         <label className="config-field" style={{ marginTop: 8 }}>
           <span>Perp (SHORT)</span>
@@ -2668,6 +2673,11 @@ function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
         </p>
 
         <HLAccountSelect accounts={accounts} value={hlAccountId} onChange={setHlAccountId} />
+        <p className="network" style={{ fontSize: 11, marginTop: 4, opacity: 0.8 }}>
+          ℹ️ Una cuenta puede cubrir varios pares distintos, pero comparten el margen de la cuenta:
+          una pérdida fuerte en un par reduce el margen disponible del otro. Un Spot Grid necesita
+          cuenta dedicada.
+        </p>
 
         <div className="config-field" style={{ padding: '8px 0' }}>
           <span>Dirección del Breakout</span>

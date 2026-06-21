@@ -160,7 +160,9 @@ export default defineSchema({
     .index("by_pool", ["poolId"])
     // Unicidad/atomicidad: máx 1 bot por (usuario, pool, tipo) — getOrCreatePoolBot.
     .index("by_user_pool_kind", ["userId", "poolId", "kind"])
-    // Exclusividad: una cuenta HL solo puede estar asignada a un bot (1 cuenta = 1 bot).
+    // Exclusividad de cuenta (JAV-102): una cuenta HL de cobertura admite varios bots SOLO si cubren
+    // pares distintos (un bot por baseAsset); nunca el mismo par dos veces, nunca junto a un Spot Grid
+    // (el grid exige cuenta dedicada total). Usado por getOrCreatePoolBot y revokeById.
     .index("by_user_account", ["userId", "hlAccountId"])
     // JAV-44 auto-rearm: el cron busca bots con re-armado pendiente/blocked listos (nextRearmAt).
     .index("by_rearm_status", ["rearmStatus", "nextRearmAt"]),

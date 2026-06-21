@@ -116,7 +116,7 @@ describe("persistSpotGridBot — guards (JAV-91)", () => {
     const hlAccountId = await seedLiveEnv(t);
     await asUser(t).mutation(internal.spotGridBots.persistSpotGridBot, args(hlAccountId));   // primer grid
     await expect(asUser(t).mutation(internal.spotGridBots.persistSpotGridBot, args(hlAccountId)))  // segundo en misma cuenta
-      .rejects.toThrow(/cuenta dedicada|Spot Grid activo/i);
+      .rejects.toThrow(/vinculá otra cuenta|Spot Grid/i);
   });
 
   it("balance insuficiente → rechaza", async () => {

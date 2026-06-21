@@ -95,11 +95,11 @@ async function assertCreateGuards(
   // viven en la MISMA wallet → compartir cuenta mezclaría órdenes/balance.
   const perpBot = await ctx.db.query("bots")
     .withIndex("by_user_account", (q) => q.eq("userId", cred.userId).eq("hlAccountId", hlAccountId)).first();
-  if (perpBot) throw new Error("Esa cuenta HL ya la usa un bot de cobertura/trading: usa una cuenta dedicada.");
+  if (perpBot) throw new Error("Esta cuenta ya la usa un bot de cobertura/trading. El Spot Grid necesita una cuenta dedicada.");
   const otherGrid = (await ctx.db.query("spot_grid_bots")
     .withIndex("by_account", (q) => q.eq("hlAccountId", hlAccountId)).collect())
     .find((b) => b.status !== "stopped");
-  if (otherGrid) throw new Error("Esa cuenta HL ya la usa otro Spot Grid activo: usa una cuenta dedicada.");
+  if (otherGrid) throw new Error("Esta cuenta ya está vinculada a un Spot Grid. Para abrir otro grid, vinculá otra cuenta.");
   return { manager, cred };
 }
 

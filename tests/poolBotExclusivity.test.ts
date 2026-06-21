@@ -22,7 +22,9 @@ async function seedPool(ctx: MutationCtx, userId: Id<"users">, pair: string) {
   return await ctx.db.insert("pools", { userId, pair, network: "testnet", minRange: 1, maxRange: 2, status: "open" });
 }
 
-async function seedGrid(ctx: MutationCtx, userId: Id<"users">, hlAccountId: Id<"hl_api_credentials">, status: string) {
+type GridStatus = "running" | "paused" | "stopped" | "error";
+
+async function seedGrid(ctx: MutationCtx, userId: Id<"users">, hlAccountId: Id<"hl_api_credentials">, status: GridStatus) {
   const now = Date.now();
   return await ctx.db.insert("spot_grid_bots", {
     userId, hlAccountId, symbol: "BTC", assetId: 10107, baseAsset: "UBTC", quoteAsset: "USDC",

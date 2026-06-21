@@ -177,11 +177,13 @@ export default defineSchema({
     .index("by_type", ["type"])
     .index("by_owner", ["ownerId"]),
 
-  // Varias cuentas HL por usuario (una por bot — "cada bot su cuenta").
+  // Varias cuentas HL por usuario.
   // Modelo: cada cuenta es una wallet EVM independiente (MetaMask/Rabby) vinculada a HL
   // como cuenta principal → posiciones aisladas entre cuentas. La API wallet (agentAddress)
   // solo FIRMA; el aislamiento lo da la cuenta principal (tradingAccountAddress).
-  // Exclusividad "1 cuenta = 1 bot" sobre tradingAccountAddress.
+  // Exclusividad de cuenta (JAV-102) sobre tradingAccountAddress: una cuenta de cobertura admite
+  // varios bots SOLO si cubren pares distintos (un bot por baseAsset); una cuenta de Spot Grid es
+  // dedicada total (1 cuenta = 1 grid, nunca junto a cobertura/trading).
   hl_api_credentials: defineTable({
     userId: v.id("users"),
     label: v.optional(v.string()),               // nombre legible (ej. "Avaro")

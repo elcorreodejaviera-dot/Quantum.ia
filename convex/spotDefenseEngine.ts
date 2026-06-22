@@ -24,6 +24,16 @@ const CLOSE_CONFIRM_GRACE_MS = 2 * 60_000;
 const DRIFT_TOL = 0.02;
 // Un arm `arming` que nunca llegó al CAS (submittedAt==null) más viejo que esto = abandonado → failed.
 const ARMING_RECOVER_GRACE_MS = 3 * 60_000;
+// Grace de un SL `pending` ENVIADO (ambiguo de HL): hasta confirmarlo por CLOID, se da este margen
+// antes de recolocarlo (evita doble-SL por un waitingForTrigger que aún no aparece en open orders).
+const SL_SUBMIT_GRACE_MS = 60_000;
+
+// ¿El CLOID sigue VIVO en el book de HL? (prueba positiva por CLOID, no por estado local).
+async function openByCloid(info: any, user: `0x${string}`, cloid: string): Promise<boolean> {
+  if (!cloid) return false;
+  const oo: any[] = await info.frontendOpenOrders({ user });
+  return oo.some((o) => typeof o?.cloid === "string" && o.cloid.toLowerCase() === cloid.toLowerCase());
+}
 
 async function cancelOwnByCloid(exchange: any, assetId: number, cloids: string[]): Promise<void> {
   for (const c of cloids) {
@@ -302,13 +312,30 @@ export const reconcileSpotDefenseArm = internalAction({
 
         // Posición abierta y SIN pausa: asegurar el SL (Short → Buy por encima de la entrada).
         if (!wantDisarm) {
-          // (Codex 3c-1 r2 #2) Un SL `pending` SIN submittedAt = solo PREPARADO (pre-RPC) o `rejected`
-          // → NO cuenta como vivo: el reconcile reintenta colocarlo (si no, una posición quedaría sin SL
-          // mientras el motor cree que ya hay protección pendiente).
-          const slAlive = slOrder && (
-            slOrder.observedStatus === "open" || slOrder.observedStatus === "triggered" ||
-            (slOrder.observedStatus === "pending" && slOrder.submittedAt != null)
-          );
+          // (Codex 3c-1 r3 #1) NO confiar solo en el estado local: confirmar el SL en HL por CLOID. Un SL
+          // cancelado/rechazado a mano dejaría la DB en `open` y la posición sin protección real.
+          let slAlive = false;
+          if (slOrder) {
+            const slFill = await fillsByCloid(info, user, slOrder.cloid);
+            if (slFill.size > 0) {
+              // El SL se ejecutó → marcar filled; la rama flat (próximo ciclo, ya con grace) cerrará.
+              await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseOrderObserved, { armId, token, role: "sl", observedStatus: "filled" });
+              return { result: "sl_filled" };
+            }
+            if (await openByCloid(info, user, slOrder.cloid)) {
+              slAlive = true;   // vivo en HL → mantener protección
+              if (slOrder.observedStatus !== "open") {
+                await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseOrderObserved, { armId, token, role: "sl", observedStatus: "open" });
+              }
+            } else if (slOrder.observedStatus === "pending" && slOrder.submittedAt != null
+              && Date.now() - slOrder.submittedAt <= SL_SUBMIT_GRACE_MS) {
+              // pending ENVIADO dentro del grace: aún puede aparecer (waitingForTrigger) → esperar, no recolocar.
+              return { result: "sl_pending_grace" };
+            } else {
+              // Ni vivo ni lleno (cancelado/rechazado a mano, o pending vencido) → marcar muerto y recolocar.
+              await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseOrderObserved, { armId, token, role: "sl", observedStatus: "canceled" });
+            }
+          }
           if (!slAlive) {
             // (Codex 3c-1 #3) Cloid determinista. Persistir el intento `pending` (PREPARADO, sin
             // submittedAt) ANTES del RPC + renovar lease → un SL aceptado por HL nunca queda sin tracking.
@@ -316,7 +343,7 @@ export const reconcileSpotDefenseArm = internalAction({
             const slCloid = await toHlCloid(spotDefenseCloidInput(String(armId), arm.generation, "sl", attempt));
             const slTriggerPx = posEntryPx * (1 + arm.stopLossPct / 100);
             const pre = await ctx.runMutation(internal.spotDefenseBots.recordSpotDefenseSlOrder, {
-              armId, token, cloid: slCloid, triggerPx: slTriggerPx, size: realSize, observedStatus: "pending",
+              armId, token, cloid: slCloid, triggerPx: slTriggerPx, size: realSize, observedStatus: "pending", attempt,
             });
             const renewSl = await ctx.runMutation(internal.spotDefenseBots.renewSpotDefenseReconcile, { armId, token });
             if (!pre.ok || !renewSl.ok) return { skipped: "sl_prepare_failed" };

@@ -325,6 +325,16 @@ describe("Fase 3a — ciclo de vida del arm (claim/settle/fencing/cuarentena)", 
     expect(bad.ok).toBe(false);
   });
 
+  it("(Codex 3c-1 r3) attempt persiste arm.slAttempts → el cloid rota al recolocar", async () => {
+    const t = makeConvexTest();
+    const { armId } = await reservedArm(t);
+    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
+    await t.mutation(internal.spotDefenseBots.recordSpotDefenseSlOrder, { armId, token: claim.token, cloid: "0xa", triggerPx: 2020, size: 0.01, observedStatus: "pending", attempt: 1 });
+    expect((await t.run((ctx: MutationCtx) => ctx.db.get(armId)))?.slAttempts).toBe(1);
+    await t.mutation(internal.spotDefenseBots.recordSpotDefenseSlOrder, { armId, token: claim.token, cloid: "0xb", triggerPx: 2020, size: 0.01, observedStatus: "pending", attempt: 2 });
+    expect((await t.run((ctx: MutationCtx) => ctx.db.get(armId)))?.slAttempts).toBe(2);
+  });
+
   it("(Codex 3c-1 r2 #2) pre-record pending NO marca submittedAt; sí al enviar (markSubmitted)", async () => {
     const t = makeConvexTest();
     const { armId } = await reservedArm(t);

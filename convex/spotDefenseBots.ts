@@ -583,11 +583,15 @@ export const recordSpotDefenseSlOrder = internalMutation({
     // (Codex 3c-1 r2 #2) Fija submittedAt = "el RPC SE ENVIÓ (aceptado/ambiguo)". Un `pending` SIN
     // submittedAt = solo PREPARADO (pre-RPC) → no cuenta como SL vivo (el reconcile reintenta).
     markSubmitted: v.optional(v.boolean()),
+    // (Codex 3c-1 r3) nº de intento de SL: persiste en arm.slAttempts → al recolocar un SL muerto el
+    // cloid rota (spotDefenseCloidInput(...,"sl",attempt)) y no choca con el cloid cancelado en HL.
+    attempt: v.optional(v.number()),
   },
-  handler: async (ctx, { armId, token, cloid, oid, triggerPx, size, observedStatus, markSubmitted }) => {
+  handler: async (ctx, { armId, token, cloid, oid, triggerPx, size, observedStatus, markSubmitted, attempt }) => {
     const arm = await ctx.db.get(armId);
     if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
     const now = Date.now();
+    if (attempt !== undefined && attempt !== arm.slAttempts) await ctx.db.patch(armId, { slAttempts: attempt });
     const existing = await ctx.db.query("spot_defense_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", "sl")).first();
     if (existing) {
       const patch: Record<string, unknown> = { observedStatus, triggerPx, size, cloid, updatedAt: now };

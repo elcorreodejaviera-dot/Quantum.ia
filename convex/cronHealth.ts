@@ -135,6 +135,13 @@ export const reconcileSpotDefenseWithHealth = internalAction({
     () => ctx.runAction(internal.spotDefenseEngine.reconcileAllSpotDefense, {})),
 });
 
+// (JAV-107 3c-3b) Auto-rearm del bot de defensa SPOT: reabre la cobertura tras un cierre por SL.
+export const processSpotDefenseRearmsWithHealth = internalAction({
+  args: {},
+  handler: async (ctx): Promise<any> => withCronHealth(ctx, "process spot defense rearms",
+    () => ctx.runAction(internal.spotDefenseEngine.processSpotDefenseRearms, {})),
+});
+
 // (OBS-3b) Poda diaria de engine_events (best-effort vía withCronHealth, no afecta money-path).
 export const pruneEngineEventsWithHealth = internalAction({
   args: {},

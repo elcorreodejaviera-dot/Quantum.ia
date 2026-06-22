@@ -60,6 +60,13 @@ crons.interval(
   internal.cronHealth.reconcileSpotDefenseWithHealth,
 );
 
+// (JAV-107 3c-3b) Auto-rearm del bot de defensa SPOT (reabre tras cierre por SL si autoRearm).
+crons.interval(
+  "process spot defense rearms",
+  { minutes: 1 },
+  internal.cronHealth.processSpotDefenseRearmsWithHealth,
+);
+
 crons.interval(
   "prune engine events",
   { hours: 24 },

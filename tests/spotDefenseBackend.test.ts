@@ -272,6 +272,44 @@ describe("Fase 3a — ciclo de vida del arm (claim/settle/fencing/cuarentena)", 
     expect(cas.ok).toBe(true);
   });
 
+  it("(Codex 3c-3b) cierre por SL con autoRearm → rearm pending → claim → settle limpia", async () => {
+    const t = makeConvexTest();
+    const { armId, botId } = await t.run(async (ctx: MutationCtx) => {
+      const r = await seedDefenseBot(ctx, { autoRearm: true });
+      return r;
+    }).then(async (b) => {
+      const r = await t.mutation(internal.spotDefenseBots.reserveSpotDefenseArm, { botId: b.botId, triggerPx: 2000, availableCollateral: 1000, assetMaxLeverage: 20, szDecimals: 3 });
+      return { armId: r.armId, botId: b.botId };
+    });
+    const cas = await t.mutation(internal.spotDefenseBots.markArmSubmitting, { armId });
+    await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: cas.token, status: "filled" });
+    await t.run((ctx: MutationCtx) => ctx.db.patch(armId, { submittedAt: Date.now() - 200000 }));   // fuera de cuarentena
+    await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: cas.token, status: "closed", closeReason: "sl" });
+    const bot1 = await t.run((ctx: MutationCtx) => ctx.db.get(botId));
+    expect(bot1?.rearmStatus).toBe("pending");
+    expect(typeof bot1?.nextRearmAt).toBe("number");
+    // forzar vencido → due
+    await t.run((ctx: MutationCtx) => ctx.db.patch(botId, { nextRearmAt: Date.now() - 1000 }));
+    const due = await t.query(internal.spotDefenseBots.listDueSpotDefenseRearmsInternal, {});
+    expect(due).toContain(botId);
+    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseRearm, { botId });
+    expect(claim.claimed).toBe(true);
+    expect((await t.run((ctx: MutationCtx) => ctx.db.get(botId)))?.rearmStatus).toBe("running");
+    await t.mutation(internal.spotDefenseBots.settleSpotDefenseRearm, { botId, token: claim.token, outcome: "ok" });
+    expect((await t.run((ctx: MutationCtx) => ctx.db.get(botId)))?.rearmStatus).toBeUndefined();
+  });
+
+  it("(Codex 3c-3b) cierre por SL SIN autoRearm → no programa rearm", async () => {
+    const t = makeConvexTest();
+    const b = await t.run((ctx: MutationCtx) => seedDefenseBot(ctx));   // autoRearm ausente
+    const r = await t.mutation(internal.spotDefenseBots.reserveSpotDefenseArm, { botId: b.botId, triggerPx: 2000, availableCollateral: 1000, assetMaxLeverage: 20, szDecimals: 3 });
+    const cas = await t.mutation(internal.spotDefenseBots.markArmSubmitting, { armId: r.armId });
+    await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId: r.armId, token: cas.token, status: "filled" });
+    await t.run((ctx: MutationCtx) => ctx.db.patch(r.armId, { submittedAt: Date.now() - 200000 }));
+    await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId: r.armId, token: cas.token, status: "closed", closeReason: "sl" });
+    expect((await t.run((ctx: MutationCtx) => ctx.db.get(b.botId)))?.rearmStatus).toBeUndefined();
+  });
+
   it("closed exige closeReason (tras cuarentena)", async () => {
     const t = makeConvexTest();
     const { armId } = await reservedArm(t);

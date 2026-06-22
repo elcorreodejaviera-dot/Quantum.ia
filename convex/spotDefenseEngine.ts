@@ -466,3 +466,29 @@ export const reconcileAllSpotDefense = internalAction({
     return { reconciled, total: ids.length };
   },
 });
+
+// --- Fase 3c-3b: auto-rearm durable. Cron 1/min: reabre la cobertura de los bots con rearm vencido ---
+// (cierre por SL + autoRearm). Bajo lease por bot. Clasifica el error del armado para reprogramar.
+export const processSpotDefenseRearms = internalAction({
+  args: {},
+  handler: async (ctx): Promise<any> => {
+    const due = await ctx.runQuery(internal.spotDefenseBots.listDueSpotDefenseRearmsInternal, {});
+    let rearmed = 0;
+    for (const botId of due) {
+      const claim = await ctx.runMutation(internal.spotDefenseBots.claimSpotDefenseRearm, { botId });
+      if (!claim.claimed) continue;
+      const token = claim.token!;
+      try {
+        await ctx.runAction(internal.spotDefenseEngine.armSpotDefenseInternal, { botId, rearmToken: token });
+        await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseRearm, { botId, token, outcome: "ok" });
+        rearmed++;
+      } catch (e) {
+        // [cancel] → cancelar; [blocked_*] → blocked reevaluable; resto/[transient]/[retry_*] → reintento.
+        const msg = String((e as Error)?.message ?? e);
+        const outcome = msg.includes("[cancel]") ? "cancel" : msg.includes("[blocked") ? "blocked" : "transient";
+        await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseRearm, { botId, token, outcome, error: msg.slice(0, 200) });
+      }
+    }
+    return { rearmed, due: due.length };
+  },
+});

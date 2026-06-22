@@ -47,6 +47,10 @@ const ALLOWED_SD: Record<string, Set<string>> = {
 // Cuarentena tras `submittedAt`: una respuesta tardía de HL aún podría materializar la orden, así que no
 // se terminaliza un arm que llegó a submitting hasta pasado el plazo (anti doble-envío/huérfano).
 const SD_SUBMIT_QUARANTINE_MS = 90 * 1000;
+// (3c-3b) Auto-rearm: cooldown tras un cierre por SL antes de reabrir; backoff y lease del cron.
+const SD_REARM_COOLDOWN_MS = 5 * 60 * 1000;
+const SD_REARM_BACKOFF_MS = 5 * 60 * 1000;
+const SD_REARM_LEASE_MS = 2 * 60 * 1000;
 
 // --- Gate de mainnet (admin) -------------------------------------------------------------------
 
@@ -504,6 +508,69 @@ export const listLiveSpotDefenseArmIdsInternal = internalQuery({
   },
 });
 
+// (3c-3b) Bots con auto-rearm pendiente/recuperable y vencidos (nextRearmAt<=now). Topado.
+export const listDueSpotDefenseRearmsInternal = internalQuery({
+  args: { limit: v.optional(v.number()) },
+  handler: async (ctx, { limit }) => {
+    const cap = limit ?? 50;
+    const now = Date.now();
+    const out: Id<"spot_defense_bots">[] = [];
+    for (const st of ["pending", "blocked"] as const) {
+      const rows = await ctx.db.query("spot_defense_bots").withIndex("by_rearm_status", (q) => q.eq("rearmStatus", st)).collect();
+      for (const b of rows) {
+        if ((b.nextRearmAt ?? 0) <= now && b.active && b.status === "running" && !b.disarmPending) {
+          out.push(b._id); if (out.length >= cap) return out;
+        }
+      }
+    }
+    return out;
+  },
+});
+
+// Claim del rearm bajo lease (un solo worker reabre a la vez). running + token + lease.
+export const claimSpotDefenseRearm = internalMutation({
+  args: { botId: v.id("spot_defense_bots") },
+  handler: async (ctx, { botId }) => {
+    const bot = await ctx.db.get(botId);
+    if (!bot) return { claimed: false as const };
+    if (!bot.active || bot.status !== "running" || bot.disarmPending) return { claimed: false as const };
+    if (bot.rearmStatus !== "pending" && bot.rearmStatus !== "blocked") return { claimed: false as const };
+    if ((bot.rearmLeaseUntil ?? 0) > Date.now()) return { claimed: false as const };
+    // No reabrir si ya hay un arm vivo (defensa anti-doble).
+    const live = (await ctx.db.query("spot_defense_arms").withIndex("by_bot_generation", (q) => q.eq("botId", botId)).collect()).find((a) => !ARM_TERMINAL.has(a.status));
+    if (live) { await ctx.db.patch(botId, { rearmStatus: undefined, rearmLeaseToken: undefined, rearmLeaseUntil: undefined, updatedAt: Date.now() }); return { claimed: false as const }; }
+    const token = crypto.randomUUID();
+    await ctx.db.patch(botId, { rearmStatus: "running", rearmLeaseToken: token, rearmLeaseUntil: Date.now() + SD_REARM_LEASE_MS, updatedAt: Date.now() });
+    return { claimed: true as const, token };
+  },
+});
+
+// Resultado del intento de rearm (bajo token): ok → limpia; transient → reprograma con backoff;
+// blocked → queda blocked reevaluable (config/margen/gate); cancel → cancela el rearm.
+export const settleSpotDefenseRearm = internalMutation({
+  args: {
+    botId: v.id("spot_defense_bots"), token: v.string(),
+    outcome: v.union(v.literal("ok"), v.literal("transient"), v.literal("blocked"), v.literal("cancel")),
+    error: v.optional(v.string()),
+  },
+  handler: async (ctx, { botId, token, outcome, error }) => {
+    const bot = await ctx.db.get(botId);
+    if (!bot || bot.rearmLeaseToken !== token || (bot.rearmLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    const now = Date.now();
+    if (outcome === "ok" || outcome === "cancel") {
+      await ctx.db.patch(botId, { rearmStatus: undefined, nextRearmAt: undefined, rearmLeaseToken: undefined, rearmLeaseUntil: undefined, lastRearmError: error, updatedAt: now });
+    } else {
+      const attempts = (bot.rearmAttempts ?? 0) + 1;
+      await ctx.db.patch(botId, {
+        rearmStatus: outcome === "blocked" ? "blocked" : "pending",
+        nextRearmAt: now + SD_REARM_BACKOFF_MS, rearmAttempts: attempts,
+        rearmLeaseToken: undefined, rearmLeaseUntil: undefined, lastRearmError: error, updatedAt: now,
+      });
+    }
+    return { ok: true as const };
+  },
+});
+
 // (JAV-107 3c-3a) Latch one-way del break-even: una vez movido el SL a ≈entrada, no se revierte.
 export const setSpotDefenseBeMoved = internalMutation({
   args: { armId: v.id("spot_defense_arms"), token: v.string() },
@@ -712,11 +779,19 @@ export const settleSpotDefenseArm = internalMutation({
     if (args.status === "filled" && arm.filledAt == null) patch.filledAt = now;
     await ctx.db.patch(args.armId, patch);
     elog("spot_defense", "transition", { armId: String(args.armId), from: arm.status, to: args.status, closeReason: args.closeReason ?? null });
-    // Al alcanzar terminal con pausa en curso → completar la desactivación del bot.
+    // Al alcanzar terminal: completar pausa, o programar auto-rearm tras un cierre por SL.
     if (ARM_TERMINAL.has(args.status)) {
       const bot = await ctx.db.get(arm.botId);
       if (bot?.disarmPending) {
         await ctx.db.patch(arm.botId, { active: false, status: "stopped", disarmPending: false, disarmRequestedAt: undefined, updatedAt: now });
+      } else if (args.status === "closed" && args.closeReason === "sl" && bot && bot.active
+        && bot.status === "running" && bot.autoRearm === true) {
+        // (3c-3b) Auto-rearm durable: el cron "process spot defense rearms" reabre la cobertura tras el
+        // cooldown. NO se agenda el motor aquí (evita el ciclo de tipos spotDefenseBots↔engine).
+        await ctx.db.patch(arm.botId, {
+          rearmStatus: "pending", nextRearmAt: now + SD_REARM_COOLDOWN_MS, rearmAttempts: 0,
+          lastRearmError: undefined, rearmLeaseToken: undefined, rearmLeaseUntil: undefined, updatedAt: now,
+        });
       }
     }
     return { ok: true as const };

@@ -82,13 +82,18 @@ async function isSpotGridModuleEnabled(ctx: QueryCtx | MutationCtx): Promise<boo
 }
 
 // (JAV-94) Alerta de error al DUEÑO: registra en alert_history SOLO en la transición a "error" (no en cada
-// ronda del cron). El mensaje pasa por safeError + truncado (300) → nunca filtra secretos en el historial.
+// ronda del cron). El mensaje pasa por safeError + REDACCIÓN defensiva + truncado (300) → nunca filtra
+// secretos (claves/firmas/tokens hex) aunque un errorMessage inesperado los trajera (CodeRabbit JAV-94).
 const SPOT_GRID_ERR_MSG_CAP = 300;
+// Redacta secuencias hex largas (private key=64, firma, address) que NUNCA deben quedar en un historial.
+export function redactSecrets(s: string): string {
+  return s.replace(/0x[0-9a-fA-F]{16,}/g, "0x…[redacted]");
+}
 async function emitSpotGridErrorAlert(
   ctx: MutationCtx, bot: { userId: Id<"users">; symbol: string; status: string }, newStatus?: string, errorMessage?: string,
 ) {
   if (newStatus !== "error" || bot.status === "error") return;   // solo en la transición running/… → error
-  const message = `Spot Grid ${bot.symbol}: ${safeError(errorMessage ?? "error")}`.slice(0, SPOT_GRID_ERR_MSG_CAP);
+  const message = redactSecrets(`Spot Grid ${bot.symbol}: ${safeError(errorMessage ?? "error")}`).slice(0, SPOT_GRID_ERR_MSG_CAP);
   await ctx.db.insert("alert_history", {
     userId: bot.userId, alertType: "spot_grid_error", pair: bot.symbol, message, timestamp: Date.now(),
   });

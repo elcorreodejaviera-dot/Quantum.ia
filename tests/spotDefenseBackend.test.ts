@@ -286,6 +286,28 @@ describe("Fase 3a — ciclo de vida del arm (claim/settle/fencing/cuarentena)", 
     expect(ok.ok).toBe(true);
   });
 
+  it("(Codex 3c-1 #1) submitting→disarmed ahora permitido (pre-fill disarm)", async () => {
+    const t = makeConvexTest();
+    const { armId } = await reservedArm(t);
+    const cas = await t.mutation(internal.spotDefenseBots.markArmSubmitting, { armId });
+    await t.run((ctx: MutationCtx) => ctx.db.patch(armId, { submittedAt: Date.now() - 200000 }));  // fuera de cuarentena
+    const r = await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: cas.token, status: "disarmed", closeReason: "disarm" });
+    expect(r.ok).toBe(true);
+    expect((await t.run((ctx: MutationCtx) => ctx.db.get(armId)))?.status).toBe("disarmed");
+  });
+
+  it("(Codex 3c-1 #4) setSpotDefenseCloseConfirm fija y limpia closeConfirmSince bajo lease", async () => {
+    const t = makeConvexTest();
+    const { armId } = await reservedArm(t);
+    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
+    await t.mutation(internal.spotDefenseBots.setSpotDefenseCloseConfirm, { armId, token: claim.token, value: 12345 });
+    expect((await t.run((ctx: MutationCtx) => ctx.db.get(armId)))?.closeConfirmSince).toBe(12345);
+    await t.mutation(internal.spotDefenseBots.setSpotDefenseCloseConfirm, { armId, token: claim.token, value: null });
+    expect((await t.run((ctx: MutationCtx) => ctx.db.get(armId)))?.closeConfirmSince).toBeUndefined();
+    const bad = await t.mutation(internal.spotDefenseBots.setSpotDefenseCloseConfirm, { armId, token: "x", value: 1 });
+    expect(bad.ok).toBe(false);
+  });
+
   it("recordSpotDefenseSlOrder: upsert idempotente por rol sl bajo lease", async () => {
     const t = makeConvexTest();
     const { armId } = await reservedArm(t);

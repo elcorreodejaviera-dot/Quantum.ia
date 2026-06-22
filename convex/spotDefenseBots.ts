@@ -33,8 +33,10 @@ const ALLOWED_SD: Record<string, Set<string>> = {
   // marcaría el arm como cubriendo sin pasar por el CAS (markArmSubmitting, arming→submitting) ni enviar
   // la orden a HL. Solo se permite cancelar (disarming/disarmed) o fallar pre-envío.
   arming: new Set(["disarming", "disarmed", "failed"]),
-  submitting: new Set(["armed", "filled", "protecting", "protected", "unknown", "failed", "disarming"]),
-  unknown: new Set(["armed", "filled", "protecting", "protected", "closed", "failed", "disarming", "manual_intervention"]),
+  // (Codex 3c-1 NO-GO #1) submitting/unknown deben poder llegar a `disarmed` (pre-fill, sin posición):
+  // el reconcile cancela la entrada y desarma. Antes solo permitían `disarming` → settle quedaba en no-op.
+  submitting: new Set(["armed", "filled", "protecting", "protected", "unknown", "failed", "disarming", "disarmed"]),
+  unknown: new Set(["armed", "filled", "protecting", "protected", "closed", "failed", "disarming", "disarmed", "manual_intervention"]),
   armed: new Set(["filled", "disarming", "disarmed", "unknown", "failed", "manual_intervention"]),
   filled: new Set(["protecting", "protected", "closed", "failed", "manual_intervention"]),
   protecting: new Set(["protected", "closed", "failed", "manual_intervention"]),
@@ -594,6 +596,18 @@ export const recordSpotDefenseSlOrder = internalMutation({
       armId, role: "sl", cloid, oid, triggerPx, size, reduceOnly: true, observedStatus, createdAt: now, updatedAt: now,
     });
     return { ok: true as const, orderId };
+  },
+});
+
+// (Codex 3c-1 NO-GO #4) Doble lectura de cierre: la 1ª lectura flat fija closeConfirmSince; el 2º ciclo
+// (tras grace) confirma flat + órdenes muertas → closed. Si la posición reaparece, se limpia (value:null).
+export const setSpotDefenseCloseConfirm = internalMutation({
+  args: { armId: v.id("spot_defense_arms"), token: v.string(), value: v.union(v.number(), v.null()) },
+  handler: async (ctx, { armId, token, value }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    await ctx.db.patch(armId, { closeConfirmSince: value === null ? undefined : value, updatedAt: Date.now() });
+    return { ok: true as const };
   },
 });
 

@@ -180,12 +180,24 @@ describe("(JAV-94) alerta de error al dueño en alert_history", () => {
     expect(hist[0].alertType).toBe("spot_grid_error");
     expect(hist[0].pair).toBe("ETH");
     expect(hist[0].message).toContain("boom");
+    expect(hist[0].message).not.toContain("otra vez");   // guardó el de la TRANSICIÓN, no el re-set
     // Otro bot que pasa a paused → ninguna alerta.
     const { botId: b2, userId: u2 } = await t.run((ctx) => seedGridBot(ctx, { symbol: "BTC" }));
     const tk2 = (await t.mutation(internal.spotGridBots.claimSpotGridReconcile, { botId: b2 })).token!;
     await t.mutation(internal.spotGridBots.setSpotGridStatus, { botId: b2, token: tk2, status: "paused" });
     const hist2 = await t.run((ctx) => ctx.db.query("alert_history").withIndex("by_user_timestamp", (q) => q.eq("userId", u2)).collect());
     expect(hist2.length).toBe(0);
+  });
+
+  it("redacta secuencias hex largas (clave/firma) en el mensaje de la alerta", async () => {
+    const t = makeConvexTest();
+    const { botId, userId } = await t.run((ctx) => seedGridBot(ctx));
+    const token = (await t.mutation(internal.spotGridBots.claimSpotGridReconcile, { botId })).token!;
+    const fakeKey = "0x" + "a".repeat(64);   // pinta de private key
+    await t.mutation(internal.spotGridBots.setSpotGridStatus, { botId, token, status: "error", errorMessage: `fallo con ${fakeKey}` });
+    const hist = await t.run((ctx) => ctx.db.query("alert_history").withIndex("by_user_timestamp", (q) => q.eq("userId", userId)).collect());
+    expect(hist[0].message).not.toContain(fakeKey);
+    expect(hist[0].message).toContain("[redacted]");
   });
 });
 

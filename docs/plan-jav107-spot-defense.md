@@ -172,14 +172,15 @@ Ronda 1 de Codex dio NO-GO con 6 hallazgos, todos cerrados en este diseño:
 - `convex/spotDefenseEngine.ts` (nuevo, `"use node"`): espejo recortado de `triggerEngine.ts`:
   - `armSpotDefenseBot` (auth) + `armSpotDefenseInternal` (sin auth, lo llaman el arm y el auto-rearm):
     `makeClients` + `getAssetMeta`; **revalida (Codex r1):** gate mainnet `mainnetSpotDefenseApproval`
-    (#6), cuenta **flat + sin órdenes del coin** (#2), `markPx > triggerPx` con lectura fresca (#3), y
-    **recalcula el sizing acotado** (#1: `min(amount×markPx×(1+buffer)`, `withdrawable×levEf×(1−MARGIN_SAFETY_BUFFER)`,
-    `cap plan restante)`, `levEf=min(leverage,maxLeverage)`). **triggerPx = `roundHlPrice(triggerPrice,
-    szDecimals, "floor")`** (manual o DCA, NO desde rango); `size = notionalEfectivo / triggerPx`
-    redondeado; reserva margen `notional/levEf`; **CAS pre-envío `gateArmBeforeOrder` (#5):** solo
-    coloca si `desiredState==="armed"` y status `submitting` sin orden previa; inserta arm (DB-intent)
-    + coloca **UNA** orden trigger SELL (`role:"entry"`, `tpsl:"sl"`, dispara al bajar) con cloid
-    determinista.
+    (#6), cuenta **flat + sin órdenes del coin** (#2), `markPx > triggerPx` con lectura fresca (#3).
+    **El sizing/margen/cap NO se calcula aquí con ninguna fórmula inline** (Codex r3): la action lee
+    `availableCollateral`/`markPx` de HL y delega la reserva a **`reserveSpotDefenseArm`** (mutation OCC,
+    única fuente de verdad — usa `committedMarginForAccount` + `resolveLeverage` + `MARGIN_SAFETY_BUFFER`
+    + cap), que devuelve `appliedLeverage`/`size`/`effectiveNotionalUsd`. **triggerPx =
+    `roundHlPrice(triggerPrice, szDecimals, "floor")`** (manual o DCA, NO desde rango); **CAS pre-envío
+    `gateArmBeforeOrder` (#5):** solo coloca si `desiredState==="armed"`, status `submitting`, sin orden
+    previa y cap revalidado; coloca **UNA** orden trigger SELL (`role:"entry"`, `tpsl:"sl"`, dispara al
+    bajar) con cloid determinista.
   - `reconcileSpotDefenseArm` / `reconcileAllSpotDefense`: al llenarse la entrada → colocar SL
     (`placeStopLoss`), mover a BE cuando ganancia ≥ `breakevenPct` (latch `beMoved`, mismo guard
     anti-auto-disparo `beTrigger > markPx + tick` que `triggerEngine.ts`), colocar TPs parciales si
@@ -231,7 +232,11 @@ Ronda 1 de Codex dio NO-GO con 6 hallazgos, todos cerrados en este diseño:
 
 ## Verificación (end-to-end, en REAL — sin mocks)
 1. `npm run` typecheck + tests del proyecto en verde (añadir tests puros de sizing/trigger/exclusividad
-   y de la derivación DCA→triggerPx, como en grid).
+   y de la derivación DCA→triggerPx, como en grid). **Tests OBLIGATORIOS (Codex r3):** (a) carrera de
+   cap concurrente sobre la misma cuenta/plan; (b) drift manual post-fill (szi real ≠ esperado →
+   `manual_intervention`, sin market close); (c) `stopSpotDefenseBot` con drift (no toca exposición
+   ajena); (d) cobertura parcial bajo `minCoveragePct` (bloqueo); (e) regresión de `coverageUsage`
+   para pool/grid vivos (claves namespaced sin doble-conteo).
 2. `node node_modules/convex/bin/main.js deploy` a strong-sandpiper-848 (schema OK, sin índices borrados)
    + verificar `HL_NETWORK=mainnet`.
 3. En UI `/` (posiciones spot): abrir el botón "Bot" de la posición BTC (DCA $82.350) → modal real →

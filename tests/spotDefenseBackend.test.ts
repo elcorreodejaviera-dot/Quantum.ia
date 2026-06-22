@@ -243,42 +243,56 @@ describe("Fase 3a — ciclo de vida del arm (claim/settle/fencing/cuarentena)", 
     return { botId, armId: r.armId };
   }
 
-  it("claim + settle arming→armed bajo lease", async () => {
+  it("path correcto: markArmSubmitting (arming→submitting) + settle (submitting→armed)", async () => {
     const t = makeConvexTest();
     const { armId } = await reservedArm(t);
-    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
-    expect(claim.claimed).toBe(true);
-    const r = await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: claim.token, status: "armed" });
+    const cas = await t.mutation(internal.spotDefenseBots.markArmSubmitting, { armId });
+    expect(cas.ok).toBe(true);
+    expect((await t.run((ctx: MutationCtx) => ctx.db.get(armId)))?.status).toBe("submitting");
+    const r = await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: cas.token, status: "armed" });
     expect(r.ok).toBe(true);
     expect((await t.run((ctx: MutationCtx) => ctx.db.get(armId)))?.status).toBe("armed");
   });
 
-  it("settle con token ajeno → no-op", async () => {
+  it("(Codex #1) settle NO permite arming→armed sin pasar por el CAS", async () => {
     const t = makeConvexTest();
     const { armId } = await reservedArm(t);
-    await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
+    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
+    const r = await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: claim.token, status: "armed" });
+    expect(r.ok).toBe(false);   // ALLOWED_SD.arming no incluye "armed"
+    expect((await t.run((ctx: MutationCtx) => ctx.db.get(armId)))?.status).toBe("arming");
+  });
+
+  it("(Codex #2) settle con token ajeno → no-op (fencing obligatorio)", async () => {
+    const t = makeConvexTest();
+    const { armId } = await reservedArm(t);
+    const cas = await t.mutation(internal.spotDefenseBots.markArmSubmitting, { armId });
     const r = await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: "intruso", status: "armed" });
     expect(r.ok).toBe(false);
+    expect(cas.ok).toBe(true);
   });
 
-  it("ALLOWED rechaza transición ilegal (arming→protected)", async () => {
+  it("closed exige closeReason (tras cuarentena)", async () => {
     const t = makeConvexTest();
     const { armId } = await reservedArm(t);
-    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
-    const r = await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: claim.token, status: "protected" });
-    expect(r.ok).toBe(false);
-  });
-
-  it("closed exige closeReason", async () => {
-    const t = makeConvexTest();
-    const { armId } = await reservedArm(t);
-    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
-    await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: claim.token, status: "armed" });
-    await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: claim.token, status: "filled" });
-    const noReason = await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: claim.token, status: "closed" });
+    const cas = await t.mutation(internal.spotDefenseBots.markArmSubmitting, { armId });
+    const token = cas.token;
+    await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "filled" });
+    // retrodatar submittedAt para salir de la cuarentena post-submit (90s) y poder terminalizar.
+    await t.run((ctx: MutationCtx) => ctx.db.patch(armId, { submittedAt: Date.now() - 200000 }));
+    const noReason = await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "closed" });
     expect(noReason.ok).toBe(false);
-    const ok = await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: claim.token, status: "closed", closeReason: "sl" });
+    const ok = await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "closed", closeReason: "sl" });
     expect(ok.ok).toBe(true);
+  });
+
+  it("(Codex) cuarentena: no terminaliza un arm submittedAt reciente", async () => {
+    const t = makeConvexTest();
+    const { armId } = await reservedArm(t);
+    const cas = await t.mutation(internal.spotDefenseBots.markArmSubmitting, { armId });   // fija submittedAt ahora
+    const r = await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: cas.token, status: "failed" });
+    expect(r.ok).toBe(false);
+    expect(r.quarantined).toBe(true);
   });
 });
 

@@ -29,7 +29,10 @@ const ARM_TERMINAL = new Set(["disarmed", "closed", "failed"]);
 // Transiciones permitidas de un arm de defensa (single-entry). Evita degradar estados (p.ej. protected→
 // armed) y acota la máquina de estados. Espejo recortado de ALLOWED_ARM del motor de pool.
 const ALLOWED_SD: Record<string, Set<string>> = {
-  arming: new Set(["submitting", "armed", "filled", "unknown", "failed", "disarming", "disarmed"]),
+  // (Codex Fase 3a/3b NO-GO #1) Desde `arming` NO se puede ir a armed/filled/unknown por settle: eso
+  // marcaría el arm como cubriendo sin pasar por el CAS (markArmSubmitting, arming→submitting) ni enviar
+  // la orden a HL. Solo se permite cancelar (disarming/disarmed) o fallar pre-envío.
+  arming: new Set(["disarming", "disarmed", "failed"]),
   submitting: new Set(["armed", "filled", "protecting", "protected", "unknown", "failed", "disarming"]),
   unknown: new Set(["armed", "filled", "protecting", "protected", "closed", "failed", "disarming", "manual_intervention"]),
   armed: new Set(["filled", "disarming", "disarmed", "unknown", "failed", "manual_intervention"]),
@@ -575,7 +578,7 @@ export const settleSpotDefenseArm = internalMutation({
       v.literal("armed"), v.literal("disarming"), v.literal("disarmed"), v.literal("filled"),
       v.literal("protecting"), v.literal("protected"), v.literal("closed"), v.literal("unknown"),
       v.literal("failed"), v.literal("manual_intervention")),
-    token: v.optional(v.string()),
+    token: v.string(),   // (Codex Fase 3a/3b NO-GO #2) OBLIGATORIO: el fencing por lease nunca se salta.
     filledSize: v.optional(v.number()),
     entryPrice: v.optional(v.number()),
     error: v.optional(v.string()),
@@ -584,8 +587,7 @@ export const settleSpotDefenseArm = internalMutation({
   handler: async (ctx, args): Promise<any> => {
     const arm = await ctx.db.get(args.armId);
     if (!arm) return { ok: false as const };
-    if (args.token !== undefined &&
-        (arm.reconcileLeaseToken !== args.token || (arm.reconcileLeaseUntil ?? 0) <= Date.now())) {
+    if (arm.reconcileLeaseToken !== args.token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) {
       return { ok: false as const };
     }
     if (ARM_TERMINAL.has(arm.status)) return { ok: false as const };

@@ -536,6 +536,19 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
 
   const orders: any[] = await ctx.runQuery(internal.spotGridBots.getSpotGridOrdersInternal, { botId });
 
+  // (JAV-104) Precio spot VIVO de la ronda → mark-to-market del flotante (`getSpotGridDetail`). UNA lectura
+  // por bot/ronda; se reutiliza en la colocación inicial para no leer dos veces. No aborta el reconcile.
+  let livePrice: number | null = null;
+  try {
+    const p = await getSpotPrice(clients.info, resolved);
+    if (p > 0) {
+      livePrice = p;
+      await ctx.runMutation(internal.spotGridBots.setSpotGridLastPrice, { botId, token, lastPrice: p });
+    }
+  } catch (e) {
+    elog("spotgrid", "live_price_skip", { botId: String(botId), err: safeError(e) });
+  }
+
   // (1-seeded, JAV-103) Bootstrap por FASES para grids sembrados. Mientras no esté "done", SOLO corre el
   // bootstrap (idempotente) — NO depende de "no hay órdenes de la generación". Si está pausado, no coloca.
   if (bot.bootstrapPhase && bot.bootstrapPhase !== "done") {
@@ -549,7 +562,8 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
     // mismo con que deriveAutoGrid calculó gridCount → "prometido == colocado"). Los manuales y los legacy
     // (autoDerived != true) o un ancla corrupta (≤ minPrice) refrescan el precio EN VIVO → preserva la
     // protección del #103 sin reabrir el riesgo del snapshot persistido para esos bots.
-    const anchorPrice = pickInitialPlacementPrice(bot, Date.now()) ?? await getSpotPrice(clients.info, resolved);
+    // (JAV-104) Reusa el `livePrice` ya leído esta ronda; solo relee si aquella lectura falló.
+    const anchorPrice = pickInitialPlacementPrice(bot, Date.now()) ?? livePrice ?? await getSpotPrice(clients.info, resolved);
     const { levels } = calculateGridLevels({
       currentPrice: anchorPrice,
       minPrice: bot.minPrice, gridProfitPercent: bot.gridProfitPercent, orderSize: bot.orderSize,

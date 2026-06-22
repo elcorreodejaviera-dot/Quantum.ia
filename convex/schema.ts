@@ -548,6 +548,11 @@ export default defineSchema({
     createdAt: v.number(),
     updatedAt: v.number(),
     lastReconciledAt: v.optional(v.number()),
+    // (JAV-104) Último precio spot VIVO observado en el reconcile → mark-to-market del flotante (NO el
+    // ancla de creación `currentPrice`). `lastPriceAt` es la base real de `priceStale`. Opcionales →
+    // legacy-safe (bots viejos caen a `currentPrice` hasta su primer reconcile nuevo).
+    lastPrice: v.optional(v.number()),
+    lastPriceAt: v.optional(v.number()),
     // (JAV-92) lease/fencing del reconcile (igual que trigger_arms): un solo worker por bot a la vez.
     reconcileLeaseToken: v.optional(v.string()),
     reconcileLeaseUntil: v.optional(v.number()),

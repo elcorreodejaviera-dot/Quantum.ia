@@ -333,9 +333,12 @@ export const getSpotGridDetail = query({
     const heldQty = Math.max(0, boughtQty - soldQty);
     const heldCostUsd = Math.max(0, boughtCost - soldCost);
     const heldAvgCost = heldQty > 1e-12 ? heldCostUsd / heldQty : 0;
-    const refPrice = bot.currentPrice ?? null;
+    // (JAV-104) Mark-to-market con el precio VIVO (`lastPrice`); `currentPrice` (ancla de creación) solo
+    // como fallback legacy. `priceStale` mide la frescura REAL del precio (`lastPriceAt`), no el tiempo
+    // desde el último fill (que solo movía `lastReconciledAt`).
+    const refPrice = bot.lastPrice ?? bot.currentPrice ?? null;
     const STALE_MS = 5 * 60 * 1000;
-    const priceStale = !bot.lastReconciledAt || Date.now() - bot.lastReconciledAt > STALE_MS;
+    const priceStale = !bot.lastPriceAt || Date.now() - bot.lastPriceAt > STALE_MS;
     const floatingPnl = refPrice != null && heldQty > 1e-12 ? (refPrice - heldAvgCost) * heldQty : 0;
     const accounting = {
       realizedNetProfit: totalNetProfit,
@@ -454,6 +457,19 @@ export const renewSpotGridReconcile = internalMutation({
     const bot = await ctx.db.get(botId);
     if (!leaseOk(bot, token)) return { ok: false as const };
     await ctx.db.patch(botId, { reconcileLeaseUntil: Date.now() + SPOT_GRID_LEASE_MS, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
+// (JAV-104) Persiste el último precio spot VIVO observado en la ronda → base del mark-to-market del
+// flotante en `getSpotGridDetail`. Bajo lease (un worker por bot). Rechaza precios no positivos.
+export const setSpotGridLastPrice = internalMutation({
+  args: { botId: v.id("spot_grid_bots"), token: v.string(), lastPrice: v.number() },
+  handler: async (ctx, { botId, token, lastPrice }) => {
+    const bot = await ctx.db.get(botId);
+    if (!leaseOk(bot, token)) return { ok: false as const };
+    if (!Number.isFinite(lastPrice) || !(lastPrice > 0)) return { ok: false as const };
+    await ctx.db.patch(botId, { lastPrice, lastPriceAt: Date.now(), updatedAt: Date.now() });
     return { ok: true as const };
   },
 });

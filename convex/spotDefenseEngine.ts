@@ -5,7 +5,8 @@ import { internal } from "./_generated/api";
 import { v } from "convex/values";
 import { decryptPrivateKey } from "./hlCredentialActions";
 import { hlNetwork, hlIsTestnet } from "./hlNetwork";
-import { makeClients, getAssetMeta, roundHlPrice, aggressiveHlPriceStr, formatHlPrice, abortAfter } from "./hyperliquid";
+import { makeClients, getAssetMeta, roundHlPrice, aggressiveHlPriceStr, formatHlPrice, abortAfter, placeStopLoss, fillsByCloid } from "./hyperliquid";
+import { spotDefenseCloidInput, toHlCloid } from "./cloids";
 import { TransportError } from "@nktkas/hyperliquid";
 import { elog } from "./log";
 
@@ -16,6 +17,20 @@ import { elog } from "./log";
 
 const HL_ORDER_TIMEOUT_MS = 30_000;
 const ENTRY_TRIGGER_SLIPPAGE = 0.02;   // banda agresiva del market al dispararse el trigger (venta)
+// Grace antes de declarar closed (clearinghouse puede dar szi==0 transitorio por lag tras un fill).
+const CLOSE_CONFIRM_GRACE_MS = 2 * 60_000;
+// Tolerancia relativa del detector de drift: si la posición REAL difiere del tamaño esperado del arm
+// más que esto, hay intervención manual sobre el coin neto → manual_intervention (sin market close).
+const DRIFT_TOL = 0.02;
+// Un arm `arming` que nunca llegó al CAS (submittedAt==null) más viejo que esto = abandonado → failed.
+const ARMING_RECOVER_GRACE_MS = 3 * 60_000;
+
+async function cancelOwnByCloid(exchange: any, assetId: number, cloids: string[]): Promise<void> {
+  for (const c of cloids) {
+    if (!c) continue;
+    try { await exchange.cancelByCloid({ cancels: [{ asset: assetId, cloid: c as `0x${string}` }] }); } catch { /* el próximo ciclo reintenta */ }
+  }
+}
 
 // Arma el bot: lee HL (flat + sin órdenes del coin), reserva (margen/cap/sizing capado), CAS, y coloca
 // UNA orden trigger SELL (tpsl:"sl" → dispara al bajar). Los throws con prefijo [kind] los mapea el
@@ -153,5 +168,136 @@ export const armSpotDefenseInternal = internalAction({
     }
     await ctx.runMutation(internal.spotDefenseBots.releaseSpotDefenseReconcile, { armId, token });
     return { ok: true, status: anyFilled ? "filled" : "armed", armId };
+  },
+});
+
+// --- Fase 3c-1: reconcile (confirma fill → coloca SL → close-confirm; + detector de drift) ----------
+// Single-entry. BE/TPs y el cierre activo (stop) se añaden en 3c-2. Bajo claim/lease + fencing.
+export const reconcileSpotDefenseArm = internalAction({
+  args: { armId: v.id("spot_defense_arms") },
+  handler: async (ctx, { armId }): Promise<any> => {
+    const claim = await ctx.runMutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
+    if (!claim.claimed) return { skipped: claim.reason };
+    const token = claim.token!;
+    try {
+      const data = await ctx.runQuery(internal.spotDefenseBots.getSpotDefenseArmInternal, { armId });
+      if (!data) return { skipped: "not_found" };
+      const { arm, orders } = data;
+      const entry = orders.find((o: any) => o.role === "entry");
+      if (!entry) return { skipped: "no_entry" };
+
+      // Recuperación: arming que nunca CAS'd (submittedAt==null) y viejo → abandonado → failed.
+      if (arm.status === "arming" && arm.submittedAt == null) {
+        if (Date.now() - arm.createdAt > ARMING_RECOVER_GRACE_MS) {
+          await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "failed", error: "[blocked_config] arming abandonado (sin envío)" });
+          return { result: "arming_recovered" };
+        }
+        return { skipped: "arming_too_recent" };
+      }
+
+      // Cliente SIEMPRE desde arm.network (no del HL_NETWORK actual).
+      const credential = await ctx.runQuery(internal.hlCredentials.getAccountByIdInternal, { id: arm.hlAccountId });
+      if (!credential) return { skipped: "no_credential" };
+      const user = credential.tradingAccountAddress as `0x${string}`;
+      const { info, exchange } = makeClients(decryptPrivateKey(credential), arm.network === "testnet");
+      const assetMeta = await getAssetMeta(info, arm.asset.toUpperCase());
+      const { assetId, szDecimals, markPx } = assetMeta;
+
+      // Kill-switch / pausa / red / permiso → desarmar.
+      const [tradingConfig, simConfig] = await Promise.all([
+        ctx.runQuery(internal.systemConfig.getConfigInternal, { key: "tradingEnabled" }),
+        ctx.runQuery(internal.systemConfig.getConfigInternal, { key: "simulationMode" }),
+      ]);
+      const bot = await ctx.runQuery(internal.spotDefenseBots.getSpotDefenseBotInternal, { botId: arm.botId });
+      const canLive = await ctx.runQuery(internal.users.hasTradeLiveForUserInternal, { userId: arm.userId });
+      const killed =
+        tradingConfig?.value !== true || simConfig?.value === true ||
+        !bot || !bot.active || bot.status !== "running" || bot.disarmPending === true ||
+        hlNetwork() !== arm.network || (bot && bot.hlAccountId !== arm.hlAccountId) ||
+        !canLive || credential.userId !== arm.userId;
+      const wantDisarm = killed || arm.desiredState === "disarmed";
+
+      const ownCloids = orders.map((o: any) => o.cloid);
+
+      // ===== FASE DE POSICIÓN (la entrada ya llenó): SL + cierre + drift =====
+      if (arm.status === "filled" || arm.status === "protecting" || arm.status === "protected") {
+        // Confirmar datos de fill si faltan.
+        if (!(arm.filledSize && arm.filledSize > 0 && arm.entryPrice && arm.entryPrice > 0)) {
+          const f = await fillsByCloid(info, user, entry.cloid);
+          if (f.size > 0 && f.avgPx > 0) {
+            await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "filled", filledSize: f.size, entryPrice: f.avgPx });
+          }
+          return { skipped: "filled_awaiting_fill_data" };
+        }
+        const ch: any = await info.clearinghouseState({ user });
+        const p = (ch.assetPositions ?? []).find((x: any) => x.position?.coin === arm.asset.toUpperCase());
+        const szi = p ? Number(p.position?.szi ?? 0) : 0;
+        const flat = Math.abs(szi) === 0;
+        const realSize = Math.abs(szi) > 0 ? Math.abs(szi) : arm.filledSize;
+        const posEntryPx = (p && Number(p.position?.entryPx) > 0) ? Number(p.position.entryPx) : arm.entryPrice;
+        const slOrder = orders.find((o: any) => o.role === "sl");
+
+        // (Codex r2 #2) Detector de DRIFT: la posición es NETA por coin; si el usuario abrió/cerró manual
+        // el mismo activo, el tamaño real ≠ el esperado del arm → cancelar SOLO lo propio, marcar
+        // manual_intervention y NUNCA market close ciego.
+        const expected = arm.size;
+        if (!flat && Math.abs(realSize - expected) > expected * DRIFT_TOL) {
+          await cancelOwnByCloid(exchange, assetId, ownCloids);
+          await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "manual_intervention", error: `[manual] drift: szi real ${realSize} vs esperado ${expected}` });
+          elog("spot_defense", "drift", { armId: String(armId), realSize, expected });
+          return { result: "manual_intervention" };
+        }
+
+        if (flat) {
+          if (Date.now() - (arm.filledAt ?? arm.createdAt) <= CLOSE_CONFIRM_GRACE_MS) return { skipped: "close_confirm_grace" };
+          const renew = await ctx.runMutation(internal.spotDefenseBots.renewSpotDefenseReconcile, { armId, token });
+          if (!renew.ok) return { skipped: "lease_lost" };
+          // ¿El SL llenó? (observed + fills). Determina closeReason (gobierna el auto-rearm en 3c-2).
+          let slConfirmed = slOrder?.observedStatus === "filled";
+          if (!slConfirmed && slOrder) {
+            const sf = await fillsByCloid(info, user, slOrder.cloid);
+            if (sf.size > 0) slConfirmed = true;
+          }
+          // No dejar órdenes vivas en el book antes de cerrar (trigger huérfano).
+          await cancelOwnByCloid(exchange, assetId, ownCloids);
+          await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "closed", closeReason: slConfirmed ? "sl" : "manual" });
+          return { result: "closed" };
+        }
+
+        // Posición abierta y SIN pausa: asegurar el SL (Short → Buy por encima de la entrada).
+        if (!wantDisarm) {
+          const slAlive = slOrder && (slOrder.observedStatus === "open" || slOrder.observedStatus === "triggered" || slOrder.observedStatus === "pending");
+          if (!slAlive) {
+            const attempt = (arm.slAttempts ?? 0) + 1;
+            const slCloid = await toHlCloid(spotDefenseCloidInput(String(armId), arm.generation, "sl", attempt));
+            const r = await placeStopLoss(exchange, assetId, szDecimals, "Short", realSize, posEntryPx, arm.stopLossPct, slCloid);
+            const obs = r.state === "resting" ? "open" : r.state === "filled" ? "filled" : "pending";
+            await ctx.runMutation(internal.spotDefenseBots.recordSpotDefenseSlOrder, {
+              armId, token, cloid: slCloid, oid: r.state === "pending" ? undefined : r.oid,
+              triggerPx: posEntryPx * (1 + arm.stopLossPct / 100), size: realSize, observedStatus: obs,
+            });
+            await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: r.state === "pending" ? "protecting" : "protected" });
+          }
+          // BE/TP → Fase 3c-2.
+          void markPx;
+        }
+        return { result: "position_reconciled" };
+      }
+
+      // ===== FASE PRE-FILL (armed/submitting/unknown): confirmar fill o desarmar =====
+      if (wantDisarm) {
+        await cancelOwnByCloid(exchange, assetId, ownCloids);
+        await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "disarmed", closeReason: "disarm" });
+        return { result: "disarmed" };
+      }
+      const f = await fillsByCloid(info, user, entry.cloid);
+      if (f.size > 0 && f.avgPx > 0) {
+        await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "filled", filledSize: f.size, entryPrice: f.avgPx });
+        return { result: "filled" };
+      }
+      return { result: "armed_waiting" };
+    } finally {
+      await ctx.runMutation(internal.spotDefenseBots.releaseSpotDefenseReconcile, { armId, token });
+    }
   },
 });

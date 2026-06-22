@@ -286,6 +286,23 @@ describe("Fase 3a — ciclo de vida del arm (claim/settle/fencing/cuarentena)", 
     expect(ok.ok).toBe(true);
   });
 
+  it("recordSpotDefenseSlOrder: upsert idempotente por rol sl bajo lease", async () => {
+    const t = makeConvexTest();
+    const { armId } = await reservedArm(t);
+    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
+    const a = { armId, token: claim.token, cloid: "0xsl1", triggerPx: 2020, size: 0.01, observedStatus: "open" as const };
+    const r1 = await t.mutation(internal.spotDefenseBots.recordSpotDefenseSlOrder, a);
+    const r2 = await t.mutation(internal.spotDefenseBots.recordSpotDefenseSlOrder, { ...a, cloid: "0xsl2", observedStatus: "filled" as const });
+    expect(r1.ok).toBe(true); expect(r2.ok).toBe(true);
+    expect(r2.orderId).toEqual(r1.orderId);   // upsert, no duplica
+    const sls = await t.run((ctx: MutationCtx) => ctx.db.query("spot_defense_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", "sl")).collect());
+    expect(sls.length).toBe(1);
+    expect(sls[0].observedStatus).toBe("filled");
+    // fencing: token ajeno no escribe
+    const bad = await t.mutation(internal.spotDefenseBots.recordSpotDefenseSlOrder, { ...a, token: "x" });
+    expect(bad.ok).toBe(false);
+  });
+
   it("(Codex) cuarentena: no terminaliza un arm submittedAt reciente", async () => {
     const t = makeConvexTest();
     const { armId } = await reservedArm(t);

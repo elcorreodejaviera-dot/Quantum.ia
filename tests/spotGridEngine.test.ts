@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { calculateGridLevels, deriveAutoGrid, floorQuoteForBudget, pickInitialPlacementPrice } from "../convex/spotGridEngine";
+import { calculateGridLevels, deriveAutoGrid, floorQuoteForBudget, pickInitialPlacementPrice,
+  calculateSellLadder, deriveSeededGrid, allocateSeededSells } from "../convex/spotGridEngine";
 
 // (JAV-92) Niveles del grid: geométrico, profit NETO post-rounding ≥ objetivo, min-notional, loop acotado.
 
@@ -158,5 +159,84 @@ describe("pickInitialPlacementPrice (JAV-101)", () => {
     // A un precio B muy por debajo (drift), el mismo gridCount puede recortarse contra el suelo → justifica anclar.
     const atB = calculateGridLevels({ currentPrice: 47000, minPrice: p.minPrice, gridProfitPercent: p.gridProfitPercent, orderSize: d.orderSize, gridCount: d.gridCount, szDecimals: p.szDecimals, feeRate: p.feeRate });
     expect(atB.levels.length).toBeLessThan(d.gridCount);
+  });
+});
+
+// (JAV-103) Siembra de inventario: calculateSellLadder / deriveSeededGrid / allocateSeededSells.
+describe("calculateSellLadder (JAV-103)", () => {
+  const btc = { currentPrice: 64000, gridProfitPercent: 0.7, szDecimals: 5 };
+
+  it("niveles geométricos POR ENCIMA del precio, K exacto, con repostBuyPrice del nivel", () => {
+    const { levels } = calculateSellLadder({ ...btc, orderSize: 20, sellCount: 5 });
+    expect(levels.length).toBe(5);
+    // monótono creciente y todos por encima del precio
+    for (let i = 0; i < levels.length; i++) {
+      expect(levels[i].sellPrice).toBeGreaterThan(btc.currentPrice);
+      if (i > 0) expect(levels[i].sellPrice).toBeGreaterThan(levels[i - 1].sellPrice);
+      expect(levels[i].sellPrice * levels[i].quantity).toBeGreaterThanOrEqual(10);
+      // repostBuyPrice = sellPrice/step, justo por debajo del nivel de venta
+      expect(levels[i].repostBuyPrice).toBeLessThan(levels[i].sellPrice);
+    }
+  });
+
+  it("orderSize < min-notional → ningún nivel válido", () => {
+    const { levels } = calculateSellLadder({ ...btc, orderSize: 5, sellCount: 5 });
+    expect(levels.length).toBe(0);
+  });
+});
+
+describe("deriveSeededGrid (JAV-103)", () => {
+  const btc = { currentPrice: 64000, gridProfitPercent: 0.7, szDecimals: 5, feeRate: 0.0004 };
+
+  it("reparte M compras + K ventas, M≥2/K≥2, M+K≤50, prometido==colocado en ambos lados", () => {
+    const d = deriveSeededGrid({ ...btc, minPrice: 45000, investmentAmount: 1000 });
+    expect(d.M).toBeGreaterThanOrEqual(2);
+    expect(d.K).toBeGreaterThanOrEqual(2);
+    expect(d.M + d.K).toBeLessThanOrEqual(50);
+    expect(d.orderSize).toBeGreaterThanOrEqual(10);
+    const buys = calculateGridLevels({ currentPrice: btc.currentPrice, minPrice: 45000, gridProfitPercent: btc.gridProfitPercent, orderSize: d.orderSize, gridCount: d.M, szDecimals: btc.szDecimals, feeRate: btc.feeRate });
+    const sells = calculateSellLadder({ currentPrice: btc.currentPrice, gridProfitPercent: btc.gridProfitPercent, orderSize: d.orderSize, sellCount: d.K, szDecimals: btc.szDecimals });
+    expect(buys.levels.length).toBe(d.M);
+    expect(sells.levels.length).toBe(d.K);
+    // seedQtyTarget = Σ qty de las ventas (la base a comprar en la semilla)
+    expect(d.seedQtyTarget).toBeCloseTo(sells.levels.reduce((s, l) => s + l.quantity, 0), 10);
+    expect(d.seedPercent).toBeGreaterThan(0);
+    expect(d.seedPercent).toBeLessThan(1);
+  });
+
+  // (CodeRabbit JAV-103, Major) El peor caso (M BUYs reservadas + seed que llena con slippage máx 2%) NUNCA
+  // debe superar investmentAmount: la derivación reparte sobre un presupuesto recortado por ese tope.
+  it("peor caso M·orderSize + seedNotional·(1+2%) ≤ investmentAmount", () => {
+    for (const investmentAmount of [500, 1000, 2500]) {
+      const d = deriveSeededGrid({ ...btc, minPrice: 45000, investmentAmount });
+      const buysLock = d.M * d.orderSize;
+      const seedWorstCase = d.seedNotional * (1 + 0.02);
+      expect(buysLock + seedWorstCase).toBeLessThanOrEqual(investmentAmount + 1e-9);
+    }
+  });
+
+  it("capital insuficiente para ≥2 compras y ≥2 ventas → lanza", () => {
+    expect(() => deriveSeededGrid({ ...btc, minPrice: 45000, investmentAmount: 30 })).toThrow(/[Cc]apital/);
+  });
+
+  it("minPrice ≥ currentPrice → lanza", () => {
+    expect(() => deriveSeededGrid({ ...btc, minPrice: 64000, investmentAmount: 1000 })).toThrow(/suelo/);
+  });
+});
+
+describe("allocateSeededSells (JAV-103)", () => {
+  const btc = { currentPrice: 64000, gridProfitPercent: 0.7, szDecimals: 5 };
+
+  it("reparte la base real en KReal niveles uniformes sin sobre-vender", () => {
+    const seedQtyReal = 0.003;
+    const a = allocateSeededSells({ ...btc, seedQtyReal, plannedK: 10 });
+    expect(a.KReal).toBeGreaterThanOrEqual(2);
+    expect(a.perLevelQty * a.KReal).toBeLessThanOrEqual(seedQtyReal + 1e-12);   // nunca sobre-vende (dust queda)
+    for (const lv of a.levels) expect(lv.sellPrice * lv.quantity).toBeGreaterThanOrEqual(10);
+  });
+
+  it("base demasiado pequeña para ≥K_MIN ventas → KReal 0 (fail-closed)", () => {
+    const a = allocateSeededSells({ ...btc, seedQtyReal: 0.0002, plannedK: 10 });   // ~$12.8: no fondea 2× $10
+    expect(a.KReal).toBe(0);
   });
 });

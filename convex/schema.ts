@@ -529,6 +529,20 @@ export default defineSchema({
     // (JAV-92) Secuencia monótona de ciclos por bot: cada cierre de ciclo (SELL llenada) la incrementa y
     // la BUY de reposición usa el nuevo valor en su cloid → cloid siempre único. Ausente = 0 (legacy-safe).
     cycleSeq: v.optional(v.number()),
+    // (JAV-103) Siembra de inventario inicial (tipo BingX Infinity). Todo opcional → legacy-safe (los grids
+    // sin estos campos son "compra-primero" como hasta ahora).
+    seedPercent: v.optional(v.number()),          // % derivado del capital sembrado (informativo)
+    seedQty: v.optional(v.number()),              // base realmente comprada en la semilla (seedQtyReal)
+    seedAvgPx: v.optional(v.number()),            // VWAP real de la compra semilla (costBasis de las SELL sembradas)
+    seedNotionalReal: v.optional(v.number()),     // quote gastado en la semilla (= seedQty·seedAvgPx)
+    seedStatus: v.optional(v.union(v.literal("pending"), v.literal("done"), v.literal("failed"))),
+    // (JAV-103) Fase del bootstrap seeded: "seed" compra inventario, "sells" coloca SELLs sembradas,
+    // "buys" coloca BUYs grid, "done" → reconcile normal. Ausente = grid legacy/no-seeded (camino actual).
+    bootstrapPhase: v.optional(v.union(v.literal("seed"), v.literal("sells"), v.literal("buys"), v.literal("done"))),
+    // (JAV-103) Contador de intentos de liquidación: cada envío usa un cloid con este nonce → un IOC que
+    // llenó PARCIAL se puede reintentar (cloid nuevo) sin que gatedPlaceIoc lo bloquee por "ya tiene fills",
+    // vendiendo el `free` restante. Pre-incrementado antes de enviar (crash-safe). Ausente = 0.
+    liquidationSeq: v.optional(v.number()),
     fillCursor: v.optional(v.number()),        // cursor de fills procesados (reconcile PR3)
     errorMessage: v.optional(v.string()),
     createdAt: v.number(),
@@ -569,6 +583,11 @@ export default defineSchema({
     submittedAt: v.optional(v.number()),       // (JAV-92) instante del intent submitting → grace de retry
     cycleSettled: v.optional(v.boolean()),     // (JAV-92 ALTO#3) SELL ya consumida por un cierre de ciclo
     sellTranche: v.optional(v.number()),       // (JAV-92) nº de SELL ya emitidas para ESTE BUY (cloid por tranche)
+    // (JAV-103) Rol de la orden (namespace de cloid): "grid" (default/ausente) | "seed" | "liquidation".
+    kind: v.optional(v.union(v.literal("grid"), v.literal("seed"), v.literal("liquidation"))),
+    // (JAV-103) Precio de compra del nivel para la reposición tras cerrar (independiente de que haya BUY
+    // previa). Para SELL grid = price del BUY pareado; para SELL sembrada = sellPrice/step.
+    repostBuyPrice: v.optional(v.number()),
     // (JAV-92 r4) Costo real de la base AÚN no vendida de un BUY (Σ sz·px de los fills sin SELL), para que
     // cada tranche se valore con su VWAP correcto, no el de todo el BUY. `costBasis` = VWAP de compra de
     // ESTA SELL concreta (lo usa el netProfit del ciclo, sin contaminar con otros tranches).

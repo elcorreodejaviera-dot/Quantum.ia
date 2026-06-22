@@ -166,6 +166,9 @@ export const persistSpotGridBot = internalMutation({
     currentPrice: v.number(), freeQuoteBalance: v.number(),
     autoDerived: v.optional(v.boolean()),   // (JAV-101) gridCount/orderSize derivados del rango → ancla a currentPrice
     network: v.union(v.literal("mainnet"), v.literal("testnet")),
+    // (JAV-103) Grid SEEDED: arranca por fases (compra semilla → SELLs → BUYs). `gridCount` aquí = M (niveles
+    // de COMPRA); las K SELLs se derivan en el bootstrap (deriveSeededGrid sobre los mismos parámetros).
+    seeded: v.optional(v.boolean()), seedPercent: v.optional(v.number()),
   },
   handler: async (ctx, a) => {
     const { manager } = await assertCreateGuards(ctx, a.hlAccountId, a.network);
@@ -182,9 +185,12 @@ export const persistSpotGridBot = internalMutation({
       gridCount: a.gridCount, feeRate: a.feeRate, currentPrice: a.currentPrice,
       autoDerived: a.autoDerived === true,
       status: "running", network: a.network, generation: 1,
+      // (JAV-103) seeded → máquina de fases del bootstrap; no-seeded (manual/legacy) deja ambos ausentes
+      // → camino de colocación inicial actual.
+      ...(a.seeded ? { bootstrapPhase: "seed" as const, seedStatus: "pending" as const, seedPercent: a.seedPercent } : {}),
       createdAt: now, updatedAt: now,
     });
-    elog("spotgrid", "bot_created", { botId: String(botId), gridCount: a.gridCount });
+    elog("spotgrid", "bot_created", { botId: String(botId), gridCount: a.gridCount, seeded: a.seeded === true });
     return { ok: true as const, botId };
   },
 });
@@ -294,6 +300,52 @@ export const getSpotGridDetail = query({
     const openOrdersTruncated = collected.length > SPOT_GRID_DETAIL_OPEN_CAP;
     const openOrders = openOrdersTruncated ? collected.slice(0, SPOT_GRID_DETAIL_OPEN_CAP) : collected;
 
+    // (JAV-103, §7) Contabilidad realizado + flotante + total, método ÚNICO de promedio ponderado:
+    // inventario en mano = base comprada (BUYs grid + semilla, filled/partial) − base ya vendida en ciclos.
+    // Coste = Σ(filledQty·avgFillPx + filledFeeUsd) de compras − Σ(cycle.buyPrice·cycle.quantity) de ventas
+    // (la ganancia de esas ventas ya está en realizedNetProfit → restar al coste evita doble-conteo).
+    // ⚠️ (Codex código r1, BAJO#4) Es una APROXIMACIÓN de DISPLAY (promedio ponderado simple, no FIFO/temporal
+    // exacto): el flotante orienta la comparación con BingX, NO es un ledger financiero contable. Lectura
+    // ACOTADA: si se topa, `accountingTruncated`.
+    let boughtQty = 0, boughtCost = 0, acctTrunc = truncated;
+    // (CodeRabbit JAV-103, Major) Restar la base ya LIQUIDADA (kind="liquidation"): no se vuelve ciclo, así
+    // que sin esto el inventario contable quedaría inflado tras un Stop+liquidar.
+    let liquidatedQty = 0, liquidatedCost = 0;
+    for (const st of ["filled", "partially_filled"] as const) {
+      const rows = await ctx.db.query("spot_grid_orders")
+        .withIndex("by_bot_status", (q) => q.eq("botId", botId).eq("status", st))
+        .take(SPOT_GRID_DETAIL_CYCLE_CAP + 1);
+      if (rows.length > SPOT_GRID_DETAIL_CYCLE_CAP) acctTrunc = true;
+      for (const o of rows.slice(0, SPOT_GRID_DETAIL_CYCLE_CAP)) {
+        if (o.side === "buy") {
+          const q = o.filledQty ?? 0;
+          boughtQty += q;
+          boughtCost += q * (o.avgFillPx ?? o.price) + (o.filledFeeUsd ?? 0);
+        } else if (o.side === "sell" && o.kind === "liquidation") {
+          const q = o.filledQty ?? 0;
+          liquidatedQty += q;
+          liquidatedCost += q * (o.costBasis ?? bot.seedAvgPx ?? o.avgFillPx ?? o.price);
+        }
+      }
+    }
+    const soldQty = capped.reduce((s, c) => s + (c.quantity ?? 0), 0) + liquidatedQty;
+    const soldCost = capped.reduce((s, c) => s + (c.buyPrice ?? 0) * (c.quantity ?? 0), 0) + liquidatedCost;
+    const heldQty = Math.max(0, boughtQty - soldQty);
+    const heldCostUsd = Math.max(0, boughtCost - soldCost);
+    const heldAvgCost = heldQty > 1e-12 ? heldCostUsd / heldQty : 0;
+    const refPrice = bot.currentPrice ?? null;
+    const STALE_MS = 5 * 60 * 1000;
+    const priceStale = !bot.lastReconciledAt || Date.now() - bot.lastReconciledAt > STALE_MS;
+    const floatingPnl = refPrice != null && heldQty > 1e-12 ? (refPrice - heldAvgCost) * heldQty : 0;
+    const accounting = {
+      realizedNetProfit: totalNetProfit,
+      heldQty, heldAvgCost, heldCostUsd,
+      floatingPnl, priceStale,
+      totalEquityPnl: totalNetProfit + floatingPnl,
+      seedPercent: bot.seedPercent ?? null, seedStatus: bot.seedStatus ?? null,
+      accountingTruncated: acctTrunc,
+    };
+
     return {
       bot: {
         _id: bot._id, symbol: bot.symbol, baseAsset: bot.baseAsset, quoteAsset: bot.quoteAsset,
@@ -304,6 +356,7 @@ export const getSpotGridDetail = query({
         errorMessage: bot.errorMessage ?? null,   // (Codex BAJO#1) sin hlAccountId: la UI no lo usa
       },
       stats: { cyclesCount, totalNetProfit, truncated, cycleCap: SPOT_GRID_DETAIL_CYCLE_CAP },
+      accounting,
       openOrders,
       openOrdersTruncated,
       recentCycles,
@@ -315,6 +368,19 @@ export const getSpotGridDetail = query({
 export const getSpotGridBotInternal = internalQuery({
   args: { botId: v.id("spot_grid_bots") },
   handler: async (ctx, { botId }) => ctx.db.get(botId),
+});
+
+// (JAV-103) Slippage máximo del LIMIT IOC de semilla/liquidación. Configurable en system_config; default
+// 0.003 (0.3%). Acotado a un rango sano [0.0005, 0.02] para que un valor corrupto no autorice un slippage
+// absurdo en el money-path.
+export const getSeedMaxSlippageInternal = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const row = await ctx.db.query("system_config").withIndex("by_key", (q) => q.eq("key", "seedMaxSlippage")).first();
+    const raw = Number((row?.value as any) ?? 0.003);
+    const v = Number.isFinite(raw) ? raw : 0.003;
+    return { seedMaxSlippage: Math.min(0.02, Math.max(0.0005, v)) };
+  },
 });
 
 // =================================================================================================
@@ -339,6 +405,46 @@ export const claimSpotGridReconcile = internalMutation({
     const token = crypto.randomUUID();
     await ctx.db.patch(botId, { reconcileLeaseToken: token, reconcileLeaseUntil: Date.now() + SPOT_GRID_LEASE_MS, updatedAt: Date.now() });
     return { ok: true as const, token };
+  },
+});
+
+// (JAV-103, ALTO-N) Claim DEDICADO de stop/liquidación: admite además `error` (la semilla fail-closed o un
+// stop incompleto dejan el bot en `error`; el usuario DEBE poder reintentar Stop+liquidar). Mantiene el
+// MISMO fencing por token. SOLO se usa desde stopSpotGridBot; el claim del cron (arriba) NO admite `error`.
+export const claimSpotGridReconcileForStop = internalMutation({
+  args: { botId: v.id("spot_grid_bots") },
+  handler: async (ctx, { botId }) => {
+    const bot = await ctx.db.get(botId);
+    if (!bot) return { ok: false as const };
+    if (bot.status !== "running" && bot.status !== "paused" && bot.status !== "error") return { ok: false as const };
+    if (bot.reconcileLeaseToken && (bot.reconcileLeaseUntil ?? 0) > Date.now()) return { ok: false as const };
+    const token = crypto.randomUUID();
+    await ctx.db.patch(botId, { reconcileLeaseToken: token, reconcileLeaseUntil: Date.now() + SPOT_GRID_LEASE_MS, updatedAt: Date.now() });
+    return { ok: true as const, token };
+  },
+});
+
+// (JAV-103) Avanza la fase del bootstrap seeded y, opcionalmente, persiste el resultado de la semilla.
+// Bajo lease. seedStatus="failed" → marca el bot en error (fail-closed) sin tocar la fase.
+export const setSpotGridBootstrap = internalMutation({
+  args: {
+    botId: v.id("spot_grid_bots"), token: v.string(),
+    bootstrapPhase: v.optional(v.union(v.literal("seed"), v.literal("sells"), v.literal("buys"), v.literal("done"))),
+    seedStatus: v.optional(v.union(v.literal("pending"), v.literal("done"), v.literal("failed"))),
+    seedQty: v.optional(v.number()), seedAvgPx: v.optional(v.number()), seedNotionalReal: v.optional(v.number()),
+    seedPercent: v.optional(v.number()), liquidationSeq: v.optional(v.number()),
+    status: v.optional(v.union(v.literal("running"), v.literal("paused"), v.literal("stopped"), v.literal("error"))),
+    errorMessage: v.optional(v.string()),
+  },
+  handler: async (ctx, a) => {
+    const bot = await ctx.db.get(a.botId);
+    if (!leaseOk(bot, a.token)) return { ok: false as const };
+    const patch: Record<string, unknown> = { updatedAt: Date.now() };
+    for (const k of ["bootstrapPhase", "seedStatus", "seedQty", "seedAvgPx", "seedNotionalReal", "seedPercent", "liquidationSeq", "status", "errorMessage"] as const) {
+      if (a[k] !== undefined) patch[k] = a[k];
+    }
+    await ctx.db.patch(a.botId, patch);
+    return { ok: true as const };
   },
 });
 
@@ -372,11 +478,15 @@ export const recordSpotGridOrder = internalMutation({
     assetId: v.number(), price: v.number(), quantity: v.number(), quoteSize: v.number(),
     pairedOrderId: v.optional(v.id("spot_grid_orders")), tranche: v.optional(v.number()),
     costBasis: v.optional(v.number()),
+    // (JAV-103) rol para el namespace de cloid + precio de reposición pre-calculado de la SELL.
+    kind: v.optional(v.union(v.literal("grid"), v.literal("seed"), v.literal("liquidation"))),
+    repostBuyPrice: v.optional(v.number()),
   },
   handler: async (ctx, a) => {
     const bot = await ctx.db.get(a.botId);
     if (!leaseOk(bot, a.token)) return { ok: false as const };
-    const cloid = await toHlCloid(spotGridCloidInput(String(a.botId), a.generation, a.cycleId, a.gridLevel, a.side, a.tranche ?? 0));
+    const kind = a.kind ?? "grid";
+    const cloid = await toHlCloid(spotGridCloidInput(String(a.botId), a.generation, a.cycleId, a.gridLevel, a.side, a.tranche ?? 0, kind));
     const existing = await ctx.db.query("spot_grid_orders").withIndex("by_cloid", (q) => q.eq("cloid", cloid)).first();
     if (existing) return { ok: true as const, orderId: existing._id, cloid, existed: true as const };
     const now = Date.now();
@@ -384,9 +494,10 @@ export const recordSpotGridOrder = internalMutation({
       botId: a.botId, userId: bot!.userId, cloid, assetId: a.assetId, side: a.side,
       price: a.price, quantity: a.quantity, quoteSize: a.quoteSize, gridLevel: a.gridLevel,
       generation: a.generation, cycleId: a.cycleId, status: "submitting",
-      remainingQty: a.quantity, attempt: 1, submittedAt: now,
+      remainingQty: a.quantity, attempt: 1, submittedAt: now, kind,
       ...(a.pairedOrderId ? { pairedOrderId: a.pairedOrderId } : {}),
       ...(a.costBasis !== undefined ? { costBasis: a.costBasis } : {}),
+      ...(a.repostBuyPrice !== undefined ? { repostBuyPrice: a.repostBuyPrice } : {}),
       createdAt: now,
     });
     return { ok: true as const, orderId, cloid, existed: false as const };
@@ -473,7 +584,10 @@ export const closeCycleAndRepost = internalMutation({
     const sellPrice = sell.avgFillPx ?? sell.price;
     const gross = (sellPrice - buyCost) * qty;
     const net = gross - feesUsd;
-    const repostLimit = buy?.price ?? buyCost;                  // la reposición usa el LÍMITE del nivel, no el VWAP
+    // (JAV-103) La reposición usa el precio de compra del nivel. `sell.repostBuyPrice` lo lleva precalculado
+    // (SELL grid = price del BUY pareado; SELL sembrada = sellPrice/step) → correcto SIN depender de una BUY
+    // previa. Fallbacks legacy: buy.price → buyCost.
+    const repostLimit = sell.repostBuyPrice ?? buy?.price ?? buyCost;
     const now = Date.now();
     // (a) marcar la SELL consumida + (b) incrementar cycleSeq + (c) insertar ciclo + (e) reponer BUY.
     await ctx.db.patch(sell._id, { cycleSettled: true, status: "filled", filledAt: sell.filledAt ?? now });
@@ -515,6 +629,44 @@ export const listActiveSpotGridBotsInternal = internalQuery({
     const running = await ctx.db.query("spot_grid_bots").withIndex("by_status_updated", (q) => q.eq("status", "running")).collect();
     const paused = await ctx.db.query("spot_grid_bots").withIndex("by_status_updated", (q) => q.eq("status", "paused")).collect();
     return [...running, ...paused];   // reconcilia activos (paused registra fills pero no repone)
+  },
+});
+
+// (JAV-103) Inventario CONTABLE del bot (base comprada − base ya vendida en ciclos). Lo usa el stop para
+// liquidar SOLO lo del bot: min(freeBaseBalance, heldQty) → no toca base ajena/manual de la cuenta aunque
+// la garantía de cuenta dedicada se rompiese. Lectura acotada (mismo cap que el detalle).
+export const getHeldInventoryInternal = internalQuery({
+  args: { botId: v.id("spot_grid_bots") },
+  handler: async (ctx, { botId }) => {
+    // (CodeRabbit JAV-103, Major) Inventario = base comprada − base vendida en ciclos − base ya LIQUIDADA.
+    // Las órdenes kind="liquidation" NO se vuelven ciclos; sin restarlas, tras un Stop+liquidar exitoso el
+    // bot seguiría mostrando inventario y un reintento consideraría liquidable base que ya no le pertenece.
+    let boughtQty = 0, liquidatedQty = 0, truncated = false;
+    for (const st of ["filled", "partially_filled"] as const) {
+      const rows = await ctx.db.query("spot_grid_orders")
+        .withIndex("by_bot_status", (q) => q.eq("botId", botId).eq("status", st))
+        .take(SPOT_GRID_DETAIL_CYCLE_CAP + 1);
+      if (rows.length > SPOT_GRID_DETAIL_CYCLE_CAP) truncated = true;
+      for (const o of rows.slice(0, SPOT_GRID_DETAIL_CYCLE_CAP)) {
+        if (o.side === "buy") boughtQty += o.filledQty ?? 0;
+        else if (o.side === "sell" && o.kind === "liquidation") liquidatedQty += o.filledQty ?? 0;
+      }
+    }
+    const cycles = await ctx.db.query("spot_grid_cycles").withIndex("by_bot", (q) => q.eq("botId", botId)).take(SPOT_GRID_DETAIL_CYCLE_CAP + 1);
+    if (cycles.length > SPOT_GRID_DETAIL_CYCLE_CAP) truncated = true;
+    const soldQty = cycles.slice(0, SPOT_GRID_DETAIL_CYCLE_CAP).reduce((s, c) => s + (c.quantity ?? 0), 0);
+    // (CodeRabbit JAV-103, Major) `truncated` => la lectura del inventario es PARCIAL. El caller (stop)
+    // hace fail-closed: NUNCA liquidar contra un inventario subcontado (heldQty inflado).
+    return { heldQty: Math.max(0, boughtQty - soldQty - liquidatedQty), truncated };
+  },
+});
+
+// (JAV-103) Lee una orden por cloid (bootstrap: estado/attempt/fills de la semilla).
+export const getSpotGridOrderByCloidInternal = internalQuery({
+  args: { botId: v.id("spot_grid_bots"), cloid: v.string() },
+  handler: async (ctx, { botId, cloid }) => {
+    const o = await ctx.db.query("spot_grid_orders").withIndex("by_cloid", (q) => q.eq("cloid", cloid)).first();
+    return o && o.botId === botId ? o : null;
   },
 });
 

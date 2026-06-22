@@ -1,10 +1,10 @@
 "use node";
 
-import { internalAction } from "./_generated/server";
+import { action, internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { v } from "convex/values";
 import { decryptPrivateKey } from "./hlCredentialActions";
-import { hlNetwork, hlIsTestnet } from "./hlNetwork";
+import { hlNetwork, hlIsTestnet, assertExpectedNetwork } from "./hlNetwork";
 import { makeClients, getAssetMeta, roundHlPrice, aggressiveHlPriceStr, formatHlPrice, abortAfter, placeStopLoss, fillsByCloid, floorToDecimals } from "./hyperliquid";
 import { spotDefenseCloidInput, toHlCloid } from "./cloids";
 import { TransportError } from "@nktkas/hyperliquid";
@@ -203,6 +203,30 @@ export const armSpotDefenseInternal = internalAction({
     }
     await ctx.runMutation(internal.spotDefenseBots.releaseSpotDefenseReconcile, { armId, token });
     return { ok: true, status: anyFilled ? "filled" : "armed", armId };
+  },
+});
+
+// --- Fase 4a: armado MANUAL desde la UI (auth) tras persistSpotDefenseBot --------------------------
+// Espejo de armPoolBotEntry (triggerEngine): la UI crea/persiste el bot (mutation) y luego llama esta
+// action para ARRANCAR el armado inicial — ningún cron arma un bot recién creado (reconcileAll solo
+// reconcilia arms vivos; processRearms solo re-arma bots con rearm vencido). Auth = canTradeLive
+// (assertTradeLive) + canManageBots (mismo gate que requireBotManager de persistSpotDefenseBot) +
+// ownership. Delega TODA la lógica money-path en armSpotDefenseInternal, que revalida cada gate.
+export const armSpotDefenseBot = action({
+  args: { botId: v.id("spot_defense_bots"), expectedNetwork: v.string(), confirm: v.boolean() },
+  // Promise<any>: corta el ciclo de inferencia TS2589 (estas actions se invocan entre sí en el módulo).
+  handler: async (ctx, args): Promise<any> => {
+    assertExpectedNetwork(args.expectedNetwork);   // el cliente confirma la red que cree estar viendo
+    if (!args.confirm) throw new Error("Armado requiere confirmación explícita.");
+    const user = await ctx.runQuery(internal.users.getCurrentUserInternal, {});
+    await ctx.runQuery(internal.users.assertTradeLiveInternal, {});   // exige canTradeLive (igual que persist)
+    // El armado MANUAL exige también canManageBots (espeja requireBotManager de persistSpotDefenseBot).
+    const canManage = await ctx.runQuery(internal.users.hasManageBotsForUserInternal, { userId: user._id });
+    if (!canManage) throw new Error("Forbidden: requiere permiso canManageBots");
+    const bot = await ctx.runQuery(internal.spotDefenseBots.getSpotDefenseBotInternal, { botId: args.botId });
+    if (!bot) throw new Error("Bot de defensa no encontrado");
+    if (bot.userId !== user._id) throw new Error("El bot no pertenece a este usuario");
+    return await ctx.runAction(internal.spotDefenseEngine.armSpotDefenseInternal, { botId: args.botId });
   },
 });
 

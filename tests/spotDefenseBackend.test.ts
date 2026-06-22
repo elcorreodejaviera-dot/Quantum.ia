@@ -232,6 +232,21 @@ describe("persistSpotDefenseBot — no reconfigura con arm vivo (Codex Fase 2 #3
     await expect(as.mutation(api.spotDefenseBots.persistSpotDefenseBot, { ...base, triggerPrice: 55000 }))
       .rejects.toThrow(/pausa el trigger/i);
   });
+
+  it("(Codex 3c-3c #3) rechaza Σ closePct > 100 en validateSpotDefenseConfig", async () => {
+    const t = makeConvexTest();
+    const { spotPositionId, acc } = await t.run(async (ctx) => {
+      await seedLiveConfig(ctx);
+      const userId = await ctx.db.insert("users", { clerkId: CLERK, role: "admin" });
+      const acc = await seedCredential(ctx, userId);
+      const spotPositionId = await ctx.db.insert("spot_positions", { asset: "BTC", amount: 1, dca: 60000, userId: CLERK });
+      return { spotPositionId, acc };
+    });
+    const as = t.withIdentity({ subject: CLERK });
+    const base = { spotPositionId, hlAccountId: acc, leverage: 10, stopLossPct: 1, triggerMode: "manual" as const, triggerPrice: 60000, requestedNotionalUsd: 1000, active: false };
+    await expect(as.mutation(api.spotDefenseBots.persistSpotDefenseBot, { ...base, tps: [{ gainPct: 5, closePct: 70 }, { gainPct: 10, closePct: 40 }] }))
+      .rejects.toThrow(/closePct/i);
+  });
 });
 
 describe("Fase 3a — ciclo de vida del arm (claim/settle/fencing/cuarentena)", () => {
@@ -461,6 +476,97 @@ describe("Fase 3a — ciclo de vida del arm (claim/settle/fencing/cuarentena)", 
     expect(typeof tp0?.submittedAt).toBe("number");
     const bad = await t.mutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { ...base, observedStatus: "open", token: "x" });
     expect(bad.ok).toBe(false);
+  });
+
+  it("(Codex 3c-3c #4) recordSpotDefenseTpOrder: rota attempt al recolocar (mismo tpIndex, cloid nuevo)", async () => {
+    const t = makeConvexTest();
+    const { armId } = await reservedArm(t);
+    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
+    // intento 0 → muere (canceled) → recolocación intento 1 con cloid rotado, MISMA fila (upsert por tpIndex).
+    await t.mutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { armId, token: claim.token, tpIndex: 0, cloid: "0xtp0a0", triggerPx: 1900, size: 0.005, observedStatus: "open", attempt: 0, markSubmitted: true });
+    await t.mutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { armId, token: claim.token, tpIndex: 0, cloid: "0xtp0a1", triggerPx: 1900, size: 0.005, observedStatus: "pending", attempt: 1 });
+    const tps = await t.run((ctx: MutationCtx) => ctx.db.query("spot_defense_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", "tp")).collect());
+    expect(tps.length).toBe(1);                  // misma fila (no duplica por recolocación)
+    expect(tps[0].cloid).toBe("0xtp0a1");        // cloid rotado
+    expect(tps[0].attempt).toBe(1);              // attempt rotado
+  });
+
+  it("(Codex 3c-3c r2 #2) pre-record de intento nuevo LIMPIA submittedAt/oid del intento viejo", async () => {
+    const t = makeConvexTest();
+    const { armId } = await reservedArm(t);
+    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
+    // intento 0 ENVIADO (submittedAt + oid).
+    await t.mutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { armId, token: claim.token, tpIndex: 0, cloid: "0xtp0a0", oid: "111", triggerPx: 1900, size: 0.005, observedStatus: "open", attempt: 0, markSubmitted: true });
+    const sent = await t.run((ctx: MutationCtx) => ctx.db.query("spot_defense_orders").withIndex("by_arm_role_index", (q) => q.eq("armId", armId).eq("role", "tp").eq("tpIndex", 0)).first());
+    expect(typeof sent?.submittedAt).toBe("number");
+    expect(sent?.oid).toBe("111");
+    // pre-record del intento 1 (PREPARADO: pending, sin markSubmitted ni oid) → debe limpiar ambos.
+    await t.mutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { armId, token: claim.token, tpIndex: 0, cloid: "0xtp0a1", triggerPx: 1900, size: 0.005, observedStatus: "pending", attempt: 1 });
+    const prep = await t.run((ctx: MutationCtx) => ctx.db.query("spot_defense_orders").withIndex("by_arm_role_index", (q) => q.eq("armId", armId).eq("role", "tp").eq("tpIndex", 0)).first());
+    expect(prep?.submittedAt).toBeUndefined();   // "pending sin submittedAt = preparado, no enviado"
+    expect(prep?.oid).toBeUndefined();
+  });
+
+  it("(Codex 3c-3c r3) pre-record PREPARADO marca preparedAt (grace de recovery); el envío lo supersede", async () => {
+    const t = makeConvexTest();
+    const { armId } = await reservedArm(t);
+    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
+    const base = { armId, token: claim.token, tpIndex: 0, cloid: "0xtp0", triggerPx: 1900, size: 0.005 };
+    // PREPARE pre-RPC (pending, sin markSubmitted): preparedAt fijado (ancla del grace), submittedAt vacío.
+    await t.mutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { ...base, observedStatus: "pending", attempt: 0 });
+    const prepared = await t.run((ctx: MutationCtx) => ctx.db.query("spot_defense_orders").withIndex("by_arm_role_index", (q) => q.eq("armId", armId).eq("role", "tp").eq("tpIndex", 0)).first());
+    expect(typeof prepared?.preparedAt).toBe("number");
+    expect(prepared?.submittedAt).toBeUndefined();
+    // El engine ancla el grace anti-rotación en `recoveryAt = submittedAt ?? preparedAt`. Un TP PREPARADO
+    // (crash post-RPC/pre-record: pending sin submittedAt) debe resolver a preparedAt → el grace cubre la
+    // ventana y el motor NO rota el cloid a attempt 1 hasta confirmarlo muerto estable.
+    const recoveryAtPrepared = prepared?.submittedAt ?? prepared?.preparedAt;
+    expect(recoveryAtPrepared).toBe(prepared?.preparedAt);
+    expect(typeof recoveryAtPrepared).toBe("number");
+    // Envío confirmado (markSubmitted): submittedAt lo supersede → preparedAt se limpia.
+    await t.mutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { ...base, observedStatus: "open", oid: "9", attempt: 0, markSubmitted: true });
+    const sent = await t.run((ctx: MutationCtx) => ctx.db.query("spot_defense_orders").withIndex("by_arm_role_index", (q) => q.eq("armId", armId).eq("role", "tp").eq("tpIndex", 0)).first());
+    expect(typeof sent?.submittedAt).toBe("number");
+    expect(sent?.preparedAt).toBeUndefined();
+    // Tras envío, recoveryAt resuelve a submittedAt (preparedAt ya limpio): el grace sigue cubriendo.
+    expect((sent?.submittedAt ?? sent?.preparedAt)).toBe(sent?.submittedAt);
+  });
+
+  it("(Codex 3c-3c r3) rotación a intento nuevo tras crash re-ancla preparedAt y limpia submittedAt/oid viejos", async () => {
+    const t = makeConvexTest();
+    const { armId } = await reservedArm(t);
+    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
+    // intento 0 ENVIADO (submittedAt + oid) y luego confirmado muerto estable → se recoloca.
+    await t.mutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { armId, token: claim.token, tpIndex: 0, cloid: "0xtp0a0", oid: "111", triggerPx: 1900, size: 0.005, observedStatus: "open", attempt: 0, markSubmitted: true });
+    // pre-record del intento 1 (PREPARADO pre-RPC): re-ancla preparedAt (grace nuevo) y NO hereda
+    // submittedAt/oid del intento 0 → el motor no confunde el intento nuevo con uno ya enviado.
+    await t.mutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { armId, token: claim.token, tpIndex: 0, cloid: "0xtp0a1", triggerPx: 1900, size: 0.005, observedStatus: "pending", attempt: 1 });
+    const prep = await t.run((ctx: MutationCtx) => ctx.db.query("spot_defense_orders").withIndex("by_arm_role_index", (q) => q.eq("armId", armId).eq("role", "tp").eq("tpIndex", 0)).first());
+    expect(typeof prep?.preparedAt).toBe("number");
+    expect(prep?.submittedAt).toBeUndefined();
+    expect(prep?.oid).toBeUndefined();
+    expect(prep?.attempt).toBe(1);
+    expect((prep?.submittedAt ?? prep?.preparedAt)).toBe(prep?.preparedAt);   // recoveryAt = grace del intento 1
+  });
+
+  it("(Codex 3c-3c #1) setSpotDefenseDriftConfirm: set/clear bajo lease, rechaza token ajeno", async () => {
+    const t = makeConvexTest();
+    const { armId } = await reservedArm(t);
+    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
+    const bad = await t.mutation(internal.spotDefenseBots.setSpotDefenseDriftConfirm, { armId, token: "x", value: 123 });
+    expect(bad.ok).toBe(false);
+    await t.mutation(internal.spotDefenseBots.setSpotDefenseDriftConfirm, { armId, token: claim.token, value: 123 });
+    expect((await t.run((ctx: MutationCtx) => ctx.db.get(armId)))?.driftConfirmSince).toBe(123);
+    await t.mutation(internal.spotDefenseBots.setSpotDefenseDriftConfirm, { armId, token: claim.token, value: null });
+    expect((await t.run((ctx: MutationCtx) => ctx.db.get(armId)))?.driftConfirmSince).toBeUndefined();
+  });
+
+  it("(Codex 3c-3c #3) reserveSpotDefenseArm rechaza Σ closePct > 100 en el snapshot", async () => {
+    const t = makeConvexTest();
+    const { botId } = await t.run((ctx: MutationCtx) => seedDefenseBot(ctx, { tps: [{ gainPct: 5, closePct: 60 }, { gainPct: 10, closePct: 60 }] }));
+    await expect(t.mutation(internal.spotDefenseBots.reserveSpotDefenseArm, {
+      botId, triggerPx: 2000, availableCollateral: 1000, assetMaxLeverage: 20, szDecimals: 3,
+    })).rejects.toThrow(/closePct/i);
   });
 
   it("(Codex 3c-1 r2 #2) pre-record pending NO marca submittedAt; sí al enviar (markSubmitted)", async () => {

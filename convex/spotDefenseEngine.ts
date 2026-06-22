@@ -22,6 +22,10 @@ const CLOSE_CONFIRM_GRACE_MS = 2 * 60_000;
 // Tolerancia relativa del detector de drift: si la posición REAL difiere del tamaño esperado del arm
 // más que esto, hay intervención manual sobre el coin neto → manual_intervention (sin market close).
 const DRIFT_TOL = 0.02;
+// (Codex 3c-3c NO-GO #1) Grace antes de terminalizar un drift: la posición (clearinghouse) y los fills
+// de TP (userFills) son eventualmente consistentes; un drift visto en un solo snapshot puede ser lag.
+// Solo se cancela+manual si persiste en ≥2 lecturas separadas por este margen.
+const DRIFT_CONFIRM_GRACE_MS = 45_000;
 // Un arm `arming` que nunca llegó al CAS (submittedAt==null) más viejo que esto = abandonado → failed.
 const ARMING_RECOVER_GRACE_MS = 3 * 60_000;
 // Grace de un SL `pending` ENVIADO (ambiguo de HL): hasta confirmarlo por CLOID, se da este margen
@@ -279,10 +283,12 @@ export const reconcileSpotDefenseArm = internalAction({
         // antes, un TP recién llenado dispararía un falso "drift".
         const tpOrders = orders.filter((o: any) => o.role === "tp");
         let filledTpQty = 0;
+        const filledTpIdx = new Set<number>();
         for (const tp of tpOrders) {
           const tf = await fillsByCloid(info, user, tp.cloid);
           if (tf.size > 0) {
             filledTpQty += tf.size;
+            filledTpIdx.add(tp.tpIndex);
             if (tp.observedStatus !== "filled") {
               await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseOrderObserved, { armId, token, role: "tp", tpIndex: tp.tpIndex, observedStatus: "filled" });
             }
@@ -293,11 +299,34 @@ export const reconcileSpotDefenseArm = internalAction({
         // el mismo activo, el tamaño real ≠ el esperado del arm → cancelar SOLO lo propio, marcar
         // manual_intervention y NUNCA market close ciego. `expected` resta los TPs ya cerrados (3c-3c).
         const expected = Math.max(0, arm.size - filledTpQty);
-        if (!flat && expected > 0 && Math.abs(realSize - expected) > expected * DRIFT_TOL) {
+        // (Codex 3c-3c NO-GO #2) Umbral de "polvo": por debajo de esto el tamaño se trata como ≈0.
+        const dust = arm.size * DRIFT_TOL;
+        // Drift = posición NO-flat que no cuadra con lo esperado. Dos casos:
+        //  (a) esperamos algo (>dust) pero el real difiere más que la tolerancia; o
+        //  (b) esperamos ~0 (los TPs cerraron casi todo) PERO sigue habiendo posición real > dust → o
+        //      bien es lag (la #1 grace lo absorbe) o bien hay un residuo manual sin explicación del arm.
+        const drifting = !flat && (
+          (expected > dust && Math.abs(realSize - expected) > expected * DRIFT_TOL)
+          || (expected <= dust && realSize > dust)
+        );
+        if (drifting) {
+          // (Codex 3c-3c NO-GO #1) NO terminalizar con una sola lectura: el drift debe persistir ≥2
+          // snapshots + grace (la posición y los fills de TP son eventualmente consistentes).
+          if (arm.driftConfirmSince == null) {
+            await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseDriftConfirm, { armId, token, value: Date.now() });
+            return { skipped: "drift_confirm_first_read" };
+          }
+          if (Date.now() - arm.driftConfirmSince <= DRIFT_CONFIRM_GRACE_MS) {
+            return { skipped: "drift_confirm_grace" };
+          }
           await cancelOwnByCloid(exchange, assetId, ownCloids);
           await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "manual_intervention", error: `[manual] drift: szi real ${realSize} vs esperado ${expected}` });
           elog("spot_defense", "drift", { armId: String(armId), realSize, expected });
           return { result: "manual_intervention" };
+        }
+        // Drift transitorio (era lag): si reaparece coherencia, limpiar el reloj.
+        if (arm.driftConfirmSince != null) {
+          await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseDriftConfirm, { armId, token, value: null });
         }
 
         if (flat) {
@@ -378,6 +407,9 @@ export const reconcileSpotDefenseArm = internalAction({
           // (Codex 3c-1 r3 #1) NO confiar solo en el estado local: confirmar el SL en HL por CLOID. Un SL
           // cancelado/rechazado a mano dejaría la DB en `open` y la posición sin protección real.
           let slAlive = false;
+          // (Codex 3c-3c NO-GO #6) Los TPs solo se colocan con el SL CONFIRMADO vivo/resting: un TP vivo
+          // sin SL dejaría la posición tomando ganancias pero sin protección a la baja.
+          let slProtected = false;
           let beMoved = arm.beMoved === true;
           if (slOrder) {
             const slFill = await fillsByCloid(info, user, slOrder.cloid);
@@ -388,6 +420,7 @@ export const reconcileSpotDefenseArm = internalAction({
             }
             if (await openByCloid(info, user, slOrder.cloid)) {
               slAlive = true;   // vivo en HL → mantener protección
+              slProtected = true;
               if (slOrder.observedStatus !== "open") {
                 await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseOrderObserved, { armId, token, role: "sl", observedStatus: "open" });
               }
@@ -480,30 +513,81 @@ export const reconcileSpotDefenseArm = internalAction({
               armId, token, cloid: slCloid, oid: r.state === "pending" ? undefined : r.oid,
               triggerPx: slTriggerPx, size: realSize, observedStatus: obs, markSubmitted: true,
             });
-            // Solo declarar protected si el SL quedó resting/filled Y se persistió; si no, protecting.
-            await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: rec.ok && r.state !== "pending" ? "protected" : "protecting" });
+            // (Codex 3c-3c r2 #3) Si el SL se EJECUTÓ al colocarse, la posición ya se está cerrando → NO
+            // seguir al loop de TPs: salir para que la rama flat/close-confirm cierre el arm (closeReason sl).
+            if (r.state === "filled") return { result: "sl_filled_on_place" };
+            // protected SOLO si el SL quedó RESTING (vivo en el book) y se persistió; si no, protecting.
+            slProtected = rec.ok && r.state === "resting";
+            await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: slProtected ? "protected" : "protecting" });
           }
+
+          // (Codex 3c-3c NO-GO #6) TPs SOLO con el SL confirmado vivo/resting: si el arm quedó
+          // `protecting` (SL no confirmado), esperar al próximo ciclo — nunca dejar TPs sin protección.
+          if (!slProtected) return { result: "protecting_no_tp" };
 
           // (3c-3c) TPs parciales: Buy reduceOnly por DEBAJO de la entrada (tpsl:"tp" → fira al CAER el
           // precio = ganancia del short), cerrando closePct% del tamaño. Idempotente por (armId,"tp",i):
-          // se colocan UNA vez; los fills ya se confirmaron arriba (alimentan el drift). cloid determinista.
+          // un fill ya es terminal (confirmado arriba) y alimenta el drift; cloid determinista por intento.
           const tps = arm.tps ?? [];
           for (let i = 0; i < tps.length; i++) {
             const existing = tpOrders.find((o: any) => o.tpIndex === i);
-            const live = existing && (existing.observedStatus === "filled" || existing.observedStatus === "open"
-              || existing.observedStatus === "triggered" || (existing.observedStatus === "pending" && existing.submittedAt != null));
-            if (live) continue;
-            const tpCloid = await toHlCloid(spotDefenseCloidInput(String(armId), arm.generation, "tp", 0, i));
-            if (await openByCloid(info, user, tpCloid)) {   // ya colocado (crash/recovery)
-              await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseOrderObserved, { armId, token, role: "tp", tpIndex: i, observedStatus: "open" });
-              continue;
+            // (Codex 3c-3c NO-GO #4 + r2 #1) NO confiar en el estado local NI en una sola lectura del book:
+            // confirmar el estado REAL en HL por orderStatus + openByCloid + fills (espejo del triggerEngine).
+            if (filledTpIdx.has(i) || existing?.observedStatus === "filled") continue;   // terminal
+            if (existing) {
+              const sp: any = await info.orderStatus({ user, oid: existing.cloid as `0x${string}` });
+              const spState = sp?.status === "order" ? sp.order?.status : undefined;
+              const fOpen = await openByCloid(info, user, existing.cloid);
+              const fFill = await fillsByCloid(info, user, existing.cloid);
+              // Lleno (terminal): orderStatus filled o fills positivos → marcar filled, NO recolocar.
+              if (spState === "filled" || fFill.size > 0) {
+                if (existing.observedStatus !== "filled") {
+                  await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseOrderObserved, { armId, token, role: "tp", tpIndex: i, observedStatus: "filled" });
+                }
+                continue;
+              }
+              // Vivo en el book → mantener.
+              if (spState === "open" || fOpen) {
+                if (existing.observedStatus !== "open") {
+                  await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseOrderObserved, { armId, token, role: "tp", tpIndex: i, observedStatus: "open" });
+                }
+                continue;
+              }
+              // (Codex 3c-3c r2 #1) Disparándose: salió del book pero el fill aún no aparece en userFills.
+              // NO recolocar (un 2º TP cerraría de más) — esperar al fill del próximo ciclo.
+              if (spState === "triggered") {
+                if (existing.observedStatus !== "triggered") {
+                  await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseOrderObserved, { armId, token, role: "tp", tpIndex: i, observedStatus: "triggered" });
+                }
+                continue;
+              }
+              // (Codex 3c-3c r2 #1 + r3) Grace para CUALQUIER intento que tocó el RPC — ENVIADO
+              // (submittedAt) o PREPARADO pre-RPC (preparedAt). Cubre el crash entre `exchange.order` y el
+              // record con submittedAt: la fila queda `pending` sin submittedAt pero la orden pudo aceptarse
+              // en HL → no rotar el cloid hasta confirmar muerto ESTABLE, o se colocaría un 2º TP del índice.
+              const recoveryAt = existing.submittedAt ?? existing.preparedAt;
+              if (recoveryAt != null && Date.now() - recoveryAt <= SL_SUBMIT_GRACE_MS) {
+                continue;
+              }
+              // Muerto ESTABLE (cancelado a mano / nunca materializó / grace vencido sin fill) → marcar
+              // canceled y recolocar con el cloid ROTADO por intento (el cloid muerto no se reutiliza en HL).
+              if (existing.observedStatus !== "canceled") {
+                await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseOrderObserved, { armId, token, role: "tp", tpIndex: i, observedStatus: "canceled" });
+              }
             }
+            // Recolocar con el cloid ROTADO por intento. (El cloid del intento previo ya se confirmó muerto
+            // ESTABLE arriba — orderStatus no-filled/no-open/no-triggered + grace vencido → sin orden viva.)
+            const attempt = existing ? (existing.attempt ?? 0) + 1 : 0;
+            const tpCloid = await toHlCloid(spotDefenseCloidInput(String(armId), arm.generation, "tp", attempt, i));
             const tpTriggerPx = roundHlPrice(posEntryPx * (1 - tps[i].gainPct / 100), szDecimals, "floor");
             const tpSize = floorToDecimals((arm.size * tps[i].closePct) / 100, szDecimals);
             if (!(tpSize > 0) || !(tpTriggerPx > 0)) continue;
             const renewTp = await ctx.runMutation(internal.spotDefenseBots.renewSpotDefenseReconcile, { armId, token });
             if (!renewTp.ok) return { skipped: "lease_lost" };
-            await ctx.runMutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { armId, token, tpIndex: i, cloid: tpCloid, triggerPx: tpTriggerPx, size: tpSize, observedStatus: "pending" });
+            // (Codex 3c-3c NO-GO #5) Pre-record PREPARADO (pending, sin submittedAt) ANTES del RPC; abortar
+            // si el pre-record falla (lease perdido) → nunca enviar una orden sin tracking.
+            const preTp = await ctx.runMutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { armId, token, tpIndex: i, cloid: tpCloid, triggerPx: tpTriggerPx, size: tpSize, observedStatus: "pending", attempt });
+            if (!preTp.ok) return { skipped: "tp_prepare_failed" };
             const limitPx = aggressiveHlPriceStr(tpTriggerPx * (1 + ENTRY_TRIGGER_SLIPPAGE), szDecimals, true);   // cerrar short = BUY → ceil
             const acT = abortAfter(HL_ORDER_TIMEOUT_MS);
             try {
@@ -515,9 +599,16 @@ export const reconcileSpotDefenseArm = internalAction({
               const st = respT?.response?.data?.statuses?.[0];
               const obs = st?.filled?.oid != null ? "filled" : (st?.resting?.oid != null || st === "waitingForTrigger") ? "open" : st?.error ? "rejected" : "open";
               const oid = st?.resting?.oid != null ? String(st.resting.oid) : st?.filled?.oid != null ? String(st.filled.oid) : undefined;
-              await ctx.runMutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { armId, token, tpIndex: i, cloid: tpCloid, triggerPx: tpTriggerPx, size: tpSize, observedStatus: obs, oid, markSubmitted: true });
-            } catch {
-              await ctx.runMutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { armId, token, tpIndex: i, cloid: tpCloid, triggerPx: tpTriggerPx, size: tpSize, observedStatus: "rejected" });   // reintenta próximo ciclo
+              await ctx.runMutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { armId, token, tpIndex: i, cloid: tpCloid, triggerPx: tpTriggerPx, size: tpSize, observedStatus: obs, oid, attempt, markSubmitted: true });
+            } catch (e) {
+              // (Codex 3c-3c NO-GO #5) TransportError = INCIERTO (pudo enviarse): marcar `pending` +
+              // submittedAt → el próximo ciclo reconcilia por CLOID (openByCloid/fills), NO reenvía a ciegas.
+              // Rechazo DETERMINISTA = `rejected` → se recoloca (rota intento) el próximo ciclo.
+              const uncertain = e instanceof TransportError;
+              await ctx.runMutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, {
+                armId, token, tpIndex: i, cloid: tpCloid, triggerPx: tpTriggerPx, size: tpSize, attempt,
+                observedStatus: uncertain ? "pending" : "rejected", ...(uncertain ? { markSubmitted: true } : {}),
+              });
             } finally { acT.clear(); }
           }
         }

@@ -718,6 +718,10 @@ export default defineSchema({
     entryPrice: v.optional(v.number()),
     filledAt: v.optional(v.number()),
     closeConfirmSince: v.optional(v.number()),
+    // (Codex 3c-3c NO-GO #1) 1ª lectura de drift: el detector NO terminaliza con un solo snapshot (la
+    // posición y los fills de TP son eventualmente consistentes). Solo se cancela+manual si el drift
+    // persiste en 2 lecturas + grace; si desaparece (era lag), se limpia.
+    driftConfirmSince: v.optional(v.number()),
     // ciclo de vida / fencing
     submittedAt: v.optional(v.number()),
     error: v.optional(v.string()),
@@ -753,6 +757,11 @@ export default defineSchema({
       v.literal("pending"), v.literal("open"), v.literal("triggered"), v.literal("filled"),
       v.literal("canceled"), v.literal("rejected"), v.literal("unknown")),
     submittedAt: v.optional(v.number()),
+    // (Codex 3c-3c r3) Marca de "PREPARADO" (justo antes del RPC). Da un grace de RECOVERY a un intento
+    // que cayó entre el envío del RPC y el record con submittedAt: la fila queda `pending` sin submittedAt
+    // pero la orden pudo aceptarse en HL → no rotar el cloid hasta confirmar muerto ESTABLE (grace + lecturas
+    // negativas), o se colocaría un 2º TP del mismo tpIndex. submittedAt (enviado-confirmado) lo supersede.
+    preparedAt: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })

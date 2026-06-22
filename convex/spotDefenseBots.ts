@@ -141,10 +141,17 @@ function validateSpotDefenseConfig(args: {
   if (args.minCoveragePct !== undefined && (!Number.isFinite(args.minCoveragePct) || args.minCoveragePct < 0 || args.minCoveragePct > 100)) {
     throw new Error("minCoveragePct debe estar entre 0 y 100.");
   }
+  let totalClosePct = 0;
   for (const tp of args.tps ?? []) {
     if (!Number.isFinite(tp.gainPct) || tp.gainPct <= 0 || !Number.isFinite(tp.closePct) || tp.closePct <= 0 || tp.closePct > 100) {
       throw new Error("Cada TP requiere gainPct > 0 y closePct en (0,100].");
     }
+    totalClosePct += tp.closePct;
+  }
+  // (Codex 3c-3c NO-GO #3) La suma de closePct NO puede superar 100%: reduceOnly evita invertir la
+  // posición, pero un sizing > 100% genera TPs incoherentes/rechazos y cierres mayores a la intención.
+  if (totalClosePct > 100 + 1e-9) {
+    throw new Error(`La suma de closePct de los TPs (${totalClosePct.toFixed(2)}%) no puede superar 100%.`);
   }
 }
 
@@ -350,6 +357,13 @@ export const reserveSpotDefenseArm = internalMutation({
       throw new Error(
         `[blocked_margin] Margen insuficiente: comprometido ${marginCommitted.toFixed(2)} + requerido ` +
         `${marginReserved.toFixed(2)} > colateral ${args.availableCollateral.toFixed(2)}.`);
+    }
+
+    // (Codex 3c-3c NO-GO #3) Revalidar el snapshot de TPs al reservar: Σ closePct ≤ 100 (defensa ante
+    // datos migrados/manipulados que no pasaron por validateSpotDefenseConfig).
+    const totalClosePct = (bot.tps ?? []).reduce((s, tp) => s + tp.closePct, 0);
+    if (totalClosePct > 100 + 1e-9) {
+      throw new Error(`[blocked_config] Σ closePct de TPs (${totalClosePct.toFixed(2)}%) supera 100%.`);
     }
 
     // (6) Hard-cap del plan AUTORITATIVO (idempotente, fail-closed) con el nocional EFECTIVO.
@@ -773,24 +787,48 @@ export const recordSpotDefenseTpOrder = internalMutation({
       v.literal("pending"), v.literal("open"), v.literal("triggered"), v.literal("filled"),
       v.literal("canceled"), v.literal("rejected"), v.literal("unknown")),
     markSubmitted: v.optional(v.boolean()),
+    // (Codex 3c-3c NO-GO #4) nº de intento del TP: al recolocar un TP muerto el cloid rota
+    // (spotDefenseCloidInput(...,"tp",attempt,i)) y no choca con el cloid cancelado en HL.
+    attempt: v.optional(v.number()),
   },
-  handler: async (ctx, { armId, token, tpIndex, cloid, oid, triggerPx, size, observedStatus, markSubmitted }) => {
+  handler: async (ctx, { armId, token, tpIndex, cloid, oid, triggerPx, size, observedStatus, markSubmitted, attempt }) => {
     const arm = await ctx.db.get(armId);
     if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
     const now = Date.now();
     const existing = await ctx.db.query("spot_defense_orders").withIndex("by_arm_role_index", (q) => q.eq("armId", armId).eq("role", "tp").eq("tpIndex", tpIndex)).first();
     if (existing) {
-      const patch: Record<string, unknown> = { observedStatus, triggerPx, size, cloid, updatedAt: now };
-      if (oid !== undefined) patch.oid = oid;
-      if (markSubmitted) patch.submittedAt = now;
+      // (Codex 3c-3c r2 #2) `submittedAt`/`oid` son AUTORITATIVOS por intento: un pre-record nuevo
+      // (pending, sin markSubmitted/oid) DEBE limpiarlos (undefined → Convex borra el campo), o el motor
+      // heredaría el submittedAt/oid del intento muerto y trataría el nuevo como "ya enviado".
+      // (Codex 3c-3c r3) `preparedAt` = ahora en el PREPARE (markSubmitted falso); al confirmar enviado
+      // (markSubmitted) submittedAt lo supersede → se limpia preparedAt.
+      const patch: Record<string, unknown> = {
+        observedStatus, triggerPx, size, cloid, updatedAt: now,
+        oid, submittedAt: markSubmitted ? now : undefined, preparedAt: markSubmitted ? undefined : now,
+      };
+      if (attempt !== undefined) patch.attempt = attempt;
       await ctx.db.patch(existing._id, patch);
       return { ok: true as const, orderId: existing._id };
     }
     const orderId = await ctx.db.insert("spot_defense_orders", {
       armId, role: "tp", tpIndex, cloid, oid, triggerPx, size, reduceOnly: true, observedStatus,
-      ...(markSubmitted ? { submittedAt: now } : {}), createdAt: now, updatedAt: now,
+      ...(attempt !== undefined ? { attempt } : {}),
+      ...(markSubmitted ? { submittedAt: now } : { preparedAt: now }), createdAt: now, updatedAt: now,
     });
     return { ok: true as const, orderId };
+  },
+});
+
+// (Codex 3c-3c NO-GO #1) Latch de la 1ª lectura de drift (paralelo a setSpotDefenseCloseConfirm). El
+// motor NO terminaliza el arm con un solo snapshot: arma el reloj aquí y solo cancela+manual si el drift
+// persiste tras el grace; si el drift desaparece (era lag de eventual-consistency), se limpia (value:null).
+export const setSpotDefenseDriftConfirm = internalMutation({
+  args: { armId: v.id("spot_defense_arms"), token: v.string(), value: v.union(v.number(), v.null()) },
+  handler: async (ctx, { armId, token, value }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    await ctx.db.patch(armId, { driftConfirmSince: value === null ? undefined : value, updatedAt: Date.now() });
+    return { ok: true as const };
   },
 });
 

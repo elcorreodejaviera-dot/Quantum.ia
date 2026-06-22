@@ -1,10 +1,34 @@
-# Auditoría de PLAN (RONDA 1) — JAV-107: Bot de defensa de posiciones SPOT
+# Auditoría de PLAN (RONDA 2) — JAV-107: Bot de defensa de posiciones SPOT
 
 Eres un auditor senior de código money-path en Hyperliquid. Audita el **DISEÑO** de abajo (todavía
 NO hay código). Emite **GO / NO-GO** por hallazgo, con severidad (ALTO / MEDIO / BAJO). No reescribas
 el código; señala fallos de corrección, huecos, carreras y riesgos money-path. Trabaja sobre la rama
-`plan/jav107-spot-defense` (checkout hecho); el diseño completo está en
+`plan/jav107-spot-defense` (checkout hecho); el diseño completo (ya con los fixes de r1) está en
 `docs/plan-jav107-spot-defense.md`.
+
+> **Esta es la RONDA 2.** La ronda 1 dio NO-GO con 6 hallazgos, TODOS incorporados al diseño (ver la
+> sección "Cambios tras Codex r1" del plan):
+> 1. (ALTO) Sizing del SHORT acotado: `min(amount×markPx×(1+buffer)`, margen real
+>    `withdrawable×levEf×(1−MARGIN_SAFETY_BUFFER)`, cap del plan`)`, `levEf=min(leverage,maxLeverage)`.
+> 2. (ALTO) Precondición cuenta **flat + sin órdenes del coin** al crear y revalidada al armar.
+> 3. (ALTO) Trigger rechazado si `triggerPrice >= markPx` con lectura HL real al crear y repetido pre-order.
+> 4. (ALTO) Cap del plan rediseñado con **claves namespaced** (`pool:<poolId>` / `spot-defense:<botId>`).
+> 5. (MEDIO) `desiredState:"armed"|"disarmed"` + CAS `markArmSubmitting`/`gateArmBeforeOrder`.
+> 6. (MEDIO) Gate dedicado `mainnetSpotDefenseApproval` en create/arm/reconcile/pre-order.
+>
+> Tu tarea: **confirmar que esos 6 cierres son correctos y suficientes**, buscar huecos nuevos
+> (sobre todo en el sizing acotado, la precondición flat y el rediseño del cap), responder las
+> preguntas money-path del final y emitir veredicto GO / NO-GO.
+
+> **Hechos verificados (2026-06-22) para los fixes de r1:** `MARGIN_SAFETY_BUFFER = 0.10`
+> (`convex/leverage.ts:23`); fórmula de colateral usable `availableCollateral×(1−MARGIN_SAFETY_BUFFER)−marginCommitted`
+> (`leverage.ts:89`, `executions.ts:195`). CAS de envío `markArmSubmitting`/`gateArmBeforeOrder`
+> en `convex/triggerArms.ts` (llamados desde `triggerEngine.ts:302/336`). `desiredState` ya existe en
+> `trigger_arms` (`schema.ts:414`). `setMainnetSpotGridApproval` (`convex/spotGridBots.ts:147`) = patrón
+> del gate a replicar. Lectura `clearinghouseState` por POST en `convex/adminLive.ts:24`; órdenes
+> abiertas por `getOpenSpotOrders(info,address)` en `convex/spotGridEngine.ts:489+` (para perp, el SDK
+> `info` expone open orders por usuario — usar el equivalente perp). `coverageUsage.ts:134-135` ya tiene
+> la variante NO-lanzante de los gates de envío.
 
 ## Contexto del producto
 
@@ -50,20 +74,22 @@ nada en HL). Se va a reemplazar por la versión real.
   `spot_defense_orders` (modeladas en `bots`/`trigger_arms`/`trigger_orders`, **sin pool**, **una sola
   entrada**, enum de estado recortado **sin** `armed_lower_only`, roles `entry|sl|tp`). Namespace de
   cloid `spot_defense` determinista `botId|generation|role[:tpIndex]:attempt`.
-- **Fase 2 — Backend creación/config:** `convex/spotDefenseBots.ts` (NON-node):
-  `preflightCreateSpotDefenseBot`/`persistSpotDefenseBot` (patrón `getOrCreatePoolBot`), permisos
-  `canManageBots`+`canTradeLive`, `baseAsset` derivado de la posición, **exclusividad JAV-102**
-  escaneando las TRES tablas (`bots`/`spot_defense_bots`/`spot_grid_bots`) por
-  `tradingAccountAddress`, validación de `triggerMode`/`triggerPrice`. Queries de listado/detalle,
-  pausa, lease/record/mark de órdenes y arms, `closeArmAndScheduleRearm`/`setRearm*`. Extender
-  `coverageUsage.ts` para incluir el nocional spot-defense en el consumo del plan con clave sintética
-  `spot:<baseAsset>`, fail-closed para filas legacy.
+- **Fase 2 — Backend creación/config:** `convex/spotDefenseBots.ts` (NON-node) +
+  `precheckSpotDefenseCreate` (action `"use node"` para lo que necesita HL real). Permisos
+  `canManageBots`+`canTradeLive`, `baseAsset` derivado, **exclusividad JAV-102** escaneando las TRES
+  tablas. **Fixes r1:** precondición **cuenta flat + sin órdenes del coin** (#2); gate trigger
+  `triggerPrice < markPx` con lectura HL real, rechazo si DCA≥precio (#3); **sizing acotado**
+  `min(amount×markPx×(1+buffer)`, margen real, cap plan`)` (#1); CAS `markArmSubmitting`/
+  `gateArmBeforeOrder` (#5). `coverageUsage.ts` rediseñado a **claves namespaced**
+  `pool:<poolId>` / `spot-defense:<botId>` (#4), fail-closed legacy.
 - **Fase 3 — Motor live (`convex/spotDefenseEngine.ts`, `"use node"`):** `armSpotDefenseInternal`
-  (triggerPx = `roundHlPrice(triggerPrice, szDecimals, "floor")`, gate `markPx > triggerPx`, sizing
-  `notionalUsd / triggerPx`, reserva margen, 1 orden trigger SELL `tpsl:"sl"`), `reconcileSpotDefenseArm`
-  (fill→SL→BE→TPs→cierre→auto-rearm, idempotencia por cloid+lookup+lease/fencing), `stopSpotDefenseBot`
-  (cancel propio + cierre a mercado reduceOnly, revalida gate + `hlNetwork()===network`). Cron
-  "reconcile spot defense" 1/min en `crons.ts`.
+  **revalida gate mainnet (#6), flat (#2), `markPx>triggerPx` (#3) y recalcula el sizing acotado (#1)**;
+  triggerPx = `roundHlPrice(triggerPrice, szDecimals, "floor")`, `size=notionalEfectivo/triggerPx`,
+  reserva margen, CAS pre-envío (#5), 1 orden trigger SELL `tpsl:"sl"`. `reconcileSpotDefenseArm`
+  (fill→SL→BE→TPs→cierre→auto-rearm, idempotencia por cloid+lookup+lease/fencing, revalida gate
+  mainnet + `hlNetwork()===network`). `stopSpotDefenseBot` (cancel propio + cierre a mercado reduceOnly).
+  Cron "reconcile spot defense" 1/min + gate dedicado `mainnetSpotDefenseApproval` (#6, espejo de
+  `setMainnetSpotGridApproval`).
 - **Fase 4 — UI:** reemplazar `SpotProtectorBot` por modal real clonado de `ProtectionBotModal` (con
   bloque Trigger Manual/DCA, sin rango/reentry, TPs opcionales) + tarjeta `DefensaSpotViva` clonada de
   `CoberturaViva` con un solo `cv-tile` de trigger y misma paleta. Borrar la ruta de simulación.

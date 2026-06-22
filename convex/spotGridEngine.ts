@@ -347,7 +347,16 @@ async function gatedPlaceIoc(ctx: any, exchange: any, info: any, address: string
   if (!live.ok) return { ok: false, gateBlocked: true, qty: 0, avgPx: 0, feeUsd: 0 };
   const pre = await fillsForCloid(info, address, p.cloid, p.sinceMs);
   if (pre.qty > 0) return { ok: true, alreadyFilled: true, ...pre };   // ya ejecutado: NO reenviar
-  await placeSpotLimit(exchange, { assetId: p.assetId, isBuy: p.isBuy, priceStr: p.priceStr, sizeStr: p.sizeStr, cloid: p.cloid as `0x${string}`, tif: "Ioc" });
+  // (Codex código r1, ALTO#2) Si placeSpotLimit LANZA (timeout/error de red tras llegar la orden a HL), la
+  // orden pudo EJECUTARSE igualmente → releer fills por cloid antes de propagar el error; si hubo fill,
+  // devolverlo como ejecutado (no se reenvía). Solo si NO hay fill se propaga el fallo real.
+  try {
+    await placeSpotLimit(exchange, { assetId: p.assetId, isBuy: p.isBuy, priceStr: p.priceStr, sizeStr: p.sizeStr, cloid: p.cloid as `0x${string}`, tif: "Ioc" });
+  } catch (e) {
+    const onErr = await fillsForCloid(info, address, p.cloid, p.sinceMs);
+    if (onErr.qty > 0) return { ok: true, ...onErr };
+    throw e;
+  }
   const post = await fillsForCloid(info, address, p.cloid, p.sinceMs);
   return { ok: true, ...post };
 }
@@ -747,22 +756,30 @@ export const stopSpotGridBot = action({
         const szDecimals = resolved.szDecimals;
         const refPrice = await getSpotPrice(info, resolved);
         const baseBal = await getSpotBalance(info, address, resolved.baseAsset);
-        const liqQty = floorSpotSize(baseBal.free, szDecimals);
+        // (Codex código r1, ALTO#3) Vender SOLO el inventario del bot: min(free, heldQtyContable). Si en la
+        // cuenta hubiese base ajena/manual (aunque la cuenta es dedicada), NO se toca.
+        const held = (await ctx.runQuery(internal.spotGridBots.getHeldInventoryInternal, { botId })).heldQty;
+        const liqQty = floorSpotSize(Math.min(baseBal.free, held), szDecimals);
         if (liqQty > 0 && refPrice * liqQty >= MIN_SPOT_NOTIONAL_USD) {
           const slip = (await ctx.runQuery(internal.spotGridBots.getSeedMaxSlippageInternal, {})).seedMaxSlippage;
           const liqLimit = roundSpotPrice(refPrice * (1 - slip), szDecimals, "floor");
+          // (Codex código r1, ALTO#1) Liquidación REINTENTABLE: nonce pre-incrementado → cada envío usa un
+          // cloid NUEVO, así un IOC que llenó PARCIAL se puede reintentar (gatedPlaceIoc no lo bloquea por
+          // "ya tiene fills") vendiendo el `free` restante. Pre-incremento ANTES de enviar = crash-safe (un
+          // intento que pudo enviar no se reutiliza). Sobre-venta imposible: siempre se vende ≤ free actual.
+          const nonce = bot.liquidationSeq ?? 0;
+          await ctx.runMutation(internal.spotGridBots.setSpotGridBootstrap, { botId, token, liquidationSeq: nonce + 1 });
           const rec: any = await ctx.runMutation(internal.spotGridBots.recordSpotGridOrder, {
             botId, token, side: "sell", gridLevel: LIQ_LEVEL, generation: bot.generation, cycleId: bot.cycleSeq ?? 0,
-            assetId: bot.assetId, price: liqLimit, quantity: liqQty, quoteSize: liqLimit * liqQty, kind: "liquidation",
+            tranche: nonce, assetId: bot.assetId, price: liqLimit, quantity: liqQty, quoteSize: liqLimit * liqQty, kind: "liquidation",
           });
           if (rec.ok) {
             const r = await gatedPlaceIoc(ctx, exchange, info, address, botId, token, {
               assetId: bot.assetId, isBuy: false, priceStr: String(liqLimit), sizeStr: String(liqQty), cloid: rec.cloid, sinceMs: bot.fillCursor ?? 0,
             });
-            const fres = await fillsForCloid(info, address, rec.cloid, bot.fillCursor ?? 0);
             await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, {
-              botId, token, cloid: rec.cloid, status: fres.qty >= liqQty - 1e-12 ? "filled" : (fres.qty > 0 ? "partially_filled" : "submitting"),
-              filledQty: fres.qty, avgFillPx: fres.avgPx, filledFeeUsd: fres.feeUsd, remainingQty: Math.max(0, liqQty - fres.qty),
+              botId, token, cloid: rec.cloid, status: r.qty >= liqQty - 1e-12 ? "filled" : (r.qty > 0 ? "partially_filled" : "submitting"),
+              filledQty: r.qty, avgFillPx: r.avgPx, filledFeeUsd: r.feeUsd, remainingQty: Math.max(0, liqQty - r.qty),
             });
             if (r.gateBlocked) {
               await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, { botId, token, status: "error", errorMessage: "liquidación bloqueada por gate; reintenta", clearLease: true });
@@ -770,9 +787,11 @@ export const stopSpotGridBot = action({
             }
           }
         }
-        // Re-verificar inventario tras la venta: residuo cuyo valor ≥ min-notional → error (no stopped).
+        // Re-verificar tras la venta: residuo del bot (min free/held) cuyo valor ≥ min-notional → error
+        // (NO stopped); el usuario reintenta Stop+liquidar → nonce nuevo vende el resto.
         const post = await getSpotBalance(info, address, resolved.baseAsset);
-        if (refPrice * floorSpotSize(post.free, szDecimals) >= MIN_SPOT_NOTIONAL_USD) {
+        const heldAfter = (await ctx.runQuery(internal.spotGridBots.getHeldInventoryInternal, { botId })).heldQty;
+        if (refPrice * floorSpotSize(Math.min(post.free, heldAfter), szDecimals) >= MIN_SPOT_NOTIONAL_USD) {
           await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, { botId, token, status: "error", errorMessage: "liquidación incompleta: queda inventario", clearLease: true });
           throw new Error("Liquidación incompleta: quedó inventario sin vender. Reintenta Stop+liquidar.");
         }

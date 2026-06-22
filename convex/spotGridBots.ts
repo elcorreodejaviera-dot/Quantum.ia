@@ -304,7 +304,9 @@ export const getSpotGridDetail = query({
     // inventario en mano = base comprada (BUYs grid + semilla, filled/partial) − base ya vendida en ciclos.
     // Coste = Σ(filledQty·avgFillPx + filledFeeUsd) de compras − Σ(cycle.buyPrice·cycle.quantity) de ventas
     // (la ganancia de esas ventas ya está en realizedNetProfit → restar al coste evita doble-conteo).
-    // Lectura ACOTADA: si se topa, `accountingTruncated`.
+    // ⚠️ (Codex código r1, BAJO#4) Es una APROXIMACIÓN de DISPLAY (promedio ponderado simple, no FIFO/temporal
+    // exacto): el flotante orienta la comparación con BingX, NO es un ledger financiero contable. Lectura
+    // ACOTADA: si se topa, `accountingTruncated`.
     let boughtQty = 0, boughtCost = 0, acctTrunc = truncated;
     for (const st of ["filled", "partially_filled"] as const) {
       const rows = await ctx.db.query("spot_grid_orders")
@@ -422,7 +424,7 @@ export const setSpotGridBootstrap = internalMutation({
     bootstrapPhase: v.optional(v.union(v.literal("seed"), v.literal("sells"), v.literal("buys"), v.literal("done"))),
     seedStatus: v.optional(v.union(v.literal("pending"), v.literal("done"), v.literal("failed"))),
     seedQty: v.optional(v.number()), seedAvgPx: v.optional(v.number()), seedNotionalReal: v.optional(v.number()),
-    seedPercent: v.optional(v.number()),
+    seedPercent: v.optional(v.number()), liquidationSeq: v.optional(v.number()),
     status: v.optional(v.union(v.literal("running"), v.literal("paused"), v.literal("stopped"), v.literal("error"))),
     errorMessage: v.optional(v.string()),
   },
@@ -430,7 +432,7 @@ export const setSpotGridBootstrap = internalMutation({
     const bot = await ctx.db.get(a.botId);
     if (!leaseOk(bot, a.token)) return { ok: false as const };
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
-    for (const k of ["bootstrapPhase", "seedStatus", "seedQty", "seedAvgPx", "seedNotionalReal", "seedPercent", "status", "errorMessage"] as const) {
+    for (const k of ["bootstrapPhase", "seedStatus", "seedQty", "seedAvgPx", "seedNotionalReal", "seedPercent", "liquidationSeq", "status", "errorMessage"] as const) {
       if (a[k] !== undefined) patch[k] = a[k];
     }
     await ctx.db.patch(a.botId, patch);
@@ -619,6 +621,27 @@ export const listActiveSpotGridBotsInternal = internalQuery({
     const running = await ctx.db.query("spot_grid_bots").withIndex("by_status_updated", (q) => q.eq("status", "running")).collect();
     const paused = await ctx.db.query("spot_grid_bots").withIndex("by_status_updated", (q) => q.eq("status", "paused")).collect();
     return [...running, ...paused];   // reconcilia activos (paused registra fills pero no repone)
+  },
+});
+
+// (JAV-103) Inventario CONTABLE del bot (base comprada − base ya vendida en ciclos). Lo usa el stop para
+// liquidar SOLO lo del bot: min(freeBaseBalance, heldQty) → no toca base ajena/manual de la cuenta aunque
+// la garantía de cuenta dedicada se rompiese. Lectura acotada (mismo cap que el detalle).
+export const getHeldInventoryInternal = internalQuery({
+  args: { botId: v.id("spot_grid_bots") },
+  handler: async (ctx, { botId }) => {
+    let boughtQty = 0;
+    for (const st of ["filled", "partially_filled"] as const) {
+      const rows = await ctx.db.query("spot_grid_orders")
+        .withIndex("by_bot_status", (q) => q.eq("botId", botId).eq("status", st))
+        .take(SPOT_GRID_DETAIL_CYCLE_CAP + 1);
+      for (const o of rows.slice(0, SPOT_GRID_DETAIL_CYCLE_CAP)) {
+        if (o.side === "buy") boughtQty += o.filledQty ?? 0;
+      }
+    }
+    const cycles = await ctx.db.query("spot_grid_cycles").withIndex("by_bot", (q) => q.eq("botId", botId)).take(SPOT_GRID_DETAIL_CYCLE_CAP + 1);
+    const soldQty = cycles.slice(0, SPOT_GRID_DETAIL_CYCLE_CAP).reduce((s, c) => s + (c.quantity ?? 0), 0);
+    return { heldQty: Math.max(0, boughtQty - soldQty) };
   },
 });
 

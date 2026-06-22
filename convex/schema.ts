@@ -539,6 +539,10 @@ export default defineSchema({
     // (JAV-103) Fase del bootstrap seeded: "seed" compra inventario, "sells" coloca SELLs sembradas,
     // "buys" coloca BUYs grid, "done" → reconcile normal. Ausente = grid legacy/no-seeded (camino actual).
     bootstrapPhase: v.optional(v.union(v.literal("seed"), v.literal("sells"), v.literal("buys"), v.literal("done"))),
+    // (JAV-103) Contador de intentos de liquidación: cada envío usa un cloid con este nonce → un IOC que
+    // llenó PARCIAL se puede reintentar (cloid nuevo) sin que gatedPlaceIoc lo bloquee por "ya tiene fills",
+    // vendiendo el `free` restante. Pre-incrementado antes de enviar (crash-safe). Ausente = 0.
+    liquidationSeq: v.optional(v.number()),
     fillCursor: v.optional(v.number()),        // cursor de fills procesados (reconcile PR3)
     errorMessage: v.optional(v.string()),
     createdAt: v.number(),

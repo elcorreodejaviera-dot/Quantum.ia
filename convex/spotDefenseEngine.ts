@@ -27,6 +27,9 @@ const ARMING_RECOVER_GRACE_MS = 3 * 60_000;
 // Grace de un SL `pending` ENVIADO (ambiguo de HL): hasta confirmarlo por CLOID, se da este margen
 // antes de recolocarlo (evita doble-SL por un waitingForTrigger que aún no aparece en open orders).
 const SL_SUBMIT_GRACE_MS = 60_000;
+// (3c-3a) Break-even: al alcanzar breakevenPct de ganancia, el SL (Buy de cierre del short) se mueve a
+// ≈entrada. Para un short, BE un pelín BAJO la entrada cubre las ~2 comisiones taker → break-even neto.
+const BE_OFFSET_FRACTION = 0.0005;   // ~0.05%
 
 // ¿El CLOID sigue VIVO en el book de HL? (prueba positiva por CLOID, no por estado local).
 async function openByCloid(info: any, user: `0x${string}`, cloid: string): Promise<boolean> {
@@ -347,6 +350,7 @@ export const reconcileSpotDefenseArm = internalAction({
           // (Codex 3c-1 r3 #1) NO confiar solo en el estado local: confirmar el SL en HL por CLOID. Un SL
           // cancelado/rechazado a mano dejaría la DB en `open` y la posición sin protección real.
           let slAlive = false;
+          let beMoved = arm.beMoved === true;
           if (slOrder) {
             const slFill = await fillsByCloid(info, user, slOrder.cloid);
             if (slFill.size > 0) {
@@ -358,6 +362,19 @@ export const reconcileSpotDefenseArm = internalAction({
               slAlive = true;   // vivo en HL → mantener protección
               if (slOrder.observedStatus !== "open") {
                 await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseOrderObserved, { armId, token, role: "sl", observedStatus: "open" });
+              }
+              // (3c-3a) Break-even: short en ganancia ≥ breakevenPct → mover el SL a ≈entrada. Guard
+              // anti-auto-disparo: el nuevo trigger (Buy) debe quedar por ENCIMA del mark (si no, fira ya).
+              const bePct = arm.breakevenPct;
+              if (!beMoved && bePct != null && bePct > 0) {
+                const profitFrac = (posEntryPx - markPx) / posEntryPx;   // short gana cuando markPx<entry
+                const beTrigger = posEntryPx * (1 - BE_OFFSET_FRACTION);
+                if (profitFrac >= bePct / 100 && beTrigger > markPx * (1 + 1e-4)) {
+                  await cancelOwnByCloid(exchange, assetId, [slOrder.cloid]);
+                  await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseOrderObserved, { armId, token, role: "sl", observedStatus: "canceled" });
+                  await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseBeMoved, { armId, token });
+                  beMoved = true; slAlive = false;   // forzar recolocación del SL en break-even
+                }
               }
             } else if (slOrder.observedStatus === "pending" && slOrder.submittedAt != null
               && Date.now() - slOrder.submittedAt <= SL_SUBMIT_GRACE_MS) {
@@ -373,7 +390,8 @@ export const reconcileSpotDefenseArm = internalAction({
             // submittedAt) ANTES del RPC + renovar lease → un SL aceptado por HL nunca queda sin tracking.
             const attempt = (arm.slAttempts ?? 0) + 1;
             const slCloid = await toHlCloid(spotDefenseCloidInput(String(armId), arm.generation, "sl", attempt));
-            const slTriggerPx = posEntryPx * (1 + arm.stopLossPct / 100);
+            // (3c-3a) Trigger DESEADO del SL: tras break-even = ≈entrada; si no = entrada + stopLossPct%.
+            const slTriggerPx = beMoved ? posEntryPx * (1 - BE_OFFSET_FRACTION) : posEntryPx * (1 + arm.stopLossPct / 100);
             const pre = await ctx.runMutation(internal.spotDefenseBots.recordSpotDefenseSlOrder, {
               armId, token, cloid: slCloid, triggerPx: slTriggerPx, size: realSize, observedStatus: "pending", attempt,
             });
@@ -381,7 +399,8 @@ export const reconcileSpotDefenseArm = internalAction({
             if (!pre.ok || !renewSl.ok) return { skipped: "sl_prepare_failed" };
             let r: { state: "resting" | "filled"; oid: string } | { state: "pending" };
             try {
-              r = await placeStopLoss(exchange, assetId, szDecimals, "Short", realSize, posEntryPx, arm.stopLossPct, slCloid);
+              // triggerPxOverride = slTriggerPx (placeStopLoss respeta el override del nivel break-even).
+              r = await placeStopLoss(exchange, assetId, szDecimals, "Short", realSize, posEntryPx, arm.stopLossPct, slCloid, slTriggerPx);
             } catch (e) {
               // Error DETERMINISTA (placeStopLoss lanza; TransportError ya lo traduce a pending): marcar
               // `rejected` → el próximo ciclo NO lo trata como vivo y reintenta. NO fingir protección.

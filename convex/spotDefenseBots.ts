@@ -504,6 +504,17 @@ export const listLiveSpotDefenseArmIdsInternal = internalQuery({
   },
 });
 
+// (JAV-107 3c-3a) Latch one-way del break-even: una vez movido el SL a ≈entrada, no se revierte.
+export const setSpotDefenseBeMoved = internalMutation({
+  args: { armId: v.id("spot_defense_arms"), token: v.string() },
+  handler: async (ctx, { armId, token }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    await ctx.db.patch(armId, { beMoved: true, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
 // Marca el cierre como emergencia/desarme (gobierna el closeReason al confirmar flat). Bajo lease.
 export const setSpotDefenseEmergencyClosing = internalMutation({
   args: { armId: v.id("spot_defense_arms"), token: v.string(), value: v.union(v.literal("emergency"), v.literal("disarm")) },

@@ -257,6 +257,8 @@ export const persistSpotDefenseBot = mutation({
       createdAt: now,
     });
     elog("spot_defense", "bot_persisted", { botId: String(botId), asset: baseAsset, network });
+    // El arranque del armado (lee HL → reserva → coloca el trigger SELL) lo dispara la ACTION de creación
+    // (Fase 4, "use node") tras persistir — no desde aquí, para no acoplar este módulo al motor "use node".
     return { botId };
   },
 });
@@ -449,15 +451,26 @@ export const getSpotDefenseDetail = query({
   },
 });
 
-// Pausa: marca disarmPending; el motor (Fase 3) cancela en HL y desactiva al confirmar.
+// Pausa/Stop: con arm vivo → disarmPending (el motor cancela/cierra en HL y completa la desactivación
+// al confirmar terminal); SIN arm vivo → stopped+inactivo directo (no hay nada que desarmar en HL).
 export const pauseSpotDefenseBot = mutation({
   args: { botId: v.id("spot_defense_bots") },
-  handler: async (ctx, { botId }) => {
+  // Promise<any>: corta el ciclo de inferencia TS2589 (agenda internal.spotDefenseEngine.* y este, a su
+  // vez, llama internal.spotDefenseBots.* → grafo mutuo). El cuerpo se sigue type-checkeando.
+  handler: async (ctx, { botId }): Promise<any> => {
     const user = await requireBotManager(ctx);
     const bot = await ctx.db.get(botId);
     if (!bot || bot.userId !== user._id) throw new Error("Bot no encontrado.");
-    await ctx.db.patch(botId, { disarmPending: true, disarmRequestedAt: Date.now(), updatedAt: Date.now() });
-    return { ok: true as const };
+    const live = (await ctx.db.query("spot_defense_arms").withIndex("by_bot_generation", (q) =>
+      q.eq("botId", botId)).collect()).find((a) => !ARM_TERMINAL.has(a.status));
+    if (live) {
+      // disarmPending=wantDisarm → el cron "reconcile spot defense" (≤1 min) cancela y cierra reduceOnly.
+      // (NO se agenda el motor aquí para no crear un ciclo de tipos spotDefenseBots↔spotDefenseEngine.)
+      await ctx.db.patch(botId, { disarmPending: true, disarmRequestedAt: Date.now(), updatedAt: Date.now() });
+    } else {
+      await ctx.db.patch(botId, { active: false, status: "stopped", disarmPending: false, disarmRequestedAt: undefined, updatedAt: Date.now() });
+    }
+    return { ok: true as const, hadLiveArm: !!live };
   },
 });
 
@@ -471,6 +484,36 @@ const SD_RECONCILE_LEASE_MS = SPOT_DEFENSE_LEASE_MS;
 export const getSpotDefenseBotInternal = internalQuery({
   args: { botId: v.id("spot_defense_bots") },
   handler: async (ctx, { botId }) => await ctx.db.get(botId),
+});
+
+// Estados VIVOS (no terminales) de spot_defense_arms (para el cron de reconcile).
+const SD_LIVE_STATUSES = [
+  "arming", "submitting", "armed", "disarming", "filled", "protecting", "protected", "unknown", "manual_intervention",
+] as const;
+
+// IDs de arms vivos del usuario-base (todos), ordenados por antigüedad (sin starvation). Topado.
+export const listLiveSpotDefenseArmIdsInternal = internalQuery({
+  args: { limit: v.optional(v.number()) },
+  handler: async (ctx, { limit }) => {
+    const cap = limit ?? 200;
+    const ids: Id<"spot_defense_arms">[] = [];
+    for (const st of SD_LIVE_STATUSES) {
+      const rows = await ctx.db.query("spot_defense_arms").withIndex("by_status_updated", (q) => q.eq("status", st)).collect();
+      for (const r of rows) { ids.push(r._id); if (ids.length >= cap) return ids; }
+    }
+    return ids;
+  },
+});
+
+// Marca el cierre como emergencia/desarme (gobierna el closeReason al confirmar flat). Bajo lease.
+export const setSpotDefenseEmergencyClosing = internalMutation({
+  args: { armId: v.id("spot_defense_arms"), token: v.string(), value: v.union(v.literal("emergency"), v.literal("disarm")) },
+  handler: async (ctx, { armId, token, value }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    await ctx.db.patch(armId, { emergencyClosing: value, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
 });
 
 // Terminalización "pre-orden" (espejo de failArmPreOrder): cuando updateLeverage es RECHAZADO de forma

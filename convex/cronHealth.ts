@@ -127,6 +127,14 @@ export const reconcileSpotGridWithHealth = internalAction({
     () => ctx.runAction(internal.spotGridEngine.reconcileAllSpotGrids, {})),
 });
 
+// (JAV-107) Reconcile del motor de defensa SPOT (money-path): SL/cierre/drift bajo lease.
+export const reconcileSpotDefenseWithHealth = internalAction({
+  args: {},
+  // Promise<any>: corta el ciclo de inferencia TS2589 (encadena internal.spotDefenseEngine.*).
+  handler: async (ctx): Promise<any> => withCronHealth(ctx, "reconcile spot defense",
+    () => ctx.runAction(internal.spotDefenseEngine.reconcileAllSpotDefense, {})),
+});
+
 // (OBS-3b) Poda diaria de engine_events (best-effort vía withCronHealth, no afecta money-path).
 export const pruneEngineEventsWithHealth = internalAction({
   args: {},

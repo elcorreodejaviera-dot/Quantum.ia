@@ -5,7 +5,7 @@ import { internal } from "./_generated/api";
 import { v } from "convex/values";
 import { decryptPrivateKey } from "./hlCredentialActions";
 import { hlNetwork, hlIsTestnet } from "./hlNetwork";
-import { makeClients, getAssetMeta, roundHlPrice, aggressiveHlPriceStr, formatHlPrice, abortAfter, placeStopLoss, fillsByCloid } from "./hyperliquid";
+import { makeClients, getAssetMeta, roundHlPrice, aggressiveHlPriceStr, formatHlPrice, abortAfter, placeStopLoss, fillsByCloid, floorToDecimals } from "./hyperliquid";
 import { spotDefenseCloidInput, toHlCloid } from "./cloids";
 import { TransportError } from "@nktkas/hyperliquid";
 import { elog } from "./log";
@@ -302,12 +302,35 @@ export const reconcileSpotDefenseArm = internalAction({
           // propia sigue viva en el book (un trigger residuo podría dispararse sobre un arm ya cerrado).
           const allDead = await ensureSpotDefenseOrdersDead(info, exchange, user, assetId, ownCloids);
           if (!allDead) return { skipped: "orders_still_live" };
-          await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "closed", closeReason: slConfirmed ? "sl" : "manual" });
+          // closeReason: una pausa/kill (emergencyClosing) manda; si no, SL ejecutado = "sl", else "manual".
+          const closeReason = arm.emergencyClosing === "disarm" ? "disarm"
+            : arm.emergencyClosing === "emergency" ? "emergency"
+            : slConfirmed ? "sl" : "manual";
+          await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "closed", closeReason });
           return { result: "closed" };
         }
         // Posición viva: si había una lectura flat previa, era transitoria → limpiarla.
         if (arm.closeConfirmSince != null) {
           await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseCloseConfirm, { armId, token, value: null });
+        }
+
+        // (Codex 3c-1 cabo) Pausa/kill con posición ABIERTA → cierre ACTIVO: cancelar lo propio + market
+        // close reduceOnly del tamaño contable (el drift ya se excluyó arriba → no toca exposición ajena).
+        // Marca emergencyClosing="disarm" → la rama flat cierra con closeReason "disarm" el próximo ciclo.
+        if (wantDisarm) {
+          await ensureSpotDefenseOrdersDead(info, exchange, user, assetId, ownCloids);
+          await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseEmergencyClosing, { armId, token, value: "disarm" });
+          const renewC = await ctx.runMutation(internal.spotDefenseBots.renewSpotDefenseReconcile, { armId, token });
+          if (!renewC.ok) return { skipped: "lease_lost" };
+          const closeLimitPx = aggressiveHlPriceStr(markPx * (1 + 0.02), szDecimals, true);   // cerrar short = BUY
+          const acC = abortAfter(HL_ORDER_TIMEOUT_MS);
+          try {
+            await exchange.order({
+              orders: [{ a: assetId, b: true, p: closeLimitPx, s: String(floorToDecimals(realSize, szDecimals)), r: true, t: { limit: { tif: "Ioc" } } }],
+              grouping: "na",
+            }, { signal: acC.signal, expiresAfter: Date.now() + HL_ORDER_TIMEOUT_MS });
+          } catch { /* reduceOnly: el próximo ciclo reintenta hasta confirmar flat */ } finally { acC.clear(); }
+          return { result: "closing" };
         }
 
         // Posición abierta y SIN pausa: asegurar el SL (Short → Buy por encima de la entrada).
@@ -399,5 +422,19 @@ export const reconcileSpotDefenseArm = internalAction({
     } finally {
       await ctx.runMutation(internal.spotDefenseBots.releaseSpotDefenseReconcile, { armId, token });
     }
+  },
+});
+
+// --- Cron 1/min: reconcilia TODOS los arms de defensa vivos (bajo claim/lease individual) ----------
+export const reconcileAllSpotDefense = internalAction({
+  args: {},
+  handler: async (ctx): Promise<any> => {
+    const ids = await ctx.runQuery(internal.spotDefenseBots.listLiveSpotDefenseArmIdsInternal, {});
+    let reconciled = 0;
+    for (const armId of ids) {
+      try { await ctx.runAction(internal.spotDefenseEngine.reconcileSpotDefenseArm, { armId }); reconciled++; }
+      catch (e) { console.warn("[spot_defense] reconcile arm failed:", String(e).slice(0, 200)); }
+    }
+    return { reconciled, total: ids.length };
   },
 });

@@ -26,6 +26,22 @@ const MIN_PERP_NOTIONAL_USD = 10;
 const SPOT_DEFENSE_LEASE_MS = 2 * 60 * 1000;
 
 const ARM_TERMINAL = new Set(["disarmed", "closed", "failed"]);
+// Transiciones permitidas de un arm de defensa (single-entry). Evita degradar estados (p.ej. protected→
+// armed) y acota la máquina de estados. Espejo recortado de ALLOWED_ARM del motor de pool.
+const ALLOWED_SD: Record<string, Set<string>> = {
+  arming: new Set(["submitting", "armed", "filled", "unknown", "failed", "disarming", "disarmed"]),
+  submitting: new Set(["armed", "filled", "protecting", "protected", "unknown", "failed", "disarming"]),
+  unknown: new Set(["armed", "filled", "protecting", "protected", "closed", "failed", "disarming", "manual_intervention"]),
+  armed: new Set(["filled", "disarming", "disarmed", "unknown", "failed", "manual_intervention"]),
+  filled: new Set(["protecting", "protected", "closed", "failed", "manual_intervention"]),
+  protecting: new Set(["protected", "closed", "failed", "manual_intervention"]),
+  protected: new Set(["closed", "manual_intervention"]),
+  disarming: new Set(["disarmed", "closed", "failed"]),
+  manual_intervention: new Set(["closed", "disarmed", "failed"]),
+};
+// Cuarentena tras `submittedAt`: una respuesta tardía de HL aún podría materializar la orden, así que no
+// se terminaliza un arm que llegó a submitting hasta pasado el plazo (anti doble-envío/huérfano).
+const SD_SUBMIT_QUARANTINE_MS = 90 * 1000;
 
 // --- Gate de mainnet (admin) -------------------------------------------------------------------
 
@@ -436,6 +452,143 @@ export const pauseSpotDefenseBot = mutation({
     const bot = await ctx.db.get(botId);
     if (!bot || bot.userId !== user._id) throw new Error("Bot no encontrado.");
     await ctx.db.patch(botId, { disarmPending: true, disarmRequestedAt: Date.now(), updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
+// =============================================================================================
+// Fase 3 (3a) — Mutations de ciclo de vida del arm (lease/fencing + máquina de estados). NON-node;
+// las invoca el motor `spotDefenseEngine.ts` ("use node"). Espejo recortado de triggerArms.
+// =============================================================================================
+
+const SD_RECONCILE_LEASE_MS = SPOT_DEFENSE_LEASE_MS;
+
+export const getSpotDefenseArmInternal = internalQuery({
+  args: { armId: v.id("spot_defense_arms") },
+  handler: async (ctx, { armId }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm) return null;
+    const orders = await ctx.db.query("spot_defense_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId)).collect();
+    return { arm, orders };
+  },
+});
+
+// Arm vivo (no terminal) de un bot, para el reconcile/stop del motor.
+export const getLiveSpotDefenseArmInternal = internalQuery({
+  args: { botId: v.id("spot_defense_bots") },
+  handler: async (ctx, { botId }) => {
+    const arms = await ctx.db.query("spot_defense_arms").withIndex("by_bot_generation", (q) => q.eq("botId", botId)).collect();
+    return arms.find((a) => !ARM_TERMINAL.has(a.status)) ?? null;
+  },
+});
+
+export const claimSpotDefenseReconcile = internalMutation({
+  args: { armId: v.id("spot_defense_arms") },
+  handler: async (ctx, { armId }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm) return { claimed: false as const, reason: "not_found" as const };
+    if (ARM_TERMINAL.has(arm.status)) return { claimed: false as const, reason: "terminal" as const };
+    if ((arm.reconcileLeaseUntil ?? 0) > Date.now()) return { claimed: false as const, reason: "leased" as const };
+    const token = crypto.randomUUID();
+    await ctx.db.patch(armId, { reconcileLeaseUntil: Date.now() + SD_RECONCILE_LEASE_MS, reconcileLeaseToken: token, updatedAt: Date.now() });
+    return { claimed: true as const, token };
+  },
+});
+
+export const renewSpotDefenseReconcile = internalMutation({
+  args: { armId: v.id("spot_defense_arms"), token: v.string() },
+  handler: async (ctx, { armId, token }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || ARM_TERMINAL.has(arm.status)) return { ok: false as const };
+    if (arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    await ctx.db.patch(armId, { reconcileLeaseUntil: Date.now() + SD_RECONCILE_LEASE_MS, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
+export const releaseSpotDefenseReconcile = internalMutation({
+  args: { armId: v.id("spot_defense_arms"), token: v.string() },
+  handler: async (ctx, { armId, token }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token) return;
+    await ctx.db.patch(armId, { reconcileLeaseUntil: 0, reconcileLeaseToken: undefined, updatedAt: Date.now() });
+  },
+});
+
+// Actualiza una orden del arm por rol (entry/sl/tp[+tpIndex]) bajo lease: observedStatus/oid.
+export const setSpotDefenseOrderObserved = internalMutation({
+  args: {
+    armId: v.id("spot_defense_arms"), token: v.string(),
+    role: v.union(v.literal("entry"), v.literal("sl"), v.literal("tp")),
+    tpIndex: v.optional(v.number()),
+    observedStatus: v.union(
+      v.literal("pending"), v.literal("open"), v.literal("triggered"), v.literal("filled"),
+      v.literal("canceled"), v.literal("rejected"), v.literal("unknown")),
+    oid: v.optional(v.string()),
+    markSubmitted: v.optional(v.boolean()),
+  },
+  handler: async (ctx, { armId, token, role, tpIndex, observedStatus, oid, markSubmitted }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    const order = role === "tp"
+      ? await ctx.db.query("spot_defense_orders").withIndex("by_arm_role_index", (q) => q.eq("armId", armId).eq("role", "tp").eq("tpIndex", tpIndex)).first()
+      : await ctx.db.query("spot_defense_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", role)).first();
+    if (!order) return { ok: false as const };
+    const patch: Record<string, unknown> = { observedStatus, updatedAt: Date.now() };
+    if (oid !== undefined) patch.oid = oid;
+    if (markSubmitted) patch.submittedAt = Date.now();
+    await ctx.db.patch(order._id, patch);
+    return { ok: true as const };
+  },
+});
+
+// Máquina de estados del arm (fencing + ALLOWED + cuarentena post-submit). Al alcanzar terminal con
+// disarmPending → completa la pausa (active=false). Espejo recortado de triggerArms.settleArm.
+export const settleSpotDefenseArm = internalMutation({
+  args: {
+    armId: v.id("spot_defense_arms"),
+    status: v.union(
+      v.literal("armed"), v.literal("disarming"), v.literal("disarmed"), v.literal("filled"),
+      v.literal("protecting"), v.literal("protected"), v.literal("closed"), v.literal("unknown"),
+      v.literal("failed"), v.literal("manual_intervention")),
+    token: v.optional(v.string()),
+    filledSize: v.optional(v.number()),
+    entryPrice: v.optional(v.number()),
+    error: v.optional(v.string()),
+    closeReason: v.optional(v.union(v.literal("sl"), v.literal("manual"), v.literal("emergency"), v.literal("disarm"))),
+  },
+  handler: async (ctx, args): Promise<any> => {
+    const arm = await ctx.db.get(args.armId);
+    if (!arm) return { ok: false as const };
+    if (args.token !== undefined &&
+        (arm.reconcileLeaseToken !== args.token || (arm.reconcileLeaseUntil ?? 0) <= Date.now())) {
+      return { ok: false as const };
+    }
+    if (ARM_TERMINAL.has(arm.status)) return { ok: false as const };
+    const allowed = ALLOWED_SD[arm.status];
+    if (!allowed || !allowed.has(args.status)) return { ok: false as const };
+    if (args.status === "closed" && args.closeReason === undefined) return { ok: false as const };
+    // Cuarentena: no terminalizar un arm que llegó a submitting hasta pasado el plazo (orden quizá viva).
+    if (ARM_TERMINAL.has(args.status) && arm.submittedAt != null
+        && Date.now() - arm.submittedAt <= SD_SUBMIT_QUARANTINE_MS) {
+      return { ok: false as const, quarantined: true as const };
+    }
+    const now = Date.now();
+    const patch: Record<string, unknown> = { status: args.status, updatedAt: now };
+    for (const k of ["filledSize", "entryPrice", "error"] as const) {
+      if (args[k] !== undefined) patch[k] = args[k];
+    }
+    if (args.status === "closed" && args.closeReason !== undefined) patch.closeReason = args.closeReason;
+    if (args.status === "filled" && arm.filledAt == null) patch.filledAt = now;
+    await ctx.db.patch(args.armId, patch);
+    elog("spot_defense", "transition", { armId: String(args.armId), from: arm.status, to: args.status, closeReason: args.closeReason ?? null });
+    // Al alcanzar terminal con pausa en curso → completar la desactivación del bot.
+    if (ARM_TERMINAL.has(args.status)) {
+      const bot = await ctx.db.get(arm.botId);
+      if (bot?.disarmPending) {
+        await ctx.db.patch(arm.botId, { active: false, status: "stopped", disarmPending: false, disarmRequestedAt: undefined, updatedAt: now });
+      }
+    }
     return { ok: true as const };
   },
 });

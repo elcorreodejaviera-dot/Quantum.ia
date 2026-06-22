@@ -234,6 +234,54 @@ describe("persistSpotDefenseBot — no reconfigura con arm vivo (Codex Fase 2 #3
   });
 });
 
+describe("Fase 3a — ciclo de vida del arm (claim/settle/fencing/cuarentena)", () => {
+  async function reservedArm(t: any) {
+    const { botId } = await t.run((ctx: MutationCtx) => seedDefenseBot(ctx));
+    const r = await t.mutation(internal.spotDefenseBots.reserveSpotDefenseArm, {
+      botId, triggerPx: 2000, availableCollateral: 1000, assetMaxLeverage: 20, szDecimals: 3,
+    });
+    return { botId, armId: r.armId };
+  }
+
+  it("claim + settle arming→armed bajo lease", async () => {
+    const t = makeConvexTest();
+    const { armId } = await reservedArm(t);
+    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
+    expect(claim.claimed).toBe(true);
+    const r = await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: claim.token, status: "armed" });
+    expect(r.ok).toBe(true);
+    expect((await t.run((ctx: MutationCtx) => ctx.db.get(armId)))?.status).toBe("armed");
+  });
+
+  it("settle con token ajeno → no-op", async () => {
+    const t = makeConvexTest();
+    const { armId } = await reservedArm(t);
+    await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
+    const r = await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: "intruso", status: "armed" });
+    expect(r.ok).toBe(false);
+  });
+
+  it("ALLOWED rechaza transición ilegal (arming→protected)", async () => {
+    const t = makeConvexTest();
+    const { armId } = await reservedArm(t);
+    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
+    const r = await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: claim.token, status: "protected" });
+    expect(r.ok).toBe(false);
+  });
+
+  it("closed exige closeReason", async () => {
+    const t = makeConvexTest();
+    const { armId } = await reservedArm(t);
+    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
+    await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: claim.token, status: "armed" });
+    await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: claim.token, status: "filled" });
+    const noReason = await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: claim.token, status: "closed" });
+    expect(noReason.ok).toBe(false);
+    const ok = await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token: claim.token, status: "closed", closeReason: "sl" });
+    expect(ok.ok).toBe(true);
+  });
+});
+
 describe("consumedCoverageByKey — claves namespaced sin colisión (Codex r2#3/#4)", () => {
   it("suma pool y spot-defense bajo claves distintas", async () => {
     const t = makeConvexTest();

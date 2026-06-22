@@ -1,0 +1,404 @@
+import { v } from "convex/values";
+import { mutation, query, internalMutation, internalQuery } from "./_generated/server";
+import type { QueryCtx, MutationCtx } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
+import { requireAdmin, requireBotManager, getUserOrNull, writeAdminLog, hasPermission, deriveBaseAsset } from "./helpers";
+import { elog } from "./log";
+import { spotDefenseCloidInput } from "./cloids";
+import { hlNetwork } from "./hlNetwork";
+import { committedMarginForAccount } from "./executions";
+import { AUTO_LEVERAGE_CAP, MANUAL_LEVERAGE_MIN, MANUAL_LEVERAGE_MAX, MARGIN_SAFETY_BUFFER } from "./leverage";
+import {
+  spotDefenseCoverageKey, remainingCoverageForKey,
+  assertWithinPlanCoverageForKey, coverageAdmissibleForKey,
+} from "./coverageUsage";
+
+// (JAV-107) Bot de defensa de posiciones SPOT — persistencia + reserva atómica + gates. NON-node
+// (convex-testable). NO envía órdenes a HL (eso es el motor de Fase 3, spotDefenseEngine.ts "use node").
+// La action de Fase 3 LEE HL (markPx, colateral, flat) y delega aquí: persistSpotDefenseBot (upsert) →
+// reserveSpotDefenseArm (OCC: margen/cap/sizing capado = fuente de verdad) → CAS pre-envío.
+
+// Gate dedicado de mainnet (Codex r2 #6), espejo de mainnetSpotGridApproved.
+const MAINNET_GATE_KEY = "mainnetSpotDefenseApproved";
+// Mínimo de nocional perp en HL (≈ $10). Por debajo, una orden se rechaza → no tiene sentido reservar.
+const MIN_PERP_NOTIONAL_USD = 10;
+// Lease/fencing del reconcile + envío (un solo worker por arm a la vez).
+const SPOT_DEFENSE_LEASE_MS = 2 * 60 * 1000;
+
+const ARM_TERMINAL = new Set(["disarmed", "closed", "failed"]);
+
+// --- Gate de mainnet (admin) -------------------------------------------------------------------
+
+async function isMainnetSpotDefenseApproved(ctx: QueryCtx | MutationCtx): Promise<boolean> {
+  const gate = await ctx.db.query("system_config").withIndex("by_key", (q) => q.eq("key", MAINNET_GATE_KEY)).first();
+  return (gate?.value as { enabled?: boolean } | undefined)?.enabled === true;
+}
+
+export const getMainnetSpotDefenseApproval = query({
+  args: {},
+  handler: async (ctx) => {
+    await requireAdmin(ctx);
+    const gate = await ctx.db.query("system_config").withIndex("by_key", (q) => q.eq("key", MAINNET_GATE_KEY)).first();
+    return (gate?.value as { enabled?: boolean; approvedAt?: number; approvedBy?: string } | undefined) ?? null;
+  },
+});
+
+export const setMainnetSpotDefenseApproval = mutation({
+  args: { enabled: v.boolean() },
+  handler: async (ctx, { enabled }) => {
+    const admin = await requireAdmin(ctx);
+    const existing = await ctx.db.query("system_config").withIndex("by_key", (q) => q.eq("key", MAINNET_GATE_KEY)).first();
+    const value = { enabled, approvedAt: Date.now(), approvedBy: admin.clerkId };
+    if (existing) await ctx.db.patch(existing._id, { value });
+    else await ctx.db.insert("system_config", { key: MAINNET_GATE_KEY, value });
+    await writeAdminLog(ctx, admin.clerkId, "set_mainnet_spot_defense_approval", { enabled });
+    return { ok: true as const };
+  },
+});
+
+// Lectura interna del gate para el motor (action) — sin auth de admin.
+export const getMainnetSpotDefenseApprovedInternal = internalQuery({
+  args: {},
+  handler: async (ctx) => ({ approved: await isMainnetSpotDefenseApproved(ctx) }),
+});
+
+// --- Validación de config + exclusividad (JAV-102) ---------------------------------------------
+
+function validateSpotDefenseConfig(args: {
+  leverage: number; stopLossPct: number; bufferPct?: number; triggerPrice: number;
+  triggerMode: "manual" | "dca"; minCoveragePct?: number;
+  tps?: { gainPct: number; closePct: number }[];
+}) {
+  if (!Number.isFinite(args.leverage) || args.leverage < MANUAL_LEVERAGE_MIN || args.leverage > MANUAL_LEVERAGE_MAX) {
+    throw new Error(`leverage debe estar entre ${MANUAL_LEVERAGE_MIN} y ${MANUAL_LEVERAGE_MAX}.`);
+  }
+  if (!Number.isFinite(args.stopLossPct) || args.stopLossPct <= 0 || args.stopLossPct >= 100) {
+    throw new Error("stopLossPct debe estar entre 0 y 100 (exclusivo).");
+  }
+  if (args.bufferPct !== undefined && (!Number.isFinite(args.bufferPct) || args.bufferPct < 0 || args.bufferPct > 100)) {
+    throw new Error("bufferPct debe estar entre 0 y 100.");
+  }
+  if (!Number.isFinite(args.triggerPrice) || args.triggerPrice <= 0) {
+    throw new Error("triggerPrice debe ser un número finito > 0.");
+  }
+  if (args.minCoveragePct !== undefined && (!Number.isFinite(args.minCoveragePct) || args.minCoveragePct < 0 || args.minCoveragePct > 100)) {
+    throw new Error("minCoveragePct debe estar entre 0 y 100.");
+  }
+  for (const tp of args.tps ?? []) {
+    if (!Number.isFinite(tp.gainPct) || tp.gainPct <= 0 || !Number.isFinite(tp.closePct) || tp.closePct <= 0 || tp.closePct > 100) {
+      throw new Error("Cada TP requiere gainPct > 0 y closePct en (0,100].");
+    }
+  }
+}
+
+// Exclusividad de cuenta JAV-102 escaneando las TRES tablas por la cuenta HL (credencial). Mismas
+// reglas que la cobertura: mismo baseAsset en la cuenta (cobertura/trading/otra defensa viva) → rechazo;
+// grid vivo en la cuenta → rechazo (el grid exige cuenta dedicada total). `self` excluye el propio bot
+// en un upsert.
+async function assertSpotDefenseAccountExclusivity(
+  ctx: MutationCtx, userId: Id<"users">, hlAccountId: Id<"hl_api_credentials">,
+  baseAsset: string, self?: Id<"spot_defense_bots">,
+) {
+  const perp = await ctx.db.query("bots").withIndex("by_user_account", (q) =>
+    q.eq("userId", userId).eq("hlAccountId", hlAccountId)).collect();
+  if (perp.some((b) => b.baseAsset === baseAsset)) {
+    throw new Error(`Esta cuenta de Hyperliquid ya tiene una cobertura para ${baseAsset}/USDC. Usá otra cuenta para defender este activo.`);
+  }
+  const others = await ctx.db.query("spot_defense_bots").withIndex("by_user_account", (q) =>
+    q.eq("userId", userId).eq("hlAccountId", hlAccountId)).collect();
+  if (others.some((b) => b._id !== self && b.baseAsset === baseAsset && b.status !== "stopped")) {
+    throw new Error(`Esta cuenta ya tiene un bot de defensa para ${baseAsset}/USDC.`);
+  }
+  const grid = (await ctx.db.query("spot_grid_bots").withIndex("by_account", (q) =>
+    q.eq("hlAccountId", hlAccountId)).collect()).find((g) => g.status !== "stopped");
+  if (grid) {
+    throw new Error("Esta cuenta está vinculada a un Spot Grid (cuenta dedicada). Usá una cuenta distinta.");
+  }
+}
+
+// --- Persistencia (upsert por (userId, spotPositionId)) -----------------------------------------
+// Llamada por la action de Fase 3 tras leer HL. `requestedNotionalUsd` = amount×markPx×(1+buffer)
+// calculado por la action (markPx es HL). Aquí se valida config + exclusividad + gate + ownership.
+
+export const persistSpotDefenseBot = mutation({
+  args: {
+    spotPositionId: v.id("spot_positions"),
+    hlAccountId: v.id("hl_api_credentials"),
+    leverage: v.number(),
+    autoLeverage: v.optional(v.boolean()),
+    bufferPct: v.optional(v.number()),
+    stopLossPct: v.number(),
+    breakevenPct: v.optional(v.number()),
+    tps: v.optional(v.array(v.object({ gainPct: v.number(), closePct: v.number() }))),
+    autoRearm: v.optional(v.boolean()),
+    triggerMode: v.union(v.literal("manual"), v.literal("dca")),
+    triggerPrice: v.number(),
+    requestedNotionalUsd: v.number(),
+    minCoveragePct: v.optional(v.number()),
+    active: v.boolean(),
+  },
+  handler: async (ctx, args): Promise<{ botId: Id<"spot_defense_bots"> }> => {
+    const user = await requireBotManager(ctx);
+    // Defensa = trading REAL → exige canTradeLive (separado de canManageBots). Admin tiene bypass.
+    if (!(await hasPermission(ctx, user, "canTradeLive"))) {
+      throw new Error("Crear un bot de defensa spot requiere el permiso canTradeLive.");
+    }
+    const pos = await ctx.db.get(args.spotPositionId);
+    // spot_positions.userId = identity.subject (Clerk) = user.clerkId.
+    if (!pos || pos.userId !== user.clerkId) {
+      throw new Error("La posición spot no existe o no te pertenece.");
+    }
+    const cred = await ctx.db.get(args.hlAccountId);
+    if (!cred || cred.userId !== user._id) {
+      throw new Error("La cuenta Hyperliquid no existe o no te pertenece.");
+    }
+    validateSpotDefenseConfig(args);
+    if (!Number.isFinite(args.requestedNotionalUsd) || args.requestedNotionalUsd <= 0) {
+      throw new Error("requestedNotionalUsd inválido.");
+    }
+    const network = hlNetwork();
+    if (network === "mainnet" && !(await isMainnetSpotDefenseApproved(ctx))) {
+      throw new Error("El bot de defensa spot en mainnet no está aprobado por un administrador.");
+    }
+    const baseAsset = deriveBaseAsset(`${pos.asset}/USDC`);   // normaliza WETH→ETH/WBTC→BTC, nunca del cliente
+
+    const existing = await ctx.db.query("spot_defense_bots").withIndex("by_user_position", (q) =>
+      q.eq("userId", user._id).eq("spotPositionId", args.spotPositionId)).first();
+
+    await assertSpotDefenseAccountExclusivity(ctx, user._id, args.hlAccountId, baseAsset, existing?._id);
+
+    const now = Date.now();
+    const common = {
+      hlAccountId: args.hlAccountId,
+      asset: baseAsset,
+      baseAsset,
+      side: "Short" as const,
+      leverage: args.leverage,
+      autoLeverage: args.autoLeverage,
+      bufferPct: args.bufferPct,
+      stopLossPct: args.stopLossPct,
+      breakevenPct: args.breakevenPct,
+      tps: args.tps,
+      autoRearm: args.autoRearm,
+      triggerMode: args.triggerMode,
+      triggerPrice: args.triggerPrice,
+      requestedNotionalUsd: args.requestedNotionalUsd,
+      minCoveragePct: args.minCoveragePct,
+      active: args.active,
+      network,
+      updatedAt: now,
+    };
+    if (existing) {
+      // Con un arm vivo la única operación segura es pausar; reconfigurar lo dejaría incoherente.
+      const live = (await ctx.db.query("spot_defense_arms").withIndex("by_bot_generation", (q) =>
+        q.eq("botId", existing._id)).collect()).find((a) => !ARM_TERMINAL.has(a.status));
+      if (live && args.active) {
+        throw new Error("El bot tiene una cobertura activa; pausa el trigger antes de reconfigurar.");
+      }
+      await ctx.db.patch(existing._id, common);
+      return { botId: existing._id };
+    }
+    const botId = await ctx.db.insert("spot_defense_bots", {
+      userId: user._id,
+      spotPositionId: args.spotPositionId,
+      ...common,
+      status: "running",
+      generation: 0,
+      createdAt: now,
+    });
+    elog("spot_defense", "bot_persisted", { botId: String(botId), asset: baseAsset, network });
+    return { botId };
+  },
+});
+
+// --- Reserva atómica del arm (Codex r2 #1): margen real + cap + sizing capado en UNA OCC ----------
+
+export const reserveSpotDefenseArm = internalMutation({
+  args: {
+    botId: v.id("spot_defense_bots"),
+    triggerPx: v.number(),               // ya normalizado al tick por la action
+    availableCollateral: v.number(),     // USDC libre (snapshot HL)
+    assetMaxLeverage: v.number(),        // maxLeverage del activo en HL
+    szDecimals: v.number(),              // decimales de tamaño del activo
+  },
+  // Promise<any>: corta el ciclo TS2589 (llama a coverageUsage). El cuerpo se sigue type-checkeando.
+  handler: async (ctx, args): Promise<any> => {
+    const bot = await ctx.db.get(args.botId);
+    if (!bot) throw new Error("[blocked_config] Bot de defensa no encontrado.");
+    if (bot.status === "stopped") throw new Error("[blocked_config] El bot está detenido.");
+    if (bot.network !== hlNetwork()) throw new Error("[blocked_config] La red del bot no coincide con la del backend.");
+    if (bot.network === "mainnet" && !(await isMainnetSpotDefenseApproved(ctx))) {
+      throw new Error("[blocked_config] Defensa spot en mainnet no aprobada.");
+    }
+    if (!Number.isFinite(args.triggerPx) || args.triggerPx <= 0) throw new Error("[blocked_config] triggerPx inválido.");
+    if (!Number.isFinite(args.availableCollateral) || args.availableCollateral < 0) {
+      throw new Error("[blocked_config] availableCollateral inválido.");
+    }
+
+    // (1) Unicidad: una sola generación NO terminal por bot.
+    const arms = await ctx.db.query("spot_defense_arms").withIndex("by_bot_generation", (q) =>
+      q.eq("botId", args.botId)).collect();
+    if (arms.find((a) => !ARM_TERMINAL.has(a.status))) {
+      throw new Error("[transient] Ya existe un armado activo para este bot.");
+    }
+    const generation = arms.reduce((m, a) => Math.max(m, a.generation), 0) + 1;
+
+    // (2) Margen real comprometido en la cuenta (AMBOS motores + grid ya incluidos en el helper).
+    const marginCommitted = await committedMarginForAccount(ctx, bot.hlAccountId);
+    const usableReal = args.availableCollateral * (1 - MARGIN_SAFETY_BUFFER) - marginCommitted;
+    if (!(usableReal > 0)) {
+      throw new Error("[blocked_margin] Sin colateral usable para abrir la cobertura (fondea la cuenta).");
+    }
+
+    // (3) Leverage aplicado: manual validado y acotado al máx del activo; auto = min(tope, máx activo).
+    const maxLev = Number.isInteger(args.assetMaxLeverage) && args.assetMaxLeverage >= 1 ? args.assetMaxLeverage : 1;
+    let appliedLeverage: number;
+    if (bot.autoLeverage === true) {
+      appliedLeverage = Math.min(AUTO_LEVERAGE_CAP, maxLev);
+    } else {
+      const lev = Math.round(bot.leverage);
+      if (lev < MANUAL_LEVERAGE_MIN || lev > MANUAL_LEVERAGE_MAX) {
+        throw new Error(`[blocked_config] leverage manual fuera de rango.`);
+      }
+      appliedLeverage = Math.min(lev, maxLev);
+    }
+    if (appliedLeverage < 1) throw new Error("[blocked_config] leverage efectivo inválido.");
+
+    // (4) Sizing CAPADO (Codex r2 #1+#4): nocional = min(pedido, cota por margen, cap del plan restante).
+    const marginCapNotional = usableReal * appliedLeverage;
+    const requested = bot.requestedNotionalUsd;
+    const remaining = await remainingCoverageForKey(ctx, bot.userId, spotDefenseCoverageKey(bot._id));
+    const target = Math.min(requested, marginCapNotional, remaining);
+    const f = Math.pow(10, args.szDecimals);
+    const size = Math.floor((target / args.triggerPx) * f) / f;     // floor = no sobre-dimensionar
+    const effectiveNotionalUsd = size * args.triggerPx;
+    if (!(size > 0) || effectiveNotionalUsd < MIN_PERP_NOTIONAL_USD) {
+      throw new Error(`[blocked_margin] Cobertura efectiva por debajo del mínimo (${MIN_PERP_NOTIONAL_USD} USD): revisá colateral/cap/leverage.`);
+    }
+    // Umbral mínimo de cobertura (Codex r2 #4): si el cap/margen recorta por debajo, bloquear.
+    if (bot.minCoveragePct !== undefined && effectiveNotionalUsd < (bot.minCoveragePct / 100) * requested) {
+      throw new Error(`[blocked_margin] Cobertura efectiva (${effectiveNotionalUsd.toFixed(2)}) por debajo del umbral mínimo (${bot.minCoveragePct}% de ${requested.toFixed(2)}).`);
+    }
+    const marginReserved = effectiveNotionalUsd / appliedLeverage;
+
+    // (5) Hard-cap del plan AUTORITATIVO (idempotente, fail-closed) con el nocional EFECTIVO.
+    await assertWithinPlanCoverageForKey(ctx, bot.userId, spotDefenseCoverageKey(bot._id), effectiveNotionalUsd);
+
+    // (6) Insertar arm (arming) + orden entry (pending, sin submittedAt — se fija en el CAS).
+    const now = Date.now();
+    const armId = await ctx.db.insert("spot_defense_arms", {
+      botId: bot._id, userId: bot.userId, hlAccountId: bot.hlAccountId,
+      asset: bot.asset, network: bot.network, generation, status: "arming", desiredState: "armed",
+      side: "Short", triggerPx: args.triggerPx, size, appliedLeverage,
+      reservedNotional: effectiveNotionalUsd, marginReserved,
+      requestedNotionalUsd: requested, effectiveNotionalUsd,
+      stopLossPct: bot.stopLossPct, breakevenPct: bot.breakevenPct, tps: bot.tps,
+      createdAt: now, updatedAt: now,
+    });
+    await ctx.db.patch(bot._id, { effectiveNotionalUsd, generation, updatedAt: now });
+    const cloid = spotDefenseCloidInput(String(armId), generation, "entry");
+    await ctx.db.insert("spot_defense_orders", {
+      armId, role: "entry", cloid, oid: undefined,
+      triggerPx: args.triggerPx, size, reduceOnly: false, observedStatus: "pending",
+      createdAt: now, updatedAt: now,
+    });
+    elog("spot_defense", "reserved", {
+      armId: String(armId), botId: String(bot._id), asset: bot.asset, generation, appliedLeverage,
+      partial: effectiveNotionalUsd < requested,
+    });
+    return { armId, generation, cloid, appliedLeverage, size, effectiveNotionalUsd, requestedNotionalUsd: requested, marginReserved };
+  },
+});
+
+// --- CAS pre-envío: arming → submitting, revalida intención + gate + cap (Codex r1 #5 / r2 #3) ----
+
+export const markArmSubmitting = internalMutation({
+  args: { armId: v.id("spot_defense_arms") },
+  handler: async (ctx, { armId }): Promise<any> => {
+    const arm = await ctx.db.get(armId);
+    if (!arm) return { ok: false as const, reason: "not_found" as const };
+    if (arm.status !== "arming") return { ok: false as const, reason: "state" as const };
+    if (arm.desiredState !== "armed") return { ok: false as const, reason: "disarmed" as const };
+    const bot = await ctx.db.get(arm.botId);
+    if (!bot || !bot.active || bot.disarmPending || bot.status !== "running") return { ok: false as const, reason: "blocked" as const };
+    if (arm.network !== hlNetwork()) return { ok: false as const, reason: "blocked" as const };
+    if (arm.network === "mainnet" && !(await isMainnetSpotDefenseApproved(ctx))) return { ok: false as const, reason: "blocked" as const };
+    if (!(await coverageAdmissibleForKey(ctx, arm.userId, spotDefenseCoverageKey(arm.botId), arm.effectiveNotionalUsd))) {
+      await ctx.db.patch(armId, { status: "failed", error: "[blocked_margin] cap/plan/suspensión (markArmSubmitting)", updatedAt: Date.now() });
+      return { ok: false as const, reason: "blocked" as const };
+    }
+    const now = Date.now();
+    const token = crypto.randomUUID();
+    await ctx.db.patch(armId, {
+      status: "submitting", submittedAt: now, updatedAt: now,
+      reconcileLeaseUntil: now + SPOT_DEFENSE_LEASE_MS, reconcileLeaseToken: token,
+    });
+    return { ok: true as const, token };
+  },
+});
+
+export const gateArmBeforeOrder = internalMutation({
+  args: { armId: v.id("spot_defense_arms"), token: v.string() },
+  handler: async (ctx, { armId, token }): Promise<any> => {
+    const arm = await ctx.db.get(armId);
+    if (!arm) return { ok: false as const };
+    if (arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (arm.status !== "submitting" || arm.desiredState !== "armed") return { ok: false as const };
+    if (arm.network !== hlNetwork()) return { ok: false as const };
+    if (arm.network === "mainnet" && !(await isMainnetSpotDefenseApproved(ctx))) return { ok: false as const };
+    const bot = await ctx.db.get(arm.botId);
+    if (!bot || !bot.active || bot.disarmPending || bot.status !== "running") return { ok: false as const };
+    if (!(await coverageAdmissibleForKey(ctx, arm.userId, spotDefenseCoverageKey(arm.botId), arm.effectiveNotionalUsd))) {
+      await ctx.db.patch(armId, {
+        status: "failed", error: "[blocked_margin] cap/plan/suspensión (gateArmBeforeOrder)",
+        reconcileLeaseUntil: 0, reconcileLeaseToken: undefined, updatedAt: Date.now(),
+      });
+      return { ok: false as const };
+    }
+    await ctx.db.patch(armId, { reconcileLeaseUntil: Date.now() + SPOT_DEFENSE_LEASE_MS, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
+// --- Queries / comandos de UI -------------------------------------------------------------------
+
+export const listMySpotDefenseBots = query({
+  args: {},
+  handler: async (ctx) => {
+    const user = await getUserOrNull(ctx);
+    if (!user) return [];
+    return await ctx.db.query("spot_defense_bots").withIndex("by_user", (q) => q.eq("userId", user._id)).collect();
+  },
+});
+
+// Detalle con el arm vivo + sus órdenes (topadas), para la tarjeta en vivo (Fase 4).
+export const getSpotDefenseDetail = query({
+  args: { botId: v.id("spot_defense_bots") },
+  handler: async (ctx, { botId }) => {
+    const user = await getUserOrNull(ctx);
+    if (!user) return null;
+    const bot = await ctx.db.get(botId);
+    if (!bot || bot.userId !== user._id) return null;
+    const arms = await ctx.db.query("spot_defense_arms").withIndex("by_bot_generation", (q) =>
+      q.eq("botId", botId)).collect();
+    const liveArm = arms.find((a) => !ARM_TERMINAL.has(a.status)) ?? null;
+    let orders: any[] = [];
+    if (liveArm) {
+      orders = (await ctx.db.query("spot_defense_orders").withIndex("by_arm_role", (q) =>
+        q.eq("armId", liveArm._id)).collect()).slice(0, 50);
+    }
+    return { bot, arm: liveArm, orders };
+  },
+});
+
+// Pausa: marca disarmPending; el motor (Fase 3) cancela en HL y desactiva al confirmar.
+export const pauseSpotDefenseBot = mutation({
+  args: { botId: v.id("spot_defense_bots") },
+  handler: async (ctx, { botId }) => {
+    const user = await requireBotManager(ctx);
+    const bot = await ctx.db.get(botId);
+    if (!bot || bot.userId !== user._id) throw new Error("Bot no encontrado.");
+    await ctx.db.patch(botId, { disarmPending: true, disarmRequestedAt: Date.now(), updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});

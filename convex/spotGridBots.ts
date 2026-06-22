@@ -3,7 +3,7 @@ import { mutation, query, internalMutation, internalQuery } from "./_generated/s
 import type { QueryCtx, MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { requireAdmin, requireBotManager, requireTradeLive, getUserOrNull, writeAdminLog, hasPermission } from "./helpers";
-import { elog } from "./log";
+import { elog, safeError } from "./log";
 import { toHlCloid, spotGridCloidInput } from "./cloids";   // (JAV-92) cloid determinista (helper hoja, no-node)
 import { hlNetwork } from "./hlNetwork";   // (JAV-92) red efectiva del backend (fuente de verdad)
 
@@ -73,12 +73,36 @@ async function getConfigBool(ctx: QueryCtx | MutationCtx, key: string): Promise<
   return row?.value === true;
 }
 
+// (JAV-94) Feature flag GLOBAL del módulo Spot Grid (testnet+mainnet). Ausente = encendido (legacy-safe);
+// solo `{enabled:false}` lo apaga. Distinto del gate de mainnet (MAINNET_GATE_KEY).
+const SPOT_GRID_MODULE_KEY = "spotGridModuleEnabled";
+async function isSpotGridModuleEnabled(ctx: QueryCtx | MutationCtx): Promise<boolean> {
+  const row = await ctx.db.query("system_config").withIndex("by_key", (q) => q.eq("key", SPOT_GRID_MODULE_KEY)).first();
+  return (row?.value as { enabled?: boolean } | undefined)?.enabled !== false;
+}
+
+// (JAV-94) Alerta de error al DUEÑO: registra en alert_history SOLO en la transición a "error" (no en cada
+// ronda del cron). El mensaje pasa por safeError + truncado (300) → nunca filtra secretos en el historial.
+const SPOT_GRID_ERR_MSG_CAP = 300;
+async function emitSpotGridErrorAlert(
+  ctx: MutationCtx, bot: { userId: Id<"users">; symbol: string; status: string }, newStatus?: string, errorMessage?: string,
+) {
+  if (newStatus !== "error" || bot.status === "error") return;   // solo en la transición running/… → error
+  const message = `Spot Grid ${bot.symbol}: ${safeError(errorMessage ?? "error")}`.slice(0, SPOT_GRID_ERR_MSG_CAP);
+  await ctx.db.insert("alert_history", {
+    userId: bot.userId, alertType: "spot_grid_error", pair: bot.symbol, message, timestamp: Date.now(),
+  });
+}
+
 // Guards de DB compartidos por preflight (query, ANTES de la RPC) y persist (mutation, atómico con el
 // insert): permisos (canManageBots + canTradeLive AMBOS), switches live-only, gate mainnet, ownership y
 // exclusividad TOTAL de cuenta. Devuelve el user (manager) y la credencial. Funciona en Query y Mutation.
 async function assertCreateGuards(
   ctx: QueryCtx | MutationCtx, hlAccountId: Id<"hl_api_credentials">, network: "mainnet" | "testnet",
 ) {
+  // (JAV-94) Feature flag global del módulo: si está apagado, ni crear (este guard lo corre el preflight
+  // ANTES de cualquier RPC a HL, y también el persist).
+  if (!(await isSpotGridModuleEnabled(ctx))) throw new Error("Módulo Spot Grid deshabilitado.");
   // Crear infraestructura de bots = permiso de GESTIÓN; operar real = canTradeLive. AMBOS requeridos.
   const manager = await requireBotManager(ctx);
   await requireTradeLive(ctx);
@@ -124,6 +148,30 @@ export const setMainnetSpotGridApproval = mutation({
     if (existing) await ctx.db.patch(existing._id, { value });
     else await ctx.db.insert("system_config", { key: MAINNET_GATE_KEY, value });
     await writeAdminLog(ctx, admin.clerkId, "set_mainnet_spot_grid_approval", { enabled });
+    return { ok: true as const };
+  },
+});
+
+// (JAV-94) Feature flag GLOBAL del módulo Spot Grid (testnet+mainnet). Ausente = encendido.
+export const getSpotGridModuleEnabled = query({
+  args: {},
+  handler: async (ctx) => {
+    await requireAdmin(ctx);
+    const row = await ctx.db.query("system_config").withIndex("by_key", (q) => q.eq("key", SPOT_GRID_MODULE_KEY)).first();
+    // ausente = encendido (legacy-safe); devuelve el estado efectivo para el panel admin.
+    return { enabled: (row?.value as { enabled?: boolean } | undefined)?.enabled !== false };
+  },
+});
+
+export const setSpotGridModuleEnabled = mutation({
+  args: { enabled: v.boolean() },
+  handler: async (ctx, { enabled }) => {
+    const admin = await requireAdmin(ctx);
+    const existing = await ctx.db.query("system_config").withIndex("by_key", (q) => q.eq("key", SPOT_GRID_MODULE_KEY)).first();
+    const value = { enabled, updatedAt: Date.now(), updatedBy: admin.clerkId };
+    if (existing) await ctx.db.patch(existing._id, { value });
+    else await ctx.db.insert("system_config", { key: SPOT_GRID_MODULE_KEY, value });
+    await writeAdminLog(ctx, admin.clerkId, "set_spot_grid_module_enabled", { enabled });
     return { ok: true as const };
   },
 });
@@ -442,6 +490,7 @@ export const setSpotGridBootstrap = internalMutation({
   handler: async (ctx, a) => {
     const bot = await ctx.db.get(a.botId);
     if (!leaseOk(bot, a.token)) return { ok: false as const };
+    await emitSpotGridErrorAlert(ctx, bot!, a.status, a.errorMessage);   // (JAV-94) alerta al dueño en la transición a error
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
     for (const k of ["bootstrapPhase", "seedStatus", "seedQty", "seedAvgPx", "seedNotionalReal", "seedPercent", "liquidationSeq", "status", "errorMessage"] as const) {
       if (a[k] !== undefined) patch[k] = a[k];
@@ -563,6 +612,7 @@ export const setSpotGridStatus = internalMutation({
   handler: async (ctx, a) => {
     const bot = await ctx.db.get(a.botId);
     if (!leaseOk(bot, a.token)) return { ok: false as const };
+    await emitSpotGridErrorAlert(ctx, bot!, a.status, a.errorMessage);   // (JAV-94) antes del patch: detecta la transición
     const patch: Record<string, unknown> = { status: a.status, updatedAt: Date.now() };
     if (a.errorMessage !== undefined) patch.errorMessage = a.errorMessage;
     if (a.clearLease || a.status === "stopped") { patch.reconcileLeaseToken = undefined; patch.reconcileLeaseUntil = 0; }
@@ -704,6 +754,7 @@ export const assertSpotGridLiveAdmissibleInternal = internalQuery({
   handler: async (ctx, { botId }) => {
     const bot = await ctx.db.get(botId);
     if (!bot) return { ok: false as const, reason: "bot_not_found", policy: "error" as const };
+    if (!(await isSpotGridModuleEnabled(ctx))) return { ok: false as const, reason: "module_disabled", policy: "paused" as const };   // (JAV-94) flag global → pausa los vivos
     if (!(await getConfigBool(ctx, "tradingEnabled"))) return { ok: false as const, reason: "trading_disabled", policy: "paused" as const };
     if (await getConfigBool(ctx, "simulationMode")) return { ok: false as const, reason: "simulation_mode", policy: "paused" as const };
     const user = await ctx.db.get(bot.userId);

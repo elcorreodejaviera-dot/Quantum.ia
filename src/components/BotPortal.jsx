@@ -19,6 +19,7 @@ const ALERT_TYPE_LABELS = {
   out_of_range: 'Fuera de rango',
   apy_below: 'APY bajo umbral',
   price_cross: 'Precio cruza nivel',
+  spot_grid_error: 'Spot Grid en error',   // (JAV-94) alertas de error del Spot Grid en el historial
 };
 
 // Campos UI de bots que no están en el schema de Convex (trading config extendida)

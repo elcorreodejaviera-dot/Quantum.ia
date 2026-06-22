@@ -140,3 +140,67 @@ describe("gate live — red HL efectiva ≠ bot.network (JAV-92 ALTO#4/r3#1)", (
     }
   });
 });
+
+describe("(JAV-94) no-duplicación tras restart/takeover del worker", () => {
+  it("worker muere (lease vencido) → otro retoma; el token viejo queda fenced y NO duplica", async () => {
+    const t = makeConvexTest();
+    const { botId } = await t.run((ctx) => seedGridBot(ctx));
+    // Worker A toma el lease y "muere" a mitad de ronda.
+    const tokenA = (await t.mutation(internal.spotGridBots.claimSpotGridReconcile, { botId })).token!;
+    // Simula lease vencido (worker A nunca renovó ni liberó).
+    await t.run((ctx) => ctx.db.patch(botId, { reconcileLeaseUntil: Date.now() - 1 }));
+    // Worker B retoma (lease libre por vencimiento).
+    const claimB = await t.mutation(internal.spotGridBots.claimSpotGridReconcile, { botId });
+    expect(claimB.ok).toBe(true);
+    const tokenB = claimB.token!;
+    expect(tokenB).not.toEqual(tokenA);
+    const recArgs = { botId, side: "buy" as const, gridLevel: 0, generation: 1, cycleId: 0, assetId: 10120, price: 2900, quantity: 0.03, quoteSize: 87 };
+    // El worker MUERTO (token viejo) intenta escribir → fenced, sin tocar DB.
+    const stale = await t.mutation(internal.spotGridBots.recordSpotGridOrder, { ...recArgs, token: tokenA });
+    expect(stale.ok).toBe(false);
+    // El worker vivo escribe el MISMO nivel (cloid determinista) → inserta una vez; reintento idempotente.
+    const live1 = await t.mutation(internal.spotGridBots.recordSpotGridOrder, { ...recArgs, token: tokenB });
+    const live2 = await t.mutation(internal.spotGridBots.recordSpotGridOrder, { ...recArgs, token: tokenB });
+    expect(live2.existed).toBe(true);
+    expect(live2.orderId).toEqual(live1.orderId);
+    const count = (await t.run((ctx) => ctx.db.query("spot_grid_orders").withIndex("by_bot_status", (q) => q.eq("botId", botId).eq("status", "submitting")).collect())).length;
+    expect(count).toBe(1);   // ni el worker muerto ni el reintento duplicaron
+  });
+});
+
+describe("(JAV-94) alerta de error al dueño en alert_history", () => {
+  it("transición a error → 1 alerta; re-set error NO spamea; otro estado no alerta", async () => {
+    const t = makeConvexTest();
+    const { botId, userId } = await t.run((ctx) => seedGridBot(ctx));
+    const token = (await t.mutation(internal.spotGridBots.claimSpotGridReconcile, { botId })).token!;
+    await t.mutation(internal.spotGridBots.setSpotGridStatus, { botId, token, status: "error", errorMessage: "boom" });
+    await t.mutation(internal.spotGridBots.setSpotGridStatus, { botId, token, status: "error", errorMessage: "boom otra vez" });   // ya en error → no inserta
+    const hist = await t.run((ctx) => ctx.db.query("alert_history").withIndex("by_user_timestamp", (q) => q.eq("userId", userId)).collect());
+    expect(hist.length).toBe(1);
+    expect(hist[0].alertType).toBe("spot_grid_error");
+    expect(hist[0].pair).toBe("ETH");
+    expect(hist[0].message).toContain("boom");
+    // Otro bot que pasa a paused → ninguna alerta.
+    const { botId: b2, userId: u2 } = await t.run((ctx) => seedGridBot(ctx, { symbol: "BTC" }));
+    const tk2 = (await t.mutation(internal.spotGridBots.claimSpotGridReconcile, { botId: b2 })).token!;
+    await t.mutation(internal.spotGridBots.setSpotGridStatus, { botId: b2, token: tk2, status: "paused" });
+    const hist2 = await t.run((ctx) => ctx.db.query("alert_history").withIndex("by_user_timestamp", (q) => q.eq("userId", u2)).collect());
+    expect(hist2.length).toBe(0);
+  });
+});
+
+describe("(JAV-94) feature flag global del módulo Spot Grid", () => {
+  it("flag off → admisibilidad paused/module_disabled; ausente = encendido", async () => {
+    const t = makeConvexTest();
+    const { botId } = await t.run((ctx) => seedGridBot(ctx));
+    // Ausente: el check del módulo pasa (no es module_disabled; cae al siguiente gate, trading_disabled).
+    const ausente: any = await t.query(internal.spotGridBots.assertSpotGridLiveAdmissibleInternal, { botId });
+    expect(ausente.reason).not.toBe("module_disabled");
+    // Apagado explícito → pausa los vivos.
+    await t.run((ctx) => ctx.db.insert("system_config", { key: "spotGridModuleEnabled", value: { enabled: false } }));
+    const off: any = await t.query(internal.spotGridBots.assertSpotGridLiveAdmissibleInternal, { botId });
+    expect(off.ok).toBe(false);
+    expect(off.reason).toBe("module_disabled");
+    expect(off.policy).toBe("paused");
+  });
+});

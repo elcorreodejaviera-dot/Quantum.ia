@@ -365,6 +365,11 @@ export default function AdminView() {
   const setSgGate = useMutation(api.spotGridBots.setMainnetSpotGridApproval);
   const sgGateOn = sgGate?.enabled === true;
   const [sgGatePending, setSgGatePending] = React.useState(false);
+  // (JAV-94) Feature flag GLOBAL del módulo Spot Grid (testnet+mainnet). Ausente = encendido.
+  const sgModule = useQuery(api.spotGridBots.getSpotGridModuleEnabled, isAdmin ? {} : 'skip');
+  const setSgModule = useMutation(api.spotGridBots.setSpotGridModuleEnabled);
+  const sgModuleOn = sgModule?.enabled !== false;
+  const [sgModulePending, setSgModulePending] = React.useState(false);
   const simOn = simConfig?.value === true;
   const tradingOn = tradingConfig?.value === true;
 
@@ -401,6 +406,7 @@ export default function AdminView() {
         <span className={`av-pill ${tradingOn ? 'green' : 'faint'}`}>{tradingOn ? 'Trading LIVE' : 'Trading OFF'}</span>
         <span className={`av-pill ${simOn ? 'amber' : 'faint'}`}>{simOn ? 'SIM ON' : 'SIM OFF'}</span>
         <span className={`av-pill ${sgGateOn ? 'green' : 'faint'}`}>{sgGateOn ? 'Spot Grid mainnet ✓' : 'Spot Grid mainnet ✗'}</span>
+        <span className={`av-pill ${sgModuleOn ? 'green' : 'amber'}`}>{sgModuleOn ? 'Módulo Spot Grid ON' : 'Módulo Spot Grid OFF'}</span>
         <div className="av-actions">
           <button className="av-mini" onClick={() => setSim({ enabled: !simOn })}>{simOn ? 'Desactivar SIM' : 'Activar SIM'}</button>
           <button className="av-mini" disabled={simOn} onClick={() => setTrading({ enabled: !tradingOn })}>{tradingOn ? 'Desactivar LIVE' : 'Activar LIVE'}</button>
@@ -418,6 +424,20 @@ export default function AdminView() {
               }
             }}
           >{sgGatePending ? 'Aplicando…' : (sgGateOn ? 'Revocar Spot Grid mainnet' : 'Aprobar Spot Grid mainnet')}</button>
+          <button
+            className="av-mini"
+            disabled={sgModulePending || sgModule === undefined}
+            onClick={async () => {
+              if (sgModulePending || sgModule === undefined) return;
+              if (sgModuleOn && !window.confirm('Apagar el módulo Spot Grid PAUSA todos los grids (testnet y mainnet) y bloquea crear nuevos. ¿Continuar?')) return;
+              setSgModulePending(true);
+              try {
+                await setSgModule({ enabled: !sgModuleOn });
+              } finally {
+                setSgModulePending(false);
+              }
+            }}
+          >{sgModulePending ? 'Aplicando…' : (sgModuleOn ? 'Apagar módulo Spot Grid' : 'Encender módulo Spot Grid')}</button>
           <button className="av-kill" onClick={() => setTrading({ enabled: false })}>🛑 DETENER TODO</button>
         </div>
       </div>

@@ -295,11 +295,21 @@ export const reconcileSpotDefenseArm = internalAction({
           }
           const renew = await ctx.runMutation(internal.spotDefenseBots.renewSpotDefenseReconcile, { armId, token });
           if (!renew.ok) return { skipped: "lease_lost" };
-          // ¿El SL llenó? (observed + fills). Determina closeReason (gobierna el auto-rearm en 3c-2).
+          // ¿El SL llenó? (observed + fills). Determina closeReason (gobierna el auto-rearm).
           let slConfirmed = slOrder?.observedStatus === "filled";
           if (!slConfirmed && slOrder) {
             const sf = await fillsByCloid(info, user, slOrder.cloid);
             if (sf.size > 0) slConfirmed = true;
+          }
+          // (Codex 3c-3ab r3) Rotación BE en curso: si el SL BE NUEVO (cloid determinista, attempt+1) se
+          // llenó ANTES de quedar trackeado (la fila aún tiene el oldCloid), también es un cierre por SL.
+          // Sin esto, un cierre por el SL break-even se etiquetaría "manual" y NO dispararía auto-rearm.
+          if (!slConfirmed && arm.beMoved !== true && slOrder) {
+            const beCloid = await toHlCloid(spotDefenseCloidInput(String(armId), arm.generation, "sl", (arm.slAttempts ?? 0) + 1));
+            if (beCloid.toLowerCase() !== slOrder.cloid.toLowerCase()) {
+              const bf = await fillsByCloid(info, user, beCloid);
+              if (bf.size > 0) slConfirmed = true;
+            }
           }
           // (Codex 3c-1 NO-GO #2) NO terminalizar hasta confirmar por prueba negativa que NINGUNA orden
           // propia sigue viva en el book (un trigger residuo podría dispararse sobre un arm ya cerrado).

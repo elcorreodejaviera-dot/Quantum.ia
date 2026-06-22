@@ -311,7 +311,7 @@ function GridDetail({ botId, onDeleted }) {
   if (detail === undefined) return <p className="sg-muted">Cargando…</p>
   if (detail === null) return <p className="sg-muted">Grid no encontrado o sin acceso.</p>
 
-  const { bot, stats, openOrders, openOrdersTruncated, recentCycles } = detail
+  const { bot, stats, accounting, openOrders, openOrdersTruncated, recentCycles } = detail
 
   async function onPause() {
     setBusy('pause'); setError(null)
@@ -319,8 +319,18 @@ function GridDetail({ botId, onDeleted }) {
   }
   async function onStop() {
     if (!window.confirm('Detener el grid CANCELA todas sus órdenes reales en Hyperliquid. ¿Continuar?')) return
+    // (JAV-103) Preguntar si liquidar la bolsa de inventario sembrado. OK = vender a mercado (LIMIT IOC);
+    // Cancelar = dejar la base en la cuenta HL (el usuario decide después).
+    const held = Number(accounting?.heldQty) || 0
+    let liquidateInventory = false
+    if (held > 0) {
+      liquidateInventory = window.confirm(
+        `Este grid tiene ${held} ${bot.baseAsset} de inventario.\n\n` +
+        'Aceptar = VENDER el inventario a mercado al detener.\n' +
+        'Cancelar = dejar la base en tu cuenta HL (no se vende).')
+    }
     setBusy('stop'); setError(null)
-    try { await stopBot({ botId, expectedNetwork: HL_NETWORK }) }
+    try { await stopBot({ botId, expectedNetwork: HL_NETWORK, liquidateInventory }) }
     catch (e) { setError(e?.message ?? String(e)) } finally { setBusy(null) }
   }
   async function onDelete() {
@@ -340,8 +350,13 @@ function GridDetail({ botId, onDeleted }) {
       {bot.status === 'error' && bot.errorMessage && <p className="sg-error">⚠ {bot.errorMessage}</p>}
 
       <div className="sg-kpis">
-        <Kpi label="Ganancias totales" val={usd(stats.totalNetProfit)} accent={stats.totalNetProfit > 0}
-          sub={stats.truncated ? `parcial (≥${stats.cycleCap} ciclos)` : 'profit neto cerrado'} />
+        {/* (JAV-103) Equity marcado a mercado = realizado + flotante → comparable con plataformas que siembran (BingX). */}
+        <Kpi label="Ganancia total" val={usd(accounting?.totalEquityPnl ?? stats.totalNetProfit)} accent={(accounting?.totalEquityPnl ?? stats.totalNetProfit) > 0}
+          sub="realizado + flotante (a mercado)" />
+        <Kpi label="Realizado" val={usd(accounting?.realizedNetProfit ?? stats.totalNetProfit)} accent={(accounting?.realizedNetProfit ?? stats.totalNetProfit) > 0}
+          sub={stats.truncated ? `parcial (≥${stats.cycleCap} ciclos)` : 'ciclos cerrados'} />
+        <Kpi label="Flotante" val={usd(accounting?.floatingPnl ?? 0)} accent={(accounting?.floatingPnl ?? 0) > 0}
+          sub={accounting?.priceStale ? 'precio desactualizado' : `${accounting?.heldQty ?? 0} ${bot.baseAsset} en mano`} />
         <Kpi label="Arbitrajes" val={stats.truncated ? `≥${stats.cycleCap}` : String(stats.cyclesCount)}
           sub={stats.truncated ? 'tope de lectura alcanzado' : 'ciclos cerrados'} />
         <Kpi label="Duración" val={durationText(bot.createdAt)} sub="desde la creación" />

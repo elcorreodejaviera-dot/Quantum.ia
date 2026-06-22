@@ -247,8 +247,13 @@ export type SpotLimitParams = {
   /** Tamaño ya formateado a szDecimals. */
   sizeStr: string;
   cloid: `0x${string}`;
-  /** Gtc (resting maker, por defecto) | Alo (post-only). Spot MVP: sin market/IOC. */
-  tif?: "Gtc" | "Alo";
+  /**
+   * Gtc (resting maker, por defecto) | Alo (post-only) | Ioc (marketable: cruza el spread y lo que no
+   * llena al instante se cancela — NO queda resting). (JAV-103) "Ioc" sobre un LIMIT agresivo es la forma
+   * de "comprar/vender a mercado" RESPETANDO el invariante "solo LIMIT" (no se usa orden market nativa):
+   * para la SIEMBRA de inventario y la LIQUIDACIÓN al detener.
+   */
+  tif?: "Gtc" | "Alo" | "Ioc";
 };
 
 /**

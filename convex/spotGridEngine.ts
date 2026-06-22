@@ -32,6 +32,15 @@ const ABS_MAX_GRID_LEVELS = 50;
 // precio en vivo (como manual/legacy) → nunca se colocan compras sobre un ancla vencida.
 const ANCHOR_MAX_AGE_MS = 5 * 60 * 1000;
 
+// (JAV-103) Siembra de inventario (tipo BingX Infinity).
+const M_MIN = 2;                       // mínimo de niveles de COMPRA (abajo)
+const K_MIN = 2;                       // mínimo de niveles de VENTA sembrados (arriba)
+const UPSIDE_CAP_FRAC = 0.5;           // cuando el suelo NO cabe, la venta nunca toma > la mitad del presupuesto
+const SEED_LEVEL = -1;                 // nivel sentinela de la orden de COMPRA semilla
+const LIQ_LEVEL = -2;                  // nivel sentinela de la orden de liquidación
+const DEFAULT_SEED_MAX_SLIPPAGE = 0.003;   // slippage del LIMIT IOC de semilla/liquidación si no hay config
+const SEED_GRACE_MS = 30_000;          // espera tras enviar el IOC de semilla antes de declararlo fallido
+
 // ---- calculateGridLevels (PURA, exportada para tests) -------------------------------------------
 export type GridLevel = {
   idx: number; buyPrice: number; buyPriceStr: string; quantity: number; sizeStr: string;
@@ -156,6 +165,114 @@ export function deriveAutoGrid(p: {
   return { gridCount: chosen, orderSize, capped, coveredFloor, nFull, nCapital, minNotEff };
 }
 
+// ---- (JAV-103) calculateSellLadder (PURA): niveles de VENTA sembrados por ENCIMA del precio ----------
+export type SellLevel = { idx: number; sellPrice: number; sellPriceStr: string; quantity: number; sizeStr: string; repostBuyPrice: number };
+
+/**
+ * Niveles de venta geométricos POR ENCIMA del precio actual (espejo de calculateGridLevels). QUOTE-driven
+ * (planning): `quantity = floorSpotSize(orderSize/sellPrice)`. Cada SELL guarda su `repostBuyPrice`
+ * (= roundSpotPrice(sellPrice/step, floor)) para la reposición sin BUY previa (§3-C). Rechaza un nivel si
+ * la cantidad cae ≤0 o bajo min-notional → el oráculo de deriveSeededGrid baja N hasta que entren K exactos.
+ */
+export function calculateSellLadder(p: {
+  currentPrice: number; gridProfitPercent: number; orderSize: number; sellCount: number; szDecimals: number;
+}): { levels: SellLevel[]; rejected: number } {
+  const levels: SellLevel[] = [];
+  let rejected = 0;
+  const step = 1 + p.gridProfitPercent / 100;
+  if (!(step > 1) || !(p.currentPrice > 0) || !(p.orderSize > 0)) return { levels, rejected };
+  let raw = p.currentPrice * step;   // primera venta justo por encima del precio
+  for (let i = 0; i < p.sellCount; i++, raw = raw * step) {
+    const sellPrice = roundSpotPrice(raw, p.szDecimals, "ceil");
+    const quantity = floorSpotSize(p.orderSize / sellPrice, p.szDecimals);
+    if (!(quantity > 0) || sellPrice * quantity < MIN_SPOT_NOTIONAL_USD) { rejected++; continue; }
+    const repostBuyPrice = roundSpotPrice(sellPrice / step, p.szDecimals, "floor");
+    levels.push({ idx: i, sellPrice, sellPriceStr: String(sellPrice), quantity, sizeStr: String(quantity), repostBuyPrice });
+  }
+  return { levels, rejected };
+}
+
+/**
+ * (JAV-103) Asignación BASE-driven de las SELL sembradas tras conocer `seedQtyReal` (lo realmente comprado).
+ * Reparte `seedQtyReal` en KReal niveles uniformes: `perLevelQty = floorSpotSize(seedQtyReal/K)`. Baja K
+ * desde `plannedK` hasta que TODOS los niveles cumplan min-notional (basta el de menor precio = el 1º) y
+ * K ≥ K_MIN. Σ(perLevelQty·K) ≤ seedQtyReal por construcción; el residual (<1 lote) es dust (queda en
+ * inventario). Devuelve KReal=0 si ni K_MIN cabe → el caller hace fail-closed.
+ */
+export function allocateSeededSells(p: {
+  currentPrice: number; gridProfitPercent: number; seedQtyReal: number; plannedK: number; szDecimals: number;
+}): { KReal: number; perLevelQty: number; levels: SellLevel[] } {
+  const step = 1 + p.gridProfitPercent / 100;
+  const startK = Math.min(p.plannedK, ABS_MAX_GRID_LEVELS);
+  for (let K = startK; K >= K_MIN; K--) {
+    const perLevelQty = floorSpotSize(p.seedQtyReal / K, p.szDecimals);
+    if (!(perLevelQty > 0)) continue;
+    const levels: SellLevel[] = [];
+    let ok = true;
+    let raw = p.currentPrice * step;
+    for (let i = 0; i < K; i++, raw = raw * step) {
+      const sellPrice = roundSpotPrice(raw, p.szDecimals, "ceil");
+      if (sellPrice * perLevelQty < MIN_SPOT_NOTIONAL_USD) { ok = false; break; }
+      const repostBuyPrice = roundSpotPrice(sellPrice / step, p.szDecimals, "floor");
+      levels.push({ idx: i, sellPrice, sellPriceStr: String(sellPrice), quantity: perLevelQty, sizeStr: String(perLevelQty), repostBuyPrice });
+    }
+    if (ok && levels.length === K) return { KReal: K, perLevelQty, levels };
+  }
+  return { KReal: 0, perLevelQty: 0, levels: [] };
+}
+
+/**
+ * (JAV-103, PURA, exportada para tests) Deriva el reparto SEEDED del grid: M niveles de COMPRA abajo +
+ * K niveles de VENTA sembrados arriba, con `orderSize` uniforme. Oráculo-dirigida (como deriveAutoGrid):
+ * M/K salen de `nFull` (rango) y `nCapital` (capital), con guarda dura M≥M_MIN y K≥K_MIN o ERROR explícito.
+ * `seedQtyTarget` (en BASE) = Σ qty de las K SELLs = lo que hay que comprar en la semilla.
+ */
+export function deriveSeededGrid(p: {
+  currentPrice: number; minPrice: number; gridProfitPercent: number;
+  investmentAmount: number; szDecimals: number; feeRate: number; minNotional?: number;
+}): { M: number; K: number; orderSize: number; seedQtyTarget: number; seedNotional: number; seedPercent: number; coveredFloor: number; capped: boolean } {
+  const minNotional = p.minNotional ?? MIN_SPOT_NOTIONAL_USD;
+  for (const [k, val] of [["currentPrice", p.currentPrice], ["minPrice", p.minPrice],
+    ["investmentAmount", p.investmentAmount], ["gridProfitPercent", p.gridProfitPercent]] as const) {
+    if (!Number.isFinite(val) || !(val > 0)) throw new Error(`deriveSeededGrid: ${k} debe ser finito > 0.`);
+  }
+  if (!Number.isFinite(p.feeRate) || p.feeRate < 0) throw new Error("deriveSeededGrid: feeRate debe ser finito ≥ 0.");
+  if (!(p.gridProfitPercent >= 0.5 && p.gridProfitPercent <= 10)) throw new Error("deriveSeededGrid: gridProfitPercent fuera de [0.5, 10].");
+  if (!(p.minPrice < p.currentPrice)) throw new Error("deriveSeededGrid: el suelo (minPrice) debe estar por debajo del precio actual.");
+
+  const step = 1 + p.gridProfitPercent / 100;
+  const sizeTick = 10 ** (-p.szDecimals);
+  const minNotEff = minNotional + p.currentPrice * sizeTick;
+  const nFull = Math.floor(Math.log(p.currentPrice / p.minPrice) / Math.log(step));
+  const nCapital = Math.floor(p.investmentAmount / minNotEff);
+  if (nFull < M_MIN) throw new Error("deriveSeededGrid: rango demasiado estrecho para ≥2 compras (sube el % o baja el suelo).");
+  if (nCapital < M_MIN + K_MIN) throw new Error("deriveSeededGrid: capital insuficiente para sembrar (≥2 compras y ≥2 ventas con el mínimo de HL). Sube la inversión.");
+
+  for (let N = Math.min(nCapital, ABS_MAX_GRID_LEVELS); N >= M_MIN + K_MIN; N--) {
+    const orderSize = floorQuoteForBudget(p.investmentAmount, N).orderSize;
+    if (orderSize < minNotional) continue;
+    let M: number, K: number;
+    if (nFull <= N - K_MIN) { M = nFull; K = N - M; }                 // el suelo CABE → el extra va al upside
+    else { K = Math.min(Math.max(Math.round(N * UPSIDE_CAP_FRAC), K_MIN), N - M_MIN); M = N - K; }
+    if (M < M_MIN || K < K_MIN) continue;
+    const buys = calculateGridLevels({
+      currentPrice: p.currentPrice, minPrice: p.minPrice, gridProfitPercent: p.gridProfitPercent,
+      orderSize, gridCount: M, szDecimals: p.szDecimals, feeRate: p.feeRate,
+    });
+    const sells = calculateSellLadder({
+      currentPrice: p.currentPrice, gridProfitPercent: p.gridProfitPercent, orderSize, sellCount: K, szDecimals: p.szDecimals,
+    });
+    if (buys.levels.length === M && sells.levels.length === K) {
+      const seedQtyTarget = sells.levels.reduce((s, l) => s + l.quantity, 0);
+      const seedNotional = seedQtyTarget * p.currentPrice;
+      const coveredFloor = buys.levels[buys.levels.length - 1].buyPrice;
+      const capped = nFull > M;   // no se alcanzó el suelo
+      return { M, K, orderSize, seedQtyTarget, seedNotional, seedPercent: seedNotional / p.investmentAmount, coveredFloor, capped };
+    }
+  }
+  throw new Error("deriveSeededGrid: no se pueden colocar ≥2 compras y ≥2 ventas válidas (ajusta suelo/%/capital).");
+}
+
 /**
  * (JAV-101, PURA, exportada para tests) Decide el precio de la COLOCACIÓN INICIAL.
  * - Grid AUTO-derivado (autoDerived) con currentPrice ancla válido (> minPrice): usa ese MISMO precio con
@@ -204,11 +321,43 @@ async function gatedPlace(ctx: any, exchange: any, botId: any, token: string, p:
   return { ok: true, oid };
 }
 
+// (JAV-103) Σ de los fills de HL que casan un cloid (idempotencia de IOC: el resultado real de la semilla/
+// liquidación se LEE de los fills, nunca se asume). Devuelve cantidad, VWAP y fee acumulada.
+async function fillsForCloid(info: any, address: string, cloid: string, sinceMs?: number): Promise<{ qty: number; avgPx: number; feeUsd: number }> {
+  const fills = await getSpotFills(info, address, sinceMs);
+  const target = cloid.toLowerCase();
+  let qty = 0, notional = 0, feeUsd = 0;
+  for (const f of fills) {
+    if ((f.cloid ?? "") !== target) continue;
+    qty += f.sz; notional += f.sz * f.px; feeUsd += Math.abs(f.fee);
+  }
+  return { qty, avgPx: qty > 0 ? notional / qty : 0, feeUsd };
+}
+
+// (JAV-103, ALTO-L) Envío GATEADO de un LIMIT IOC (semilla/liquidación) con los MISMOS gates que
+// gatedPlace: renew lease + assertLiveAdmissible (incluye red===bot.network) ANTES de enviar. Idempotente:
+// si el cloid YA tiene fills, NO reenvía (evita doble compra/venta de un IOC que no queda resting). El
+// resultado real se resuelve por fills (el caller los relee).
+async function gatedPlaceIoc(ctx: any, exchange: any, info: any, address: string, botId: any, token: string, p: {
+  assetId: number; isBuy: boolean; priceStr: string; sizeStr: string; cloid: string; sinceMs?: number;
+}): Promise<{ ok: boolean; gateBlocked?: boolean; alreadyFilled?: boolean; qty: number; avgPx: number; feeUsd: number }> {
+  const renew: any = await ctx.runMutation(internal.spotGridBots.renewSpotGridReconcile, { botId, token });
+  if (!renew.ok) return { ok: false, gateBlocked: true, qty: 0, avgPx: 0, feeUsd: 0 };
+  const live: any = await ctx.runQuery(internal.spotGridBots.assertSpotGridLiveAdmissibleInternal, { botId });
+  if (!live.ok) return { ok: false, gateBlocked: true, qty: 0, avgPx: 0, feeUsd: 0 };
+  const pre = await fillsForCloid(info, address, p.cloid, p.sinceMs);
+  if (pre.qty > 0) return { ok: true, alreadyFilled: true, ...pre };   // ya ejecutado: NO reenviar
+  await placeSpotLimit(exchange, { assetId: p.assetId, isBuy: p.isBuy, priceStr: p.priceStr, sizeStr: p.sizeStr, cloid: p.cloid as `0x${string}`, tif: "Ioc" });
+  const post = await fillsForCloid(info, address, p.cloid, p.sinceMs);
+  return { ok: true, ...post };
+}
+
 // Coloca una orden bajo el contrato DB-intent (ALTO#1): record `submitting` → gatedPlace → mark `open`.
 async function placeOrder(ctx: any, exchange: any, args: {
   botId: any; token: string; side: "buy" | "sell"; gridLevel: number; generation: number; cycleId: number;
   assetId: number; price: number; quantity: number; priceStr: string; sizeStr: string;
   pairedOrderId?: any; tranche?: number; costBasis?: number; openCloids: Set<string>;
+  kind?: "grid" | "seed" | "liquidation"; repostBuyPrice?: number;
 }): Promise<{ ok: boolean; cloid?: string }> {
   const rec = await ctx.runMutation(internal.spotGridBots.recordSpotGridOrder, {
     botId: args.botId, token: args.token, side: args.side, gridLevel: args.gridLevel,
@@ -217,6 +366,8 @@ async function placeOrder(ctx: any, exchange: any, args: {
     ...(args.pairedOrderId ? { pairedOrderId: args.pairedOrderId } : {}),
     ...(args.tranche !== undefined ? { tranche: args.tranche } : {}),
     ...(args.costBasis !== undefined ? { costBasis: args.costBasis } : {}),
+    ...(args.kind ? { kind: args.kind } : {}),
+    ...(args.repostBuyPrice !== undefined ? { repostBuyPrice: args.repostBuyPrice } : {}),
   });
   if (!rec.ok) return { ok: false };
   try {
@@ -228,6 +379,126 @@ async function placeOrder(ctx: any, exchange: any, args: {
   } catch (e) {
     elog("spotgrid", "place_failed", { botId: String(args.botId), side: args.side, err: safeError(e) });
     return { ok: false, cloid: rec.cloid };
+  }
+}
+
+// ---- (JAV-103) Bootstrap SEEDED por fases (semilla → SELLs → BUYs) -------------------------------
+// Idempotente y re-entrante: cada fase resuelve su estado contra HL antes de (re)enviar y avanza
+// `bootstrapPhase` al confirmarla. NO depende de "no hay órdenes de la generación". Solo se ejecuta con el
+// bot running. Las fases se encadenan en la misma ronda cuando ya están confirmadas.
+async function runSeededBootstrap(ctx: any, bot: any, token: string, clients: Clients, resolved: any, szDecimals: number): Promise<void> {
+  const botId = bot._id;
+  const anchorPrice = pickInitialPlacementPrice(bot, Date.now()) ?? await getSpotPrice(clients.info, resolved);
+  // Reparto determinista desde los MISMOS parámetros que en la creación → prometido==colocado.
+  let derived: ReturnType<typeof deriveSeededGrid>;
+  try {
+    derived = deriveSeededGrid({
+      currentPrice: anchorPrice, minPrice: bot.minPrice, gridProfitPercent: bot.gridProfitPercent,
+      investmentAmount: bot.investmentAmount, szDecimals, feeRate: bot.feeRate,
+    });
+  } catch (e) {
+    await ctx.runMutation(internal.spotGridBots.setSpotGridBootstrap, { botId, token, seedStatus: "failed", status: "error", errorMessage: safeError(e) });
+    return;
+  }
+  const step = 1 + bot.gridProfitPercent / 100;
+
+  // ---- FASE "seed": comprar el inventario (LIMIT IOC agresivo), EXACTAMENTE una vez ----
+  if (bot.bootstrapPhase === "seed") {
+    const slip = (await ctx.runQuery(internal.spotGridBots.getSeedMaxSlippageInternal, {})).seedMaxSlippage;
+    const seedLimit = roundSpotPrice(anchorPrice * (1 + slip), szDecimals, "ceil");
+    const seedQty = floorSpotSize(derived.seedQtyTarget, szDecimals);
+    if (!(seedQty > 0) || seedLimit * seedQty < MIN_SPOT_NOTIONAL_USD || seedLimit * seedQty > bot.investmentAmount) {
+      await ctx.runMutation(internal.spotGridBots.setSpotGridBootstrap, { botId, token, seedStatus: "failed", status: "error", errorMessage: "semilla inválida (qty/notional/exposición)" });
+      return;
+    }
+    // Orden semilla (idempotente por cloid). recordSpotGridOrder computa el cloid (kind=seed).
+    const rec: any = await ctx.runMutation(internal.spotGridBots.recordSpotGridOrder, {
+      botId, token, side: "buy", gridLevel: SEED_LEVEL, generation: bot.generation, cycleId: 0,
+      assetId: bot.assetId, price: seedLimit, quantity: seedQty, quoteSize: seedLimit * seedQty, kind: "seed",
+    });
+    if (!rec.ok) return;
+    const seedCloid = rec.cloid;
+    const resolveSeed = async (qty: number, avgPx: number, feeUsd: number) => {
+      const seedQtyReal = floorSpotSize(qty, szDecimals);
+      await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, {
+        botId, token, cloid: seedCloid, status: "filled", filledQty: qty, avgFillPx: avgPx, filledFeeUsd: feeUsd, remainingQty: 0,
+      });
+      const alloc = allocateSeededSells({ currentPrice: anchorPrice, gridProfitPercent: bot.gridProfitPercent, seedQtyReal, plannedK: derived.K, szDecimals });
+      if (alloc.KReal < K_MIN) {   // parcial NO usable → fail-closed (inventario visible/liquidable)
+        await ctx.runMutation(internal.spotGridBots.setSpotGridBootstrap, { botId, token, seedStatus: "failed", seedQty: seedQtyReal, seedAvgPx: avgPx, seedNotionalReal: seedQtyReal * avgPx, status: "error", errorMessage: "semilla insuficiente para ≥2 ventas" });
+        return false;
+      }
+      await ctx.runMutation(internal.spotGridBots.setSpotGridBootstrap, {
+        botId, token, seedStatus: "done", seedQty: seedQtyReal, seedAvgPx: avgPx, seedNotionalReal: seedQtyReal * avgPx, bootstrapPhase: "sells",
+      });
+      return true;
+    };
+    const pre = await fillsForCloid(clients.info, clients.address, seedCloid, bot.fillCursor ?? 0);
+    if (pre.qty > 0) { if (!(await resolveSeed(pre.qty, pre.avgPx, pre.feeUsd))) return; }
+    else {
+      const ord: any = await ctx.runQuery(internal.spotGridBots.getSpotGridOrderByCloidInternal, { botId, cloid: seedCloid });
+      const sent = (ord?.attempt ?? 1) >= 2;
+      if (!sent) {
+        const r = await gatedPlaceIoc(ctx, clients.exchange, clients.info, clients.address, botId, token, {
+          assetId: bot.assetId, isBuy: true, priceStr: String(seedLimit), sizeStr: String(seedQty), cloid: seedCloid, sinceMs: bot.fillCursor ?? 0,
+        });
+        if (r.gateBlocked) return;   // reintenta próxima ronda (attempt sigue en 1)
+        await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: seedCloid, status: "submitting", incAttempt: true });
+        if (r.qty > 0) { if (!(await resolveSeed(r.qty, r.avgPx, r.feeUsd))) return; }
+        else return;   // sin fills aún: confirmar en la próxima ronda por fills
+      } else {
+        // Ya enviado y sin fills: esperar grace; si pasa, fail-closed (NO reenviar un IOC → evita doble compra).
+        if (Date.now() - (ord?.submittedAt ?? ord?.createdAt ?? Date.now()) < SEED_GRACE_MS) return;
+        await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: seedCloid, status: "failed", errorMessage: "semilla sin fills tras grace" });
+        await ctx.runMutation(internal.spotGridBots.setSpotGridBootstrap, { botId, token, seedStatus: "failed", status: "error", errorMessage: "semilla no ejecutada (IOC sin fill)" });
+        return;
+      }
+    }
+    bot = await ctx.runQuery(internal.spotGridBots.getSpotGridBotInternal, { botId });   // refresca fase
+    if (!bot || bot.bootstrapPhase !== "sells") return;
+  }
+
+  // ---- FASE "sells": colocar las SELLs sembradas (base-driven sobre seedQtyReal) ----
+  if (bot.bootstrapPhase === "sells") {
+    const seedQtyReal = bot.seedQty ?? 0;
+    const seedBasis = bot.seedAvgPx ?? anchorPrice;
+    const alloc = allocateSeededSells({ currentPrice: anchorPrice, gridProfitPercent: bot.gridProfitPercent, seedQtyReal, plannedK: derived.K, szDecimals });
+    if (alloc.KReal < K_MIN) {
+      await ctx.runMutation(internal.spotGridBots.setSpotGridBootstrap, { botId, token, seedStatus: "failed", status: "error", errorMessage: "semilla insuficiente para ≥2 ventas (fase sells)" });
+      return;
+    }
+    const openOrders = await getOpenSpotOrders(clients.info, clients.address);
+    const openCloids = new Set(openOrders.map((o) => (o.cloid ?? "").toLowerCase()).filter(Boolean));
+    for (const lv of alloc.levels) {
+      await ctx.runMutation(internal.spotGridBots.renewSpotGridReconcile, { botId, token });
+      await placeOrder(ctx, clients.exchange, {
+        botId, token, side: "sell", gridLevel: lv.idx, generation: bot.generation, cycleId: 0,
+        assetId: bot.assetId, price: lv.sellPrice, quantity: lv.quantity, priceStr: lv.sellPriceStr, sizeStr: lv.sizeStr,
+        costBasis: seedBasis, repostBuyPrice: lv.repostBuyPrice, kind: "seed", openCloids,
+      });
+    }
+    await ctx.runMutation(internal.spotGridBots.setSpotGridBootstrap, { botId, token, bootstrapPhase: "buys" });
+    bot = await ctx.runQuery(internal.spotGridBots.getSpotGridBotInternal, { botId });
+    if (!bot || bot.bootstrapPhase !== "buys") return;
+  }
+
+  // ---- FASE "buys": colocar las M BUYs grid abajo ----
+  if (bot.bootstrapPhase === "buys") {
+    const { levels } = calculateGridLevels({
+      currentPrice: anchorPrice, minPrice: bot.minPrice, gridProfitPercent: bot.gridProfitPercent,
+      orderSize: derived.orderSize, gridCount: derived.M, szDecimals, feeRate: bot.feeRate,
+    });
+    const openOrders = await getOpenSpotOrders(clients.info, clients.address);
+    const openCloids = new Set(openOrders.map((o) => (o.cloid ?? "").toLowerCase()).filter(Boolean));
+    for (const lv of levels) {
+      await ctx.runMutation(internal.spotGridBots.renewSpotGridReconcile, { botId, token });
+      await placeOrder(ctx, clients.exchange, {
+        botId, token, side: "buy", gridLevel: lv.idx, generation: bot.generation, cycleId: 0,
+        assetId: bot.assetId, price: lv.buyPrice, quantity: lv.quantity, priceStr: lv.buyPriceStr, sizeStr: lv.sizeStr, kind: "grid", openCloids,
+      });
+    }
+    await ctx.runMutation(internal.spotGridBots.setSpotGridBootstrap, { botId, token, bootstrapPhase: "done" });
+    elog("spotgrid", "seed_bootstrap_done", { botId: String(botId), sells: derived.K, buys: levels.length });
   }
 }
 
@@ -246,8 +517,15 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
 
   const orders: any[] = await ctx.runQuery(internal.spotGridBots.getSpotGridOrdersInternal, { botId });
 
-  // (1) Colocación inicial: bot running sin órdenes de la generación actual.
-  if (isRunning && !orders.some((o) => o.generation === bot.generation)) {
+  // (1-seeded, JAV-103) Bootstrap por FASES para grids sembrados. Mientras no esté "done", SOLO corre el
+  // bootstrap (idempotente) — NO depende de "no hay órdenes de la generación". Si está pausado, no coloca.
+  if (bot.bootstrapPhase && bot.bootstrapPhase !== "done") {
+    if (isRunning) await runSeededBootstrap(ctx, bot, token, clients, resolved, szDecimals);
+    return;   // los fills se procesan en rondas posteriores (bootstrap done)
+  }
+
+  // (1) Colocación inicial LEGACY (grids no-seeded / manuales): running sin órdenes de la generación actual.
+  if (isRunning && !bot.bootstrapPhase && !orders.some((o) => o.generation === bot.generation)) {
     // (JAV-101, Codex MEDIO) SOLO los grids AUTO-derivados anclan a su `currentPrice` de creación (el
     // mismo con que deriveAutoGrid calculó gridCount → "prometido == colocado"). Los manuales y los legacy
     // (autoDerived != true) o un ancla corrupta (≤ minPrice) refrescan el precio EN VIVO → preserva la
@@ -306,6 +584,11 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
   for (const [cloid, a] of agg) {
     const o = byCloid.get(cloid);
     if (!o || !(a.sz > 0)) continue;   // no es una orden nuestra (o ya consumida)
+    // (JAV-103, ALTO-J) La COMPRA semilla (kind=seed/side=buy) ya quedó contabilizada en el bootstrap →
+    // NO se re-aplica aquí (evita doble-conteo) ni dispara una SELL pareada (sus SELLs ya se sembraron).
+    // La LIQUIDACIÓN (kind=liquidation) la maneja el stop, nunca el reconcile genérico.
+    if (o.kind === "seed" && o.side === "buy") continue;
+    if (o.kind === "liquidation") continue;
     await ctx.runMutation(internal.spotGridBots.renewSpotGridReconcile, { botId, token });
     const prevFilled = o.filledQty ?? 0;
     const newFilled = prevFilled + a.sz;
@@ -413,11 +696,12 @@ export const reconcileAllSpotGrids = internalAction({
 
 // ---- stopSpotGridBot (Codex #8, money-path): cancela órdenes propias vivas + marca stopped ----------
 export const stopSpotGridBot = action({
-  args: { botId: v.id("spot_grid_bots"), expectedNetwork: v.string() },
-  handler: async (ctx, { botId, expectedNetwork }): Promise<any> => {
+  args: { botId: v.id("spot_grid_bots"), expectedNetwork: v.string(), liquidateInventory: v.optional(v.boolean()) },
+  handler: async (ctx, { botId, expectedNetwork, liquidateInventory }): Promise<any> => {
     // Auth + permiso de gestión + ownership (la action no tiene db → vía query interna; auth se propaga).
     await ctx.runQuery(internal.spotGridBots.assertCanStopSpotGridInternal, { botId });
-    const claim = await ctx.runMutation(internal.spotGridBots.claimSpotGridReconcile, { botId });
+    // (JAV-103, ALTO-K) Claim que admite también `error` → reintentable tras semilla fail-closed / stop incompleto.
+    const claim = await ctx.runMutation(internal.spotGridBots.claimSpotGridReconcileForStop, { botId });
     if (!claim.ok) throw new Error("No se pudo tomar el lease del bot (¿reconcile en curso? reintenta).");
     const token = claim.token;
     try {
@@ -431,6 +715,8 @@ export const stopSpotGridBot = action({
       const privKey = decryptPrivateKey(credInfo.credential);
       const { info, exchange } = makeSpotClients(privKey as `0x${string}`, hlIsTestnet());
       const address = credInfo.credential.tradingAccountAddress;
+      const bot: any = await ctx.runQuery(internal.spotGridBots.getSpotGridBotInternal, { botId });   // (JAV-103) para la liquidación
+      if (!bot) throw new Error("Bot no encontrado.");
       const orders: any[] = await ctx.runQuery(internal.spotGridBots.getSpotGridOrdersInternal, { botId });
       const openOrders = await getOpenSpotOrders(info, address);
       const openCloids = new Set(openOrders.map((o) => (o.cloid ?? "").toLowerCase()).filter(Boolean));
@@ -452,6 +738,46 @@ export const stopSpotGridBot = action({
         await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, { botId, token, status: "error", errorMessage: "stop incompleto: órdenes vivas sin cancelar", clearLease: true });
         throw new Error("Stop incompleto: quedaron órdenes vivas en HL. Reintenta en unos segundos.");
       }
+
+      // (JAV-103, ALTO-E) Liquidación opcional del inventario (LIMIT IOC, idempotente por cloid). La cuenta
+      // es DEDICADA → el `free` de la base ES la bolsa del bot. Solo se vende min(free, free) = free; el
+      // residuo cuyo valor < min-notional es dust (no vendible en HL) y no impide `stopped`.
+      if (liquidateInventory === true) {
+        const resolved = await resolveSpotAsset(info, bot.symbol, credInfo.network);
+        const szDecimals = resolved.szDecimals;
+        const refPrice = await getSpotPrice(info, resolved);
+        const baseBal = await getSpotBalance(info, address, resolved.baseAsset);
+        const liqQty = floorSpotSize(baseBal.free, szDecimals);
+        if (liqQty > 0 && refPrice * liqQty >= MIN_SPOT_NOTIONAL_USD) {
+          const slip = (await ctx.runQuery(internal.spotGridBots.getSeedMaxSlippageInternal, {})).seedMaxSlippage;
+          const liqLimit = roundSpotPrice(refPrice * (1 - slip), szDecimals, "floor");
+          const rec: any = await ctx.runMutation(internal.spotGridBots.recordSpotGridOrder, {
+            botId, token, side: "sell", gridLevel: LIQ_LEVEL, generation: bot.generation, cycleId: bot.cycleSeq ?? 0,
+            assetId: bot.assetId, price: liqLimit, quantity: liqQty, quoteSize: liqLimit * liqQty, kind: "liquidation",
+          });
+          if (rec.ok) {
+            const r = await gatedPlaceIoc(ctx, exchange, info, address, botId, token, {
+              assetId: bot.assetId, isBuy: false, priceStr: String(liqLimit), sizeStr: String(liqQty), cloid: rec.cloid, sinceMs: bot.fillCursor ?? 0,
+            });
+            const fres = await fillsForCloid(info, address, rec.cloid, bot.fillCursor ?? 0);
+            await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, {
+              botId, token, cloid: rec.cloid, status: fres.qty >= liqQty - 1e-12 ? "filled" : (fres.qty > 0 ? "partially_filled" : "submitting"),
+              filledQty: fres.qty, avgFillPx: fres.avgPx, filledFeeUsd: fres.feeUsd, remainingQty: Math.max(0, liqQty - fres.qty),
+            });
+            if (r.gateBlocked) {
+              await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, { botId, token, status: "error", errorMessage: "liquidación bloqueada por gate; reintenta", clearLease: true });
+              throw new Error("Liquidación bloqueada por el gate live. Reintenta Stop o detén sin liquidar.");
+            }
+          }
+        }
+        // Re-verificar inventario tras la venta: residuo cuyo valor ≥ min-notional → error (no stopped).
+        const post = await getSpotBalance(info, address, resolved.baseAsset);
+        if (refPrice * floorSpotSize(post.free, szDecimals) >= MIN_SPOT_NOTIONAL_USD) {
+          await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, { botId, token, status: "error", errorMessage: "liquidación incompleta: queda inventario", clearLease: true });
+          throw new Error("Liquidación incompleta: quedó inventario sin vender. Reintenta Stop+liquidar.");
+        }
+      }
+
       await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, { botId, token, status: "stopped", clearLease: true });
       elog("spotgrid", "stopped", { botId: String(botId), cancelled: live.length });
       return { ok: true };

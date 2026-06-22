@@ -11,7 +11,7 @@ import { action } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { InfoClient, HttpTransport } from "@nktkas/hyperliquid";
 import { resolveSpotAsset, getSpotPrice, getSpotBalance } from "./hyperliquidSpot";
-import { deriveAutoGrid } from "./spotGridEngine";   // (JAV-101) helper puro: nº de niveles auto desde el rango
+import { deriveAutoGrid, deriveSeededGrid } from "./spotGridEngine";   // (JAV-101/103) helpers puros de reparto
 import { hlNetwork, hlIsTestnet, assertExpectedNetwork } from "./hlNetwork";
 import { requireAuth } from "./helpers";
 
@@ -56,15 +56,19 @@ export const createSpotGridBot = action({
     const currentPrice = await getSpotPrice(info, resolved);
     const bal = await getSpotBalance(info, pre.tradingAccountAddress, resolved.quoteAsset);
 
-    // (JAV-101) En AUTO, derivar gridCount/orderSize del rango con el precio spot REAL, usando EXACTAMENTE
-    // a.feeRate (el mismo que se persiste). El oráculo (calculateGridLevels) garantiza prometido==colocado.
+    // (JAV-103) En AUTO la SIEMBRA está SIEMPRE activa → `deriveSeededGrid` reparte el capital en M compras
+    // abajo + K ventas sembradas arriba (gridCount persistido = M; las K SELLs las deriva el bootstrap con
+    // los MISMOS parámetros → prometido==colocado). En MANUAL (avanzado) se mantiene el grid clásico
+    // NO-seeded (compra-primero) con gridCount/orderSize explícitos.
     let gridCount: number, orderSize: number, capped = false, coveredFloor: number | null = null;
+    let seeded = false, seedPercent: number | undefined;
     if (auto) {
-      const d = deriveAutoGrid({
+      const d = deriveSeededGrid({
         currentPrice, minPrice: a.minPrice, gridProfitPercent: a.gridProfitPercent,
         investmentAmount: a.investmentAmount, szDecimals: resolved.szDecimals, feeRate: a.feeRate,
       });
-      gridCount = d.gridCount; orderSize = d.orderSize; capped = d.capped; coveredFloor = d.coveredFloor;
+      gridCount = d.M; orderSize = d.orderSize; capped = d.capped; coveredFloor = d.coveredFloor;
+      seeded = true; seedPercent = d.seedPercent;
     } else {
       gridCount = a.gridCount as number; orderSize = a.orderSize as number;
     }
@@ -77,7 +81,8 @@ export const createSpotGridBot = action({
       minPrice: a.minPrice, gridProfitPercent: a.gridProfitPercent, investmentAmount: a.investmentAmount,
       orderSize, gridCount, feeRate: a.feeRate,
       currentPrice, freeQuoteBalance: bal.free, autoDerived: auto, network,
+      seeded, seedPercent,
     });
-    return { ...res, gridCount, orderSize, capped, coveredFloor };
+    return { ...res, gridCount, orderSize, capped, coveredFloor, seeded, seedPercent };
   },
 });

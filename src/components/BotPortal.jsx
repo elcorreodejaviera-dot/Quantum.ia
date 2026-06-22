@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { useUser, useClerk } from '@clerk/clerk-react'
 import BugReportButton from './BugReportButton'
 import HLAccountSelect from './HLAccountSelect'
-import { useConvexAuth, useQuery, useMutation, useAction, usePaginatedQuery } from 'convex/react'
+import { useConvexAuth, useQuery, useMutation, useAction } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState, useWalletBalances, useHLAccountBalance, useHLAccountsBalances, useHLAgentExpiry, useMetaMaskSigner, executeHLTestnetOrder } from '../hooks/useHyperliquid'
 import { capitalPerPosition, leverageText, slOrderOpen, beState as beStateOf, explainBot } from '../lib/armView'
@@ -881,7 +881,7 @@ function getSignalMeta(bot, pools, prices) {
   return { asset, price: prices[asset] ?? 0, network: pool?.network ?? 'Arbitrum' };
 }
 
-function BotCard({ bot, pools = [], poolClosed, canManage, onSetActive, onMode, onConfig, onManualTrigger, userLoaded }) {
+function BotCard({ bot, pools = [], poolClosed, canManage, onSetActive, onMode, onConfig, userLoaded }) {
   const tone = bot.active ? 'green' : 'faint';
   const [configOpen, setConfigOpen] = React.useState(false);
   const tpTotal = bot.tpSteps.reduce((sum, value) => sum + value, 0);
@@ -948,11 +948,6 @@ function BotCard({ bot, pools = [], poolClosed, canManage, onSetActive, onMode, 
         <button className="mini-btn" onClick={() => setConfigOpen((value) => !value)} disabled={!canManage}>Configurar</button>
         <button className="mini-btn">Escanear wallet</button>
         <button className="mini-btn">Token ID de pool {bot.poolTokenId}</button>
-        {bot.simulationMode && canManage && (
-          <button className="mini-btn amber" onClick={() => onManualTrigger?.(bot)} disabled={!bot.poolId || poolClosed}>
-            Disparar señal
-          </button>
-        )}
       </div>
       {configOpen && (
         <div className="bot-config">
@@ -1500,8 +1495,8 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
           </span>
         )}
         <span className={`pill${connected ? ' green' : ''}`}>{connected ? 'HL en vivo' : 'Conectando...'}</span>
-        <span className={`pill${!simulationMode && tradingEnabled ? ' green' : ' amber'}`}>
-          {!simulationMode && tradingEnabled ? 'Ejecución HL' : 'Simulación'}
+        <span className={`pill${tradingEnabled ? ' green' : ' amber'}`}>
+          {tradingEnabled ? 'Ejecución HL' : 'Trading OFF'}
         </span>
       </div>
       <div className="spot-list">
@@ -1828,7 +1823,6 @@ function AuditLogPanel({ isAdmin, mySignals }) {
       <div className="section-head">
         <h2>{title}</h2>
         {isAdmin && <span className="pill red">ADMIN</span>}
-        {!isAdmin && <span className="pill amber">Simulación</span>}
         <span className="pill">{rows.length} registros</span>
         {isAdmin && rows.length > 0 && (
           <button className="mini-btn" onClick={() => exportCsv(rows)}>Exportar CSV</button>
@@ -1869,7 +1863,7 @@ function AuditLogPanel({ isAdmin, mySignals }) {
 
       {rows.length === 0 ? (
         <p className="network" style={{ paddingTop: 8 }}>
-          {isAdmin ? 'Sin registros con los filtros actuales.' : 'Sin señales todavía. Los bots activos en simulación dispararán señales automáticamente.'}
+          {isAdmin ? 'Sin registros con los filtros actuales.' : 'Sin señales todavía. Los bots activos dispararán señales automáticamente.'}
         </p>
       ) : (
         <div className="audit-table">
@@ -2287,7 +2281,7 @@ function BotActionButton({ label, bot, busy, onConfig, onToggle, onDelete }) {
         <strong style={{ fontSize: 13 }}>{label}</strong>
         {bot && (
           <span className={`pill ${disarming ? 'faint' : (bot.active ? 'green' : 'faint')}`} style={{ fontSize: 10 }}>
-            {disarming ? 'Deteniéndose' : (bot.active ? 'Activo' : 'Pausado')}{bot.simulationMode ? ' · sim' : ''}
+            {disarming ? 'Deteniéndose' : (bot.active ? 'Activo' : 'Pausado')}
           </span>
         )}
       </div>
@@ -2345,20 +2339,23 @@ function BotActionButton({ label, bot, busy, onConfig, onToggle, onDelete }) {
 // Selector de cuenta HL (compartido por ambos modales). Muestra el balance de la cuenta elegida.
 // (JAV-93) HLAccountSelect extraído a ./HLAccountSelect.jsx (reuso BotPortal + SpotGridView).
 
-// Toggle de modo real (solo visible con canTradeLive). Banner de beta cuando está activo.
-function RealModeToggle({ realMode, setRealMode, canTradeLive }) {
-  if (!canTradeLive) return null;
+// (quitar-simulacion B1) Producto solo-real: ya no hay toggle sim/real. Aviso fijo; si falta canTradeLive,
+// bloquea visualmente la creación (el submit también lo rechaza).
+function RealModeNotice({ canTradeLive }) {
+  if (!canTradeLive) {
+    return (
+      <div className="be-block" style={{ marginTop: 8 }}>
+        <p style={{ fontSize: 12, color: 'var(--red)', margin: 0 }}>
+          <strong>Necesitas permiso de trading real</strong> para crear este bot. Pídeselo a un administrador.
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="be-block" style={{ marginTop: 8 }}>
-      <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center' }}>
-        <input type="checkbox" checked={realMode} onChange={(e) => setRealMode(e.target.checked)} />
-        <strong>Modo real (ejecución HL con tu capital)</strong>
-      </label>
-      {realMode && (
-        <p style={{ fontSize: 11, color: 'var(--red)', margin: '4px 0 0' }}>
-          BETA — órdenes reales con tu capital. El stop-loss es un stop-market (banda 1%): puede no llenarse si el mercado atraviesa la banda en un gap brusco.
-        </p>
-      )}
+      <p style={{ fontSize: 11, color: 'var(--red)', margin: 0 }}>
+        <strong>Modo real:</strong> órdenes con tu capital en Hyperliquid. El stop-loss es stop-market (banda 1%): puede no llenarse en un gap brusco.
+      </p>
     </div>
   );
 }
@@ -2424,8 +2421,6 @@ function TakeProfitRows({ tps, setTps }) {
 function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
   const save = useMutation(api.bots.getOrCreatePoolBot);
   const accounts = useQuery(api.hlCredentials.list) ?? [];
-  // Modo real (ejecución HL con capital real): requiere canTradeLive. Por defecto simulación.
-  const [realMode, setRealMode] = React.useState(bot ? !bot.simulationMode : false);
   // Precarga desde el bot existente (reconfigurar) o defaults (crear).
   const [hlAccountId, setHlAccountId] = React.useState(bot?.hlAccountId ?? null);
   const [leverage, setLeverage] = React.useState(bot?.leverage ?? 20);
@@ -2463,6 +2458,8 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
   const marginCovered = unifiedFree >= thisBotMargin;
 
   async function handleSave() {
+    // (quitar-simulacion B1) Solo-real: sin canTradeLive NO se crea (nada de bot simulado silencioso).
+    if (!canTradeLive) { setError('Necesitas permiso de trading real para crear este bot. Pídeselo a un administrador.'); return; }
     setError(''); setSaving(true);
     try {
       await save(pruneUndefined({
@@ -2473,7 +2470,7 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
         allowReentryFromAbove: !noReentryFromAbove,
         autoRearm,
         active: bot ? bot.active : true,   // editar conserva el estado; crear activa
-        simulationMode: !(realMode && canTradeLive),   // real solo con permiso
+        simulationMode: false,   // producto solo-real (gate de backend respalda)
       }));
       onSaved?.(); onClose();
     } catch (e) {
@@ -2591,7 +2588,7 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
           Auto-rearm — tras un stop loss, repone la cobertura automáticamente (espera ~5 min)
         </label>
 
-        <RealModeToggle realMode={realMode} setRealMode={setRealMode} canTradeLive={canTradeLive} />
+        <RealModeNotice canTradeLive={canTradeLive} />
 
         {error && <p style={{ color: 'var(--red)', fontSize: 12 }}>{error}</p>}
 
@@ -2610,7 +2607,6 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
 function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
   const save = useMutation(api.bots.getOrCreatePoolBot);
   const accounts = useQuery(api.hlCredentials.list) ?? [];
-  const [realMode, setRealMode] = React.useState(bot ? !bot.simulationMode : false);
   // Precarga desde el bot existente (reconfigurar) o defaults (crear).
   const [hlAccountId, setHlAccountId] = React.useState(bot?.hlAccountId ?? null);
   const [direction, setDirection] = React.useState(bot?.direction ?? 'long_short');
@@ -2636,6 +2632,8 @@ function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
   const opCapital = poolCapital * (capitalPct / 100);
 
   async function handleSave() {
+    // (quitar-simulacion B1) Solo-real: sin canTradeLive NO se crea (nada de bot simulado silencioso).
+    if (!canTradeLive) { setError('Necesitas permiso de trading real para crear este bot. Pídeselo a un administrador.'); return; }
     setError(''); setSaving(true);
     try {
       await save(pruneUndefined({
@@ -2645,7 +2643,7 @@ function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
         trailingStop, trailingPct,   // estado completo: se persiste siempre (latente si trailing off)
         tps: tps.filter((t) => t.gainPct > 0 && t.closePct > 0),
         autoRearm, active: bot ? bot.active : true,   // editar conserva el estado; crear activa
-        simulationMode: !(realMode && canTradeLive),   // real solo con permiso
+        simulationMode: false,   // producto solo-real (gate de backend respalda)
       }));
       onSaved?.(); onClose();
     } catch (e) {
@@ -2750,7 +2748,7 @@ function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
           Auto-rearm — tras SL, el bot vuelve a buscar breakouts automáticamente
         </label>
 
-        <RealModeToggle realMode={realMode} setRealMode={setRealMode} canTradeLive={canTradeLive} />
+        <RealModeNotice canTradeLive={canTradeLive} />
 
         {error && <p style={{ color: 'var(--red)', fontSize: 12 }}>{error}</p>}
 
@@ -3320,8 +3318,8 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulation
       <div className="bot-state-actions">
         <button className={`mini-btn ${!protector.active ? 'active' : ''}`} onClick={() => onChange({ active: false })} disabled={!isAdmin}>Pausar</button>
         <button className={`mini-btn ${protector.active ? 'active' : ''}`} onClick={() => onChange({ active: true })} disabled={!isAdmin}>Activar</button>
-        <span className={`pill${!simulationMode && tradingEnabled ? ' green' : ' amber'}`}>
-          {!simulationMode && tradingEnabled ? 'LIVE HL' : 'Simulación'}
+        <span className={`pill${tradingEnabled ? ' green' : ' amber'}`}>
+          {tradingEnabled ? 'LIVE HL' : 'Trading OFF'}
         </span>
         {userLoaded && !isAdmin && <span className="pill faint" title="Solo lectura">Lectura</span>}
         {protector.active && isAdmin && (
@@ -3334,94 +3332,10 @@ function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulation
 
 // Límites de ejecución (valores efectivos) — admin.
 // Concesión/revocación de permisos por usuario — admin (paginado). Dos permisos independientes:
-// canManageBots (crear/activar/armar bots) y canTradeLive (operar con dinero real). JAV-72.
-function PermToggle({ label, granted, busy, onToggle }) {
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-      <span className="network" style={{ fontSize: 10 }}>{label}</span>
-      <span className={`pill ${granted ? 'green' : 'faint'}`} style={{ fontSize: 10 }}>{granted ? 'SÍ' : 'NO'}</span>
-      <button className="mini-btn" disabled={busy} onClick={onToggle}>
-        {busy ? '…' : (granted ? 'Revocar' : 'Conceder')}
-      </button>
-    </div>
-  );
-}
-
-function BetaPermissionsPanel() {
-  const { results, status, loadMore } = usePaginatedQuery(
-    api.users.listUsersWithTradeLive, {}, { initialNumItems: 50 });
-  const plans = useQuery(api.subscriptions.listPlans) ?? [];
-  const grantManage = useMutation(api.users.grantManageBots);
-  const revokeManage = useMutation(api.users.revokeManageBots);
-  const grantTrade = useMutation(api.users.grantTradeLive);
-  const revokeTrade = useMutation(api.users.revokeTradeLive);
-  const setPlan = useMutation(api.subscriptions.setSubscriptionPlan);
-  const setSuspended = useMutation(api.subscriptions.setUserSuspended);
-  const [msg, setMsg] = React.useState('');
-  // Estado "busy" por {userId, acción} para evitar doble click confuso entre toggles.
-  const [busy, setBusy] = React.useState({});
-  const MUT = {
-    canManageBots: { grant: grantManage, revoke: revokeManage },
-    canTradeLive: { grant: grantTrade, revoke: revokeTrade },
-  };
-  async function run(key, fn) {
-    setMsg('');
-    setBusy((b) => ({ ...b, [key]: true }));
-    try { await fn(); }
-    catch (e) { setMsg(e?.message ?? 'Error'); }
-    finally { setBusy((b) => ({ ...b, [key]: false })); }
-  }
-  const toggle = (u, permission, granted) =>
-    run(`${u.userId}:${permission}`, () =>
-      granted ? MUT[permission].revoke({ userId: u.userId }) : MUT[permission].grant({ userId: u.userId }));
-  const changePlan = (u, value) =>
-    run(`${u.userId}:plan`, () => setPlan({ userId: u.userId, plan: value === '' ? null : value }));
-  const toggleSuspended = (u) =>
-    run(`${u.userId}:suspended`, () => setSuspended({ userId: u.userId, suspended: !u.suspended }));
-  return (
-    <div className="be-block" style={{ marginTop: 12 }}>
-      <div className="be-head"><span>Permisos y plan por usuario</span></div>
-      {results.map((u) => (
-        <div key={u.userId} className="wallet-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '4px 0', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 12 }}>{u.email ?? u.name ?? u.userId.slice(0, 8)}{u.role === 'admin' ? ' (admin)' : ''}</span>
-          {u.role === 'admin' ? (
-            <span className="pill green" style={{ fontSize: 10 }}>Acceso total (admin)</span>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
-              <PermToggle label="Manage Bots" granted={u.canManageBots} busy={!!busy[`${u.userId}:canManageBots`]}
-                onToggle={() => toggle(u, 'canManageBots', u.canManageBots)} />
-              <PermToggle label="Trading real" granted={u.canTradeLive} busy={!!busy[`${u.userId}:canTradeLive`]}
-                onToggle={() => toggle(u, 'canTradeLive', u.canTradeLive)} />
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span className="network" style={{ fontSize: 10 }}>Plan</span>
-                <select className="mini-btn" value={u.subscriptionPlan ?? ''} disabled={!!busy[`${u.userId}:plan`]}
-                  onChange={(e) => changePlan(u, e.target.value)} style={{ fontSize: 10 }}>
-                  <option value="">Sin plan</option>
-                  {plans.map((p) => (
-                    <option key={p.id} value={p.id}>{p.label} (${p.coverageCapUsd.toLocaleString()})</option>
-                  ))}
-                </select>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span className="network" style={{ fontSize: 10 }} title="El bloqueo operativo llega con el enforcement (JAV-77)">Suspensión*</span>
-                <span className={`pill ${u.suspended ? 'red' : 'faint'}`} style={{ fontSize: 10 }}>{u.suspended ? 'SÍ' : 'NO'}</span>
-                <button className="mini-btn" disabled={!!busy[`${u.userId}:suspended`]} onClick={() => toggleSuspended(u)}>
-                  {busy[`${u.userId}:suspended`] ? '…' : (u.suspended ? 'Reactivar' : 'Suspender')}
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      ))}
-      {status === 'CanLoadMore' && <button className="mini-btn" style={{ marginTop: 6 }} onClick={() => loadMore(50)}>Cargar más</button>}
-      <span className="network" style={{ fontSize: 10, display: 'block', marginTop: 4 }}>* Suspensión: pendiente de enforcement (JAV-77) — hoy solo registra el estado.</span>
-      {msg && <span style={{ fontSize: 11, color: 'var(--red)' }}>{msg}</span>}
-    </div>
-  );
-}
 
 // Observabilidad de ejecuciones reales (status/error en vivo) — admin. El "dónde falla".
-function ExecutionsObservabilityPanel() {
+// (panel-admin-dedup) Exportado: lo renderiza el tab Admin (AdminView), ya no el panel inline.
+export function ExecutionsObservabilityPanel() {
   const rows = useQuery(api.executions.listRecentExecutions, { limit: 50 });
   const color = (s) => (s === 'protected' || s === 'closed') ? 'green'
     : s === 'failed' ? 'faint' : (s === 'sl_failed' || s === 'unknown') ? 'red' : 'amber';
@@ -3445,132 +3359,6 @@ function ExecutionsObservabilityPanel() {
   );
 }
 
-function AdminPanel({ simulationMode, tradingEnabled, onSetSimulation, onSetTrading, onKillSwitch }) {
-  const [killConfirm, setKillConfirm] = React.useState(false);
-  const [tradingConfirm, setTradingConfirm] = React.useState(false);
-  const [busy, setBusy] = React.useState(false);
-  const [error, setError] = React.useState('');
-
-  // Fix 1: limpiar confirmación stale si simulación se activa antes de confirmar
-  React.useEffect(() => {
-    if (simulationMode) setTradingConfirm(false);
-  }, [simulationMode]);
-
-  async function handleKillSwitch() {
-    if (!killConfirm) { setKillConfirm(true); return; }
-    setBusy(true);
-    setError('');
-    try {
-      await onKillSwitch();
-      setKillConfirm(false);
-    } catch (err) {
-      setError(`Kill switch falló: ${err?.message ?? 'error desconocido'}`);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleToggleSimulation() {
-    setBusy(true);
-    setError('');
-    try {
-      await onSetSimulation(!simulationMode);
-    } catch (err) {
-      setError(`Error simulación: ${err?.message ?? 'error desconocido'}`);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleToggleTrading() {
-    // Fix 1: guard doble — si simulationMode está activo, bloquear siempre
-    if (simulationMode) { setTradingConfirm(false); return; }
-    if (!tradingEnabled && !tradingConfirm) { setTradingConfirm(true); return; }
-    setBusy(true);
-    setError('');
-    try {
-      await onSetTrading(!tradingEnabled);
-      setTradingConfirm(false);
-    } catch (err) {
-      setError(`Error trading: ${err?.message ?? 'error desconocido'}`);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <section className="panel admin-panel">
-      <div className="section-head">
-        <h2>Panel Admin</h2>
-        <span className="pill red">ADMIN</span>
-      </div>
-
-      <div className="admin-status">
-        <div className="admin-status-row">
-          <span>Modo simulación</span>
-          <span className={`pill ${simulationMode ? 'amber' : 'green'}`}>{simulationMode ? 'ON' : 'OFF'}</span>
-        </div>
-        <div className="admin-status-row">
-          <span>Trading en vivo</span>
-          <span className={`pill ${tradingEnabled ? 'green' : 'faint'}`}>{tradingEnabled ? 'ACTIVO' : 'DESACTIVADO'}</span>
-        </div>
-      </div>
-
-      {error && <p style={{ color: 'var(--red)', fontSize: 12, margin: '4px 0' }}>{error}</p>}
-
-      <div className="admin-actions">
-        {/* Kill Switch */}
-        <button
-          className={`admin-kill-btn${killConfirm ? ' confirming' : ''}`}
-          onClick={handleKillSwitch}
-          disabled={busy || (!tradingEnabled && simulationMode)}
-        >
-          {killConfirm ? '⚠ Confirmar — DETENER TODO' : '🛑 DETENER TODO'}
-        </button>
-        {killConfirm && (
-          <button className="mini-btn" onClick={() => setKillConfirm(false)}>Cancelar</button>
-        )}
-
-        {/* Simulación toggle */}
-        <div className="admin-toggle-row">
-          <span>Simulación</span>
-          <button className={`mini-btn ${simulationMode ? 'amber' : ''}`} onClick={handleToggleSimulation} disabled={busy}>
-            {simulationMode ? 'Desactivar SIM' : 'Activar SIM'}
-          </button>
-        </div>
-
-        {/* Trading toggle — Fix 1: "Confirmar LIVE" bloqueado si simulationMode es true */}
-        <div className="admin-toggle-row">
-          <span>Trading live</span>
-          {tradingConfirm && !tradingEnabled ? (
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button
-                className="mini-btn active"
-                onClick={handleToggleTrading}
-                disabled={busy || simulationMode}
-              >
-                Confirmar LIVE
-              </button>
-              <button className="mini-btn" onClick={() => setTradingConfirm(false)}>Cancelar</button>
-            </div>
-          ) : (
-            <button
-              className={`mini-btn ${tradingEnabled ? 'active' : ''}`}
-              onClick={handleToggleTrading}
-              disabled={busy || simulationMode}
-              title={simulationMode ? 'Desactiva simulación primero' : ''}
-            >
-              {tradingEnabled ? 'Desactivar LIVE' : 'Activar LIVE'}
-            </button>
-          )}
-        </div>
-      </div>
-
-      <BetaPermissionsPanel />
-      <ExecutionsObservabilityPanel />
-    </section>
-  );
-}
 
 function Dashboard({ user, onLogout, userId }) {
   const [network, setNetwork] = React.useState('Todas');
@@ -3585,11 +3373,12 @@ function Dashboard({ user, onLogout, userId }) {
   const entryPriceTried = React.useRef(new Set());
   const { prices, connected } = useHyperliquidPrices();
   const { funding } = useHyperliquidFunding();
+  // (quitar-simulacion B1) Producto solo-real: simulación ausente/desconocida se trata como FALSE (nunca
+  // bloquea el trading real). El gate de backend sigue existiendo como red de seguridad inerte.
   const simModeConfig = useQuery(api.systemConfig.getConfig, { key: "simulationMode" });
-  const simulationMode = simModeConfig?.value ?? true;
+  const simulationMode = simModeConfig?.value === true;
   const tradingEnabledConfig = useQuery(api.systemConfig.getConfig, { key: "tradingEnabled" });
   const tradingEnabled = tradingEnabledConfig?.value ?? false;
-  const setSimulationModeMutation = useMutation(api.systemConfig.setSimulationMode);
   const setTradingEnabledMutation = useMutation(api.systemConfig.setTradingEnabled);
   const currentUser = useQuery(api.users.getUser, {});
   const userLoaded = currentUser !== undefined;
@@ -3659,14 +3448,6 @@ function Dashboard({ user, onLogout, userId }) {
         .catch(() => { delete positionFetchedRef.current[key]; });
     }
   }, [poolsFromDb, prices]);
-
-  async function killSwitch() {
-    // (OBS-1) El rastro de auditoría es ahora SERVER-SIDE y autoritativo: setTradingEnabled y
-    // setSimulationMode escriben en admin_logs dentro de su mutation (atómico). Se elimina el
-    // logAdminAction({kill_switch}) del cliente (no autoritativo, no atómico, posible duplicado).
-    await setTradingEnabledMutation({ enabled: false });
-    await setSimulationModeMutation({ enabled: true });
-  }
 
   // UI-only state que no persiste en Convex (trading config extendida)
   const [localBotState, setLocalBotState] = React.useState({});
@@ -3930,15 +3711,6 @@ function Dashboard({ user, onLogout, userId }) {
     }
   }, [prices, pools, userAlerts]);
 
-  async function handleManualTrigger(bot) {
-    // Mismo guard que el disparo automático: sin pool vinculado y abierto, no se dispara.
-    if (!linkedPool(bot, pools)) {
-      addToast('Este bot no tiene un pool vinculado activo: no se puede disparar.');
-      return;
-    }
-    await fireSignal(bot, 'manual', pools, prices);
-  }
-
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -3965,11 +3737,6 @@ function Dashboard({ user, onLogout, userId }) {
       {IS_TESTNET && (
         <div className="testnet-banner">
           TESTNET — Sin capital real
-        </div>
-      )}
-      {simulationMode && (
-        <div className="sim-banner">
-          MODO SIMULACIÓN — Sin operaciones reales
         </div>
       )}
 
@@ -4058,7 +3825,7 @@ function Dashboard({ user, onLogout, userId }) {
                 {bots.filter((b) => !b.kind).map((bot) => {
                   const linked = bot.poolId ? pools.find((p) => p.id === bot.poolId) : null;
                   return (
-                    <BotCard key={bot.id} bot={bot} pools={pools} poolClosed={!!linked?.closed} canManage={canManageBots} onSetActive={setBotActive} onMode={setBotMode} onConfig={updateBotConfig} onManualTrigger={handleManualTrigger} userLoaded={userLoaded} />
+                    <BotCard key={bot.id} bot={bot} pools={pools} poolClosed={!!linked?.closed} canManage={canManageBots} onSetActive={setBotActive} onMode={setBotMode} onConfig={updateBotConfig} userLoaded={userLoaded} />
                   );
                 })}
                 {bots.filter((b) => !b.kind).length === 0 && (
@@ -4066,15 +3833,8 @@ function Dashboard({ user, onLogout, userId }) {
                 )}
               </div>
             </section>
-            {isAdmin && (
-              <AdminPanel
-                simulationMode={simulationMode}
-                tradingEnabled={tradingEnabled}
-                onSetSimulation={(v) => setSimulationModeMutation({ enabled: v })}
-                onSetTrading={(v) => setTradingEnabledMutation({ enabled: v })}
-                onKillSwitch={killSwitch}
-              />
-            )}
+            {/* (panel-admin-dedup) El Panel Admin inline se eliminó: estaba duplicado con el tab Admin.
+                Toda la administración (SIM/Trading/permisos/planes/observabilidad) vive en AdminView. */}
             {/* (JAV-58) Quitados "Wallets" (personales, 0 conectadas) y "Cuenta Hyperliquid" (legacy testnet):
                 las únicas cuentas ancladas son las de Hyperliquid → panel "Cuentas Hyperliquid" (multi-cuenta). */}
             <NetworkLiquidity pools={filteredPools} />

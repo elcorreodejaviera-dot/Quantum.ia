@@ -3,6 +3,7 @@ import { Link, Navigate } from 'react-router-dom';
 import { useQuery, useMutation, usePaginatedQuery, useAction } from 'convex/react';
 import { api } from '../../convex/_generated/api';
 import { auditUserPools, hlCoin } from '../lib/poolAudit';
+import { ExecutionsObservabilityPanel } from './BotPortal';   // (panel-admin-dedup) movido aquí desde el panel inline
 
 // (JAV-80) Pestaña de Administración: KPIs del sistema + usuarios (con desglose por posición) +
 // flujo de actividad + gestión de bugs. Solo admin. Reutiliza la paleta del portal (var(--green)…).
@@ -357,9 +358,8 @@ export default function AdminView() {
   // (OBS-2 → Fase 2) Salud de los crons del motor (read-only). La query ya es admin-gated.
   const cronHealth = useQuery(api.cronHealth.listCronHealth, isAdmin ? {} : 'skip');
 
-  const simConfig = useQuery(api.systemConfig.getConfig, { key: 'simulationMode' });
+  // (quitar-simulacion B1) Producto solo-real: sin controles de simulación. El kill-switch global es `tradingEnabled`.
   const tradingConfig = useQuery(api.systemConfig.getConfig, { key: 'tradingEnabled' });
-  const setSim = useMutation(api.systemConfig.setSimulationMode);
   const setTrading = useMutation(api.systemConfig.setTradingEnabled);
   const sgGate = useQuery(api.spotGridBots.getMainnetSpotGridApproval, isAdmin ? {} : 'skip');
   const setSgGate = useMutation(api.spotGridBots.setMainnetSpotGridApproval);
@@ -370,7 +370,6 @@ export default function AdminView() {
   const setSgModule = useMutation(api.spotGridBots.setSpotGridModuleEnabled);
   const sgModuleOn = sgModule?.enabled !== false;
   const [sgModulePending, setSgModulePending] = React.useState(false);
-  const simOn = simConfig?.value === true;
   const tradingOn = tradingConfig?.value === true;
 
   if (me === undefined) return <div className="av-wrap"><p className="faint">Cargando…</p></div>;
@@ -404,12 +403,10 @@ export default function AdminView() {
         <h1>Panel de Administración</h1>
         {stats?.network && <span className={`av-pill ${stats.network === 'mainnet' ? 'green' : 'amber'}`}>● {stats.network}</span>}
         <span className={`av-pill ${tradingOn ? 'green' : 'faint'}`}>{tradingOn ? 'Trading LIVE' : 'Trading OFF'}</span>
-        <span className={`av-pill ${simOn ? 'amber' : 'faint'}`}>{simOn ? 'SIM ON' : 'SIM OFF'}</span>
         <span className={`av-pill ${sgGateOn ? 'green' : 'faint'}`}>{sgGateOn ? 'Spot Grid mainnet ✓' : 'Spot Grid mainnet ✗'}</span>
         <span className={`av-pill ${sgModuleOn ? 'green' : 'amber'}`}>{sgModuleOn ? 'Módulo Spot Grid ON' : 'Módulo Spot Grid OFF'}</span>
         <div className="av-actions">
-          <button className="av-mini" onClick={() => setSim({ enabled: !simOn })}>{simOn ? 'Desactivar SIM' : 'Activar SIM'}</button>
-          <button className="av-mini" disabled={simOn} onClick={() => setTrading({ enabled: !tradingOn })}>{tradingOn ? 'Desactivar LIVE' : 'Activar LIVE'}</button>
+          <button className="av-mini" onClick={() => setTrading({ enabled: !tradingOn })}>{tradingOn ? 'Desactivar LIVE' : 'Activar LIVE'}</button>
           <button
             className="av-mini"
             disabled={sgGatePending}
@@ -534,6 +531,12 @@ export default function AdminView() {
           ))}
           {bugs.results.length === 0 && <div className="faint" style={{ padding: 12 }}>Sin bugs.</div>}
           {bugs.status === 'CanLoadMore' && <button className="av-more" onClick={() => bugs.loadMore(20)}>Cargar más</button>}
+        </div>
+
+        {/* (panel-admin-dedup) Observabilidad de ejecuciones reales — movida desde el Panel Admin inline. */}
+        <div className="av-section">
+          <div className="av-shead"><h2>⚙️ EJECUCIONES</h2></div>
+          <ExecutionsObservabilityPanel />
         </div>
       </div>
     </div>

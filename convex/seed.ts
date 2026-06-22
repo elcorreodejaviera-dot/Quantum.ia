@@ -11,9 +11,9 @@ const SEED_POOLS = [
 ];
 
 const SEED_BOTS = [
-  { name: "bot1", action: "Cobertura short", active: true, mode: "Short", trigger: "Precio sale del rango o delta > 0.65", walletId: "WLT-001", capitalPerTrade: 2500, leverage: 3, stop: 2.5, simulationMode: true },
-  { name: "bot2", action: "Cobertura long", active: true, mode: "Long", trigger: "Entrada defensiva cuando el precio recupera rango", walletId: "WLT-002", capitalPerTrade: 1800, leverage: 2, stop: 1.8, simulationMode: true },
-  { name: "bot3", action: "Rebalanceo APR", active: false, mode: "Long + Short", trigger: "Rebalanceo cuando APR cae bajo 18%", walletId: "WLT-003", capitalPerTrade: 1200, leverage: 1, stop: 3.2, simulationMode: true },
+  { name: "bot1", action: "Cobertura short", active: true, mode: "Short", trigger: "Precio sale del rango o delta > 0.65", walletId: "WLT-001", capitalPerTrade: 2500, leverage: 3, stop: 2.5, simulationMode: false },
+  { name: "bot2", action: "Cobertura long", active: true, mode: "Long", trigger: "Entrada defensiva cuando el precio recupera rango", walletId: "WLT-002", capitalPerTrade: 1800, leverage: 2, stop: 1.8, simulationMode: false },
+  { name: "bot3", action: "Rebalanceo APR", active: false, mode: "Long + Short", trigger: "Rebalanceo cuando APR cae bajo 18%", walletId: "WLT-003", capitalPerTrade: 1200, leverage: 1, stop: 3.2, simulationMode: false },
 ];
 
 const SEED_WALLETS = [
@@ -60,7 +60,7 @@ export const seedInitialData = mutation({
 
     const existingConfig = await ctx.db.query("system_config").first();
     if (!existingConfig) {
-      await ctx.db.insert("system_config", { key: "simulationMode", value: true });
+      await ctx.db.insert("system_config", { key: "simulationMode", value: false });
       await ctx.db.insert("system_config", { key: "tradingEnabled", value: false });
     }
 

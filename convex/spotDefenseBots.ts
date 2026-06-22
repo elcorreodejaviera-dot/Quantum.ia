@@ -118,7 +118,7 @@ export const getMainnetSpotDefenseApprovedInternal = internalQuery({
 
 function validateSpotDefenseConfig(args: {
   leverage: number; stopLossPct: number; bufferPct?: number; triggerPrice: number;
-  triggerMode: "manual" | "dca"; minCoveragePct?: number;
+  triggerMode: "manual" | "dca"; minCoveragePct?: number; breakevenPct?: number;
   tps?: { gainPct: number; closePct: number }[];
 }) {
   if (!Number.isFinite(args.leverage) || args.leverage < MANUAL_LEVERAGE_MIN || args.leverage > MANUAL_LEVERAGE_MAX) {
@@ -126,6 +126,11 @@ function validateSpotDefenseConfig(args: {
   }
   if (!Number.isFinite(args.stopLossPct) || args.stopLossPct <= 0 || args.stopLossPct >= 100) {
     throw new Error("stopLossPct debe estar entre 0 y 100 (exclusivo).");
+  }
+  // (Codex 3c-3ab no bloqueante) Validar breakevenPct (finitud/rango); el guard anti-auto-disparo del
+  // motor ya protege, pero un valor absurdo no debe persistirse. >50 no tiene sentido para mover a BE.
+  if (args.breakevenPct !== undefined && (!Number.isFinite(args.breakevenPct) || args.breakevenPct <= 0 || args.breakevenPct > 50)) {
+    throw new Error("breakevenPct debe estar entre 0 y 50 (exclusivo/50).");
   }
   if (args.bufferPct !== undefined && (!Number.isFinite(args.bufferPct) || args.bufferPct < 0 || args.bufferPct > 100)) {
     throw new Error("bufferPct debe estar entre 0 y 100.");
@@ -509,16 +514,21 @@ export const listLiveSpotDefenseArmIdsInternal = internalQuery({
 });
 
 // (3c-3b) Bots con auto-rearm pendiente/recuperable y vencidos (nextRearmAt<=now). Topado.
+// (Codex 3c-3ab #3) Incluye `running` con lease VENCIDO (worker murió tras el claim antes del settle) →
+// se reclama; sin esto un bot quedaría `running` para siempre.
 export const listDueSpotDefenseRearmsInternal = internalQuery({
   args: { limit: v.optional(v.number()) },
   handler: async (ctx, { limit }) => {
     const cap = limit ?? 50;
     const now = Date.now();
     const out: Id<"spot_defense_bots">[] = [];
-    for (const st of ["pending", "blocked"] as const) {
+    for (const st of ["running", "pending", "blocked"] as const) {   // running expirado PRIMERO (recuperación)
       const rows = await ctx.db.query("spot_defense_bots").withIndex("by_rearm_status", (q) => q.eq("rearmStatus", st)).collect();
       for (const b of rows) {
-        if ((b.nextRearmAt ?? 0) <= now && b.active && b.status === "running" && !b.disarmPending) {
+        if (!(b.active && b.status === "running" && !b.disarmPending)) continue;
+        if (st === "running") {
+          if ((b.rearmLeaseUntil ?? 0) <= now) { out.push(b._id); if (out.length >= cap) return out; }   // lease vencido → recuperar
+        } else if ((b.nextRearmAt ?? 0) <= now) {
           out.push(b._id); if (out.length >= cap) return out;
         }
       }
@@ -534,8 +544,9 @@ export const claimSpotDefenseRearm = internalMutation({
     const bot = await ctx.db.get(botId);
     if (!bot) return { claimed: false as const };
     if (!bot.active || bot.status !== "running" || bot.disarmPending) return { claimed: false as const };
-    if (bot.rearmStatus !== "pending" && bot.rearmStatus !== "blocked") return { claimed: false as const };
-    if ((bot.rearmLeaseUntil ?? 0) > Date.now()) return { claimed: false as const };
+    // (Codex 3c-3ab #3) Reclama pending/blocked, o `running` con lease VENCIDO (recuperación de worker muerto).
+    if (bot.rearmStatus !== "pending" && bot.rearmStatus !== "blocked" && bot.rearmStatus !== "running") return { claimed: false as const };
+    if ((bot.rearmLeaseUntil ?? 0) > Date.now()) return { claimed: false as const };   // lease vivo (incl. running en curso) → no robar
     // No reabrir si ya hay un arm vivo (defensa anti-doble).
     const live = (await ctx.db.query("spot_defense_arms").withIndex("by_bot_generation", (q) => q.eq("botId", botId)).collect()).find((a) => !ARM_TERMINAL.has(a.status));
     if (live) { await ctx.db.patch(botId, { rearmStatus: undefined, rearmLeaseToken: undefined, rearmLeaseUntil: undefined, updatedAt: Date.now() }); return { claimed: false as const }; }

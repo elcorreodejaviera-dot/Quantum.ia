@@ -363,17 +363,39 @@ export const reconcileSpotDefenseArm = internalAction({
               if (slOrder.observedStatus !== "open") {
                 await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseOrderObserved, { armId, token, role: "sl", observedStatus: "open" });
               }
-              // (3c-3a) Break-even: short en ganancia ≥ breakevenPct → mover el SL a ≈entrada. Guard
-              // anti-auto-disparo: el nuevo trigger (Buy) debe quedar por ENCIMA del mark (si no, fira ya).
+              // (3c-3a + Codex 3c-3ab #1) Break-even: short en ganancia ≥ breakevenPct → mover el SL a
+              // ≈entrada. ORDEN CRÍTICO: se coloca el SL BE NUEVO con el viejo AÚN VIVO (ambos reduceOnly
+              // coexisten, no sobre-cierran) y SOLO tras confirmarlo se cancela el viejo → la posición
+              // nunca queda sin SL. Guard anti-auto-disparo: beTrigger > mark (el Buy no debe firar al colocarse).
               const bePct = arm.breakevenPct;
               if (!beMoved && bePct != null && bePct > 0) {
                 const profitFrac = (posEntryPx - markPx) / posEntryPx;   // short gana cuando markPx<entry
                 const beTrigger = posEntryPx * (1 - BE_OFFSET_FRACTION);
                 if (profitFrac >= bePct / 100 && beTrigger > markPx * (1 + 1e-4)) {
-                  await cancelOwnByCloid(exchange, assetId, [slOrder.cloid]);
-                  await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseOrderObserved, { armId, token, role: "sl", observedStatus: "canceled" });
-                  await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseBeMoved, { armId, token });
-                  beMoved = true; slAlive = false;   // forzar recolocación del SL en break-even
+                  const oldCloid = slOrder.cloid;
+                  const newAttempt = (arm.slAttempts ?? 0) + 1;
+                  const newCloid = await toHlCloid(spotDefenseCloidInput(String(armId), arm.generation, "sl", newAttempt));
+                  // Idempotencia/crash-recovery: si el SL BE ya está vivo (intento previo), no recolocar.
+                  let placed = await openByCloid(info, user, newCloid);
+                  if (!placed) {
+                    const renewBe = await ctx.runMutation(internal.spotDefenseBots.renewSpotDefenseReconcile, { armId, token });
+                    if (renewBe.ok) {
+                      try {
+                        const rbe = await placeStopLoss(exchange, assetId, szDecimals, "Short", realSize, posEntryPx, arm.stopLossPct, newCloid, beTrigger);
+                        placed = rbe.state === "resting" || rbe.state === "filled";   // pending (ambiguo) → próximo ciclo lo detecta por openByCloid
+                      } catch { placed = false; }   // determinista → reintentar; el SL viejo sigue protegiendo
+                    }
+                  }
+                  if (placed) {
+                    await cancelOwnByCloid(exchange, assetId, [oldCloid]);   // recién ahora se quita el viejo
+                    await ctx.runMutation(internal.spotDefenseBots.recordSpotDefenseSlOrder, {
+                      armId, token, cloid: newCloid, triggerPx: beTrigger, size: realSize, observedStatus: "open", markSubmitted: true, attempt: newAttempt,
+                    });
+                    await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseBeMoved, { armId, token });
+                    await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "protected" });
+                    return { result: "be_moved" };
+                  }
+                  return { result: "be_pending" };   // no confirmado → SL viejo intacto y vivo; reintenta
                 }
               }
             } else if (slOrder.observedStatus === "pending" && slOrder.submittedAt != null
@@ -479,9 +501,18 @@ export const processSpotDefenseRearms = internalAction({
       if (!claim.claimed) continue;
       const token = claim.token!;
       try {
-        await ctx.runAction(internal.spotDefenseEngine.armSpotDefenseInternal, { botId, rearmToken: token });
-        await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseRearm, { botId, token, outcome: "ok" });
-        rearmed++;
+        // (Codex 3c-3ab #2) armSpotDefenseInternal puede devolver ok:false SIN throw (CAS/gate/transport/
+        // rechazo post-envío) → NO marcar OK a ciegas: solo si quedó arm vivo (filled/armed). Si no,
+        // reprogramar (transient) salvo que el CAS lo abortara por desarmado/pausa (cancel).
+        const r: any = await ctx.runAction(internal.spotDefenseEngine.armSpotDefenseInternal, { botId, rearmToken: token });
+        if (r?.ok === true) {
+          await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseRearm, { botId, token, outcome: "ok" });
+          rearmed++;
+        } else {
+          const reason = String(r?.reason ?? r?.status ?? "no_arm");
+          const outcome = reason === "disarmed" ? "cancel" : "transient";
+          await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseRearm, { botId, token, outcome, error: `arm no-ok: ${reason}` });
+        }
       } catch (e) {
         // [cancel] → cancelar; [blocked_*] → blocked reevaluable; resto/[transient]/[retry_*] → reintento.
         const msg = String((e as Error)?.message ?? e);

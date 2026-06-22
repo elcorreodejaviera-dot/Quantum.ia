@@ -299,6 +299,46 @@ describe("Fase 3a — ciclo de vida del arm (claim/settle/fencing/cuarentena)", 
     expect((await t.run((ctx: MutationCtx) => ctx.db.get(botId)))?.rearmStatus).toBeUndefined();
   });
 
+  it("(Codex 3c-3ab #3) reclama un rearm 'running' con lease VENCIDO (worker muerto)", async () => {
+    const t = makeConvexTest();
+    const botId = await t.run(async (ctx: MutationCtx) => {
+      const userId = await seedUser(ctx, { role: "admin" });
+      const hlAccountId = await seedCredential(ctx, userId);
+      const spotPositionId = await ctx.db.insert("spot_positions", { asset: "BTC", amount: 1, dca: 1, userId: "ck" });
+      const now = Date.now();
+      return ctx.db.insert("spot_defense_bots", {
+        userId, spotPositionId, hlAccountId, asset: "BTC", baseAsset: "BTC", side: "Short",
+        leverage: 10, stopLossPct: 1, triggerMode: "manual", triggerPrice: 1, requestedNotionalUsd: 100,
+        active: true, status: "running", network: "testnet", generation: 1, createdAt: now, updatedAt: now,
+        // running con lease VENCIDO → debe ser reclamable
+        rearmStatus: "running", rearmLeaseToken: "viejo", rearmLeaseUntil: now - 1000, nextRearmAt: now - 5000,
+      });
+    });
+    const due = await t.query(internal.spotDefenseBots.listDueSpotDefenseRearmsInternal, {});
+    expect(due).toContain(botId);
+    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseRearm, { botId });
+    expect(claim.claimed).toBe(true);   // reclamado pese a estar 'running' (lease vencido)
+    expect(claim.token).not.toBe("viejo");
+  });
+
+  it("(Codex 3c-3ab #3) NO roba un rearm 'running' con lease VIVO", async () => {
+    const t = makeConvexTest();
+    const botId = await t.run(async (ctx: MutationCtx) => {
+      const userId = await seedUser(ctx, { role: "admin" });
+      const hlAccountId = await seedCredential(ctx, userId);
+      const spotPositionId = await ctx.db.insert("spot_positions", { asset: "BTC", amount: 1, dca: 1, userId: "ck" });
+      const now = Date.now();
+      return ctx.db.insert("spot_defense_bots", {
+        userId, spotPositionId, hlAccountId, asset: "BTC", baseAsset: "BTC", side: "Short",
+        leverage: 10, stopLossPct: 1, triggerMode: "manual", triggerPrice: 1, requestedNotionalUsd: 100,
+        active: true, status: "running", network: "testnet", generation: 1, createdAt: now, updatedAt: now,
+        rearmStatus: "running", rearmLeaseToken: "vivo", rearmLeaseUntil: now + 60000,
+      });
+    });
+    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseRearm, { botId });
+    expect(claim.claimed).toBe(false);
+  });
+
   it("(Codex 3c-3b) cierre por SL SIN autoRearm → no programa rearm", async () => {
     const t = makeConvexTest();
     const b = await t.run((ctx: MutationCtx) => seedDefenseBot(ctx));   // autoRearm ausente

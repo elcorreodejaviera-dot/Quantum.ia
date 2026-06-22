@@ -27,9 +27,24 @@ describe("spotDefenseCloidInput", () => {
     expect(new Set(inputs).size).toBe(inputs.length);
   });
 
-  it("solo incluye tpIndex en role tp", () => {
-    expect(spotDefenseCloidInput("bot1", 1, "entry", 0, 5)).toBe("spot-defense:bot1:1:entry:0");
+  it("incluye tpIndex en role tp", () => {
     expect(spotDefenseCloidInput("bot1", 1, "tp", 0, 5)).toBe("spot-defense:bot1:1:tp:5:0");
+  });
+
+  it("(Codex) endurece TPs: role tp sin tpIndex lanza", () => {
+    expect(() => spotDefenseCloidInput("bot1", 1, "tp")).toThrow(/requiere tpIndex/);
+    expect(() => spotDefenseCloidInput("bot1", 1, "tp", 0, -1)).toThrow(/requiere tpIndex/);
+    expect(() => spotDefenseCloidInput("bot1", 1, "tp", 0, 1.5)).toThrow(/requiere tpIndex/);
+  });
+
+  it("(Codex) tpIndex en un rol no-TP lanza (no se ignora en silencio)", () => {
+    expect(() => spotDefenseCloidInput("bot1", 1, "entry", 0, 5)).toThrow(/solo aplica a role/);
+    expect(() => spotDefenseCloidInput("bot1", 1, "sl", 0, 0)).toThrow(/solo aplica a role/);
+  });
+
+  it("(Codex) generation/attempt deben ser enteros >= 0", () => {
+    expect(() => spotDefenseCloidInput("bot1", -1, "entry")).toThrow(/generation/);
+    expect(() => spotDefenseCloidInput("bot1", 1, "entry", -1)).toThrow(/attempt/);
   });
 
   it("produce un cloid HL válido (0x + 32 hex)", async () => {

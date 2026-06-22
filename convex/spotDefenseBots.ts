@@ -580,8 +580,11 @@ export const recordSpotDefenseSlOrder = internalMutation({
     observedStatus: v.union(
       v.literal("pending"), v.literal("open"), v.literal("triggered"), v.literal("filled"),
       v.literal("canceled"), v.literal("rejected"), v.literal("unknown")),
+    // (Codex 3c-1 r2 #2) Fija submittedAt = "el RPC SE ENVIÓ (aceptado/ambiguo)". Un `pending` SIN
+    // submittedAt = solo PREPARADO (pre-RPC) → no cuenta como SL vivo (el reconcile reintenta).
+    markSubmitted: v.optional(v.boolean()),
   },
-  handler: async (ctx, { armId, token, cloid, oid, triggerPx, size, observedStatus }) => {
+  handler: async (ctx, { armId, token, cloid, oid, triggerPx, size, observedStatus, markSubmitted }) => {
     const arm = await ctx.db.get(armId);
     if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
     const now = Date.now();
@@ -589,11 +592,13 @@ export const recordSpotDefenseSlOrder = internalMutation({
     if (existing) {
       const patch: Record<string, unknown> = { observedStatus, triggerPx, size, cloid, updatedAt: now };
       if (oid !== undefined) patch.oid = oid;
+      if (markSubmitted) patch.submittedAt = now;
       await ctx.db.patch(existing._id, patch);
       return { ok: true as const, orderId: existing._id };
     }
     const orderId = await ctx.db.insert("spot_defense_orders", {
-      armId, role: "sl", cloid, oid, triggerPx, size, reduceOnly: true, observedStatus, createdAt: now, updatedAt: now,
+      armId, role: "sl", cloid, oid, triggerPx, size, reduceOnly: true, observedStatus,
+      ...(markSubmitted ? { submittedAt: now } : {}), createdAt: now, updatedAt: now,
     });
     return { ok: true as const, orderId };
   },

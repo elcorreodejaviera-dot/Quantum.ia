@@ -302,10 +302,16 @@ export const reconcileSpotDefenseArm = internalAction({
 
         // Posición abierta y SIN pausa: asegurar el SL (Short → Buy por encima de la entrada).
         if (!wantDisarm) {
-          const slAlive = slOrder && (slOrder.observedStatus === "open" || slOrder.observedStatus === "triggered" || slOrder.observedStatus === "pending");
+          // (Codex 3c-1 r2 #2) Un SL `pending` SIN submittedAt = solo PREPARADO (pre-RPC) o `rejected`
+          // → NO cuenta como vivo: el reconcile reintenta colocarlo (si no, una posición quedaría sin SL
+          // mientras el motor cree que ya hay protección pendiente).
+          const slAlive = slOrder && (
+            slOrder.observedStatus === "open" || slOrder.observedStatus === "triggered" ||
+            (slOrder.observedStatus === "pending" && slOrder.submittedAt != null)
+          );
           if (!slAlive) {
-            // (Codex 3c-1 NO-GO #3) Cloid determinista. Persistir el intento `pending` ANTES del RPC y
-            // renovar el lease, para que un SL aceptado por HL NUNCA quede sin tracking local.
+            // (Codex 3c-1 #3) Cloid determinista. Persistir el intento `pending` (PREPARADO, sin
+            // submittedAt) ANTES del RPC + renovar lease → un SL aceptado por HL nunca queda sin tracking.
             const attempt = (arm.slAttempts ?? 0) + 1;
             const slCloid = await toHlCloid(spotDefenseCloidInput(String(armId), arm.generation, "sl", attempt));
             const slTriggerPx = posEntryPx * (1 + arm.stopLossPct / 100);
@@ -314,18 +320,26 @@ export const reconcileSpotDefenseArm = internalAction({
             });
             const renewSl = await ctx.runMutation(internal.spotDefenseBots.renewSpotDefenseReconcile, { armId, token });
             if (!pre.ok || !renewSl.ok) return { skipped: "sl_prepare_failed" };
-            const r = await placeStopLoss(exchange, assetId, szDecimals, "Short", realSize, posEntryPx, arm.stopLossPct, slCloid);
+            let r: { state: "resting" | "filled"; oid: string } | { state: "pending" };
+            try {
+              r = await placeStopLoss(exchange, assetId, szDecimals, "Short", realSize, posEntryPx, arm.stopLossPct, slCloid);
+            } catch (e) {
+              // Error DETERMINISTA (placeStopLoss lanza; TransportError ya lo traduce a pending): marcar
+              // `rejected` → el próximo ciclo NO lo trata como vivo y reintenta. NO fingir protección.
+              await ctx.runMutation(internal.spotDefenseBots.recordSpotDefenseSlOrder, {
+                armId, token, cloid: slCloid, triggerPx: slTriggerPx, size: realSize, observedStatus: "rejected",
+              });
+              await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "protecting", error: String((e as Error)?.message ?? e) });
+              return { skipped: "sl_rejected" };
+            }
             const obs = r.state === "resting" ? "open" : r.state === "filled" ? "filled" : "pending";
+            // markSubmitted: el RPC SE ENVIÓ (resting/filled, o pending=ambiguo de HL) → ahora sí cuenta.
             const rec = await ctx.runMutation(internal.spotDefenseBots.recordSpotDefenseSlOrder, {
               armId, token, cloid: slCloid, oid: r.state === "pending" ? undefined : r.oid,
-              triggerPx: slTriggerPx, size: realSize, observedStatus: obs,
+              triggerPx: slTriggerPx, size: realSize, observedStatus: obs, markSubmitted: true,
             });
-            // Solo declarar protected si el SL quedó resting/filled Y se persistió; si no, NO fingir.
-            if (rec.ok && r.state !== "pending") {
-              await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "protected" });
-            } else {
-              await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "protecting" });
-            }
+            // Solo declarar protected si el SL quedó resting/filled Y se persistió; si no, protecting.
+            await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: rec.ok && r.state !== "pending" ? "protected" : "protecting" });
           }
           // BE/TP → Fase 3c-2.
           void markPx;
@@ -333,19 +347,26 @@ export const reconcileSpotDefenseArm = internalAction({
         return { result: "position_reconciled" };
       }
 
-      // ===== FASE PRE-FILL (armed/submitting/unknown): confirmar fill o desarmar =====
-      if (wantDisarm) {
-        // (Codex 3c-1 NO-GO #2) Confirmar muerte de las órdenes propias ANTES de declarar disarmed.
-        const allDead = await ensureSpotDefenseOrdersDead(info, exchange, user, assetId, ownCloids);
-        if (!allDead) return { skipped: "orders_still_live" };
-        // (Codex 3c-1 NO-GO #1) Validar la transición: si ALLOWED la rechaza, NO reportar disarmado.
-        const r = await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "disarmed", closeReason: "disarm" });
-        return r.ok ? { result: "disarmed" } : { skipped: "disarm_not_applied" };
-      }
+      // ===== FASE PRE-FILL (armed/submitting/unknown): confirmar FILL antes de desarmar =====
+      // (Codex 3c-1 r2 #1) Una entrada pudo llenarse incluso bajo wantDisarm. Si hay fill, pasar a
+      // `filled` (fase de posición) — NUNCA desarmar dejando un SHORT real sin arm/SL/seguimiento.
       const f = await fillsByCloid(info, user, entry.cloid);
       if (f.size > 0 && f.avgPx > 0) {
         await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "filled", filledSize: f.size, entryPrice: f.avgPx });
         return { result: "filled" };
+      }
+      if (wantDisarm) {
+        // Prueba negativa de muerte de órdenes propias antes de declarar disarmed.
+        const allDead = await ensureSpotDefenseOrdersDead(info, exchange, user, assetId, ownCloids);
+        if (!allDead) return { skipped: "orders_still_live" };
+        // Re-confirmar que la cancelación no dejó pasar un fill de último momento.
+        const f2 = await fillsByCloid(info, user, entry.cloid);
+        if (f2.size > 0 && f2.avgPx > 0) {
+          await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "filled", filledSize: f2.size, entryPrice: f2.avgPx });
+          return { result: "filled" };
+        }
+        const r = await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "disarmed", closeReason: "disarm" });
+        return r.ok ? { result: "disarmed" } : { skipped: "disarm_not_applied" };
       }
       return { result: "armed_waiting" };
     } finally {

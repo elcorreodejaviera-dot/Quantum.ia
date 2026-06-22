@@ -325,6 +325,22 @@ describe("Fase 3a — ciclo de vida del arm (claim/settle/fencing/cuarentena)", 
     expect(bad.ok).toBe(false);
   });
 
+  it("(Codex 3c-1 r2 #2) pre-record pending NO marca submittedAt; sí al enviar (markSubmitted)", async () => {
+    const t = makeConvexTest();
+    const { armId } = await reservedArm(t);
+    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
+    const base = { armId, token: claim.token, cloid: "0xslp", triggerPx: 2020, size: 0.01 };
+    // PREPARADO (pre-RPC): pending sin submittedAt → el motor NO lo trata como SL vivo (slAlive=false).
+    await t.mutation(internal.spotDefenseBots.recordSpotDefenseSlOrder, { ...base, observedStatus: "pending" });
+    let sl = await t.run((ctx: MutationCtx) => ctx.db.query("spot_defense_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", "sl")).first());
+    expect(sl?.submittedAt).toBeUndefined();
+    // ENVIADO (RPC aceptado): markSubmitted fija submittedAt → ahora sí cuenta como vivo.
+    await t.mutation(internal.spotDefenseBots.recordSpotDefenseSlOrder, { ...base, observedStatus: "open", oid: "999", markSubmitted: true });
+    sl = await t.run((ctx: MutationCtx) => ctx.db.query("spot_defense_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", "sl")).first());
+    expect(typeof sl?.submittedAt).toBe("number");
+    expect(sl?.observedStatus).toBe("open");
+  });
+
   it("(Codex) cuarentena: no terminaliza un arm submittedAt reciente", async () => {
     const t = makeConvexTest();
     const { armId } = await reservedArm(t);

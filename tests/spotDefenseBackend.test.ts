@@ -118,6 +118,73 @@ describe("reserveSpotDefenseArm — gates live + leverage (Codex Fase 2 #1/#4/#5
   });
 });
 
+describe("CAS revalidan el live guard entre reserva y envío (Codex Fase 2 r2 #1)", () => {
+  const reserve = (t: any, botId: any) =>
+    t.mutation(internal.spotDefenseBots.reserveSpotDefenseArm, { botId, triggerPx: 2000, availableCollateral: 1000, assetMaxLeverage: 20, szDecimals: 3 });
+  async function killTrading(t: any) {
+    await t.run(async (ctx: MutationCtx) => {
+      const cfg = await ctx.db.query("system_config").withIndex("by_key", (q) => q.eq("key", "tradingEnabled")).first();
+      await ctx.db.patch(cfg!._id, { value: false });
+    });
+  }
+
+  it("markArmSubmitting bloquea si se apaga el kill-switch tras reservar", async () => {
+    const t = makeConvexTest();
+    const { botId } = await t.run((ctx) => seedDefenseBot(ctx));
+    const r = await reserve(t, botId);
+    await killTrading(t);
+    const cas = await t.mutation(internal.spotDefenseBots.markArmSubmitting, { armId: r.armId });
+    expect(cas.ok).toBe(false);
+    expect(cas.reason).toBe("blocked");
+  });
+
+  it("gateArmBeforeOrder bloquea si se apaga el kill-switch tras pasar a submitting", async () => {
+    const t = makeConvexTest();
+    const { botId } = await t.run((ctx) => seedDefenseBot(ctx));
+    const r = await reserve(t, botId);
+    const cas = await t.mutation(internal.spotDefenseBots.markArmSubmitting, { armId: r.armId });
+    expect(cas.ok).toBe(true);
+    await killTrading(t);
+    const gate = await t.mutation(internal.spotDefenseBots.gateArmBeforeOrder, { armId: r.armId, token: cas.token });
+    expect(gate.ok).toBe(false);
+  });
+
+  it("markArmSubmitting bloquea si se activa simulationMode tras reservar", async () => {
+    const t = makeConvexTest();
+    const { botId } = await t.run((ctx) => seedDefenseBot(ctx));
+    const r = await reserve(t, botId);
+    await t.run(async (ctx: MutationCtx) => {
+      const cfg = await ctx.db.query("system_config").withIndex("by_key", (q) => q.eq("key", "simulationMode")).first();
+      await ctx.db.patch(cfg!._id, { value: true });
+    });
+    const cas = await t.mutation(internal.spotDefenseBots.markArmSubmitting, { armId: r.armId });
+    expect(cas.ok).toBe(false);
+  });
+});
+
+describe("revokeById detiene bots spot-defense sin arm vivo (Codex Fase 2 r2 #2)", () => {
+  const CLERK = "u-rev";
+  it("al revocar la credencial, el bot de defensa sin arm queda stopped+inactivo", async () => {
+    const t = makeConvexTest();
+    const { acc, botId } = await t.run(async (ctx) => {
+      const userId = await ctx.db.insert("users", { clerkId: CLERK, role: "viewer" });
+      const acc = await seedCredential(ctx, userId);
+      const spotPositionId = await ctx.db.insert("spot_positions", { asset: "BTC", amount: 1, dca: 1, userId: CLERK });
+      const now = Date.now();
+      const botId = await ctx.db.insert("spot_defense_bots", {
+        userId, spotPositionId, hlAccountId: acc, asset: "BTC", baseAsset: "BTC", side: "Short",
+        leverage: 10, stopLossPct: 1, triggerMode: "manual", triggerPrice: 1, requestedNotionalUsd: 100,
+        active: true, status: "running", network: "testnet", generation: 0, createdAt: now, updatedAt: now,
+      });
+      return { acc, botId };
+    });
+    await t.withIdentity({ subject: CLERK }).mutation(api.hlCredentials.revokeById, { id: acc });
+    const bot = await t.run((ctx) => ctx.db.get(botId));
+    expect(bot?.active).toBe(false);
+    expect(bot?.status).toBe("stopped");
+  });
+});
+
 describe("exclusividad en rutas existentes (Codex Fase 2 #2)", () => {
   const CLERK = "u-sd";
   it("getOrCreatePoolBot rechaza cuenta con defensa spot viva del mismo par", async () => {

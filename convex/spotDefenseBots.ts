@@ -358,10 +358,9 @@ export const markArmSubmitting = internalMutation({
     if (!arm) return { ok: false as const, reason: "not_found" as const };
     if (arm.status !== "arming") return { ok: false as const, reason: "state" as const };
     if (arm.desiredState !== "armed") return { ok: false as const, reason: "disarmed" as const };
-    const bot = await ctx.db.get(arm.botId);
-    if (!bot || !bot.active || bot.disarmPending || bot.status !== "running") return { ok: false as const, reason: "blocked" as const };
-    if (arm.network !== hlNetwork()) return { ok: false as const, reason: "blocked" as const };
-    if (arm.network === "mainnet" && !(await isMainnetSpotDefenseApproved(ctx))) return { ok: false as const, reason: "blocked" as const };
+    // (Codex Fase 2 NO-GO r2 #1) Admisión LIVE COMPLETA justo antes de pasar a submitting: switches
+    // globales + canTradeLive + bot active/running/!disarm + cuenta owned + red + gate mainnet.
+    if (!(await assertSpotDefenseLiveAdmissible(ctx, arm.botId))) return { ok: false as const, reason: "blocked" as const };
     if (!(await coverageAdmissibleForKey(ctx, arm.userId, spotDefenseCoverageKey(arm.botId), arm.effectiveNotionalUsd))) {
       await ctx.db.patch(armId, { status: "failed", error: "[blocked_margin] cap/plan/suspensión (markArmSubmitting)", updatedAt: Date.now() });
       return { ok: false as const, reason: "blocked" as const };
@@ -383,10 +382,9 @@ export const gateArmBeforeOrder = internalMutation({
     if (!arm) return { ok: false as const };
     if (arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
     if (arm.status !== "submitting" || arm.desiredState !== "armed") return { ok: false as const };
-    if (arm.network !== hlNetwork()) return { ok: false as const };
-    if (arm.network === "mainnet" && !(await isMainnetSpotDefenseApproved(ctx))) return { ok: false as const };
-    const bot = await ctx.db.get(arm.botId);
-    if (!bot || !bot.active || bot.disarmPending || bot.status !== "running") return { ok: false as const };
+    // (Codex Fase 2 NO-GO r2 #1) Última revalidación LIVE bajo lease, inmediatamente antes del envío:
+    // un kill-switch / simulación / revocación de permiso / desvínculo de cuenta entre el CAS y el RPC.
+    if (!(await assertSpotDefenseLiveAdmissible(ctx, arm.botId))) return { ok: false as const };
     if (!(await coverageAdmissibleForKey(ctx, arm.userId, spotDefenseCoverageKey(arm.botId), arm.effectiveNotionalUsd))) {
       await ctx.db.patch(armId, {
         status: "failed", error: "[blocked_margin] cap/plan/suspensión (gateArmBeforeOrder)",

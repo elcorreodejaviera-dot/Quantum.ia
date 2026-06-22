@@ -80,6 +80,18 @@ export const revokeById = mutation({
     for (const bot of linked) {
       await ctx.db.patch(bot._id, { active: false, hlAccountId: undefined });
     }
+    // (JAV-107, Codex Fase 2 r2 #2) Detener los bots de defensa spot vinculados (sin arm vivo — los
+    // que lo tuvieran ya bloquearon la revocación arriba). hlAccountId es obligatorio en su schema, así
+    // que se marcan stopped+inactivos en vez de desvincular (no quedan operando contra una clave borrada).
+    const linkedDefense = await ctx.db
+      .query("spot_defense_bots")
+      .withIndex("by_account", (q) => q.eq("hlAccountId", id))
+      .collect();
+    for (const d of linkedDefense) {
+      if (d.status !== "stopped" || d.active) {
+        await ctx.db.patch(d._id, { active: false, status: "stopped", disarmPending: false, disarmRequestedAt: undefined, updatedAt: Date.now() });
+      }
+    }
     await ctx.db.delete(id);
   },
 });

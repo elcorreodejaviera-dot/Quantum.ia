@@ -593,6 +593,18 @@ export const setSpotDefenseBeMoved = internalMutation({
   },
 });
 
+// (Codex 3c-3ab r4) Trackea el CLOID del SL break-even en rotación (antes de sobrescribir la fila `sl`),
+// o lo limpia (null) al completar/abortar. Mientras esté set, el reconcile lo suma a ownCloids → cleanup.
+export const setSpotDefenseBePendingCloid = internalMutation({
+  args: { armId: v.id("spot_defense_arms"), token: v.string(), cloid: v.union(v.string(), v.null()) },
+  handler: async (ctx, { armId, token, cloid }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    await ctx.db.patch(armId, { bePendingCloid: cloid === null ? undefined : cloid, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
 // Marca el cierre como emergencia/desarme (gobierna el closeReason al confirmar flat). Bajo lease.
 export const setSpotDefenseEmergencyClosing = internalMutation({
   args: { armId: v.id("spot_defense_arms"), token: v.string(), value: v.union(v.literal("emergency"), v.literal("disarm")) },

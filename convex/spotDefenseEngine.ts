@@ -251,7 +251,10 @@ export const reconcileSpotDefenseArm = internalAction({
         (arm.network === "mainnet" && !mainnetGate.approved);
       const wantDisarm = killed || arm.desiredState === "disarmed";
 
-      const ownCloids = orders.map((o: any) => o.cloid);
+      // (Codex 3c-3ab r4) Incluir el SL break-even EN ROTACIÓN (aún no en la fila `sl`) para que el
+      // cleanup/cierre/stop lo cancelen y nunca quede una orden reduceOnly huérfana en HL.
+      const ownCloids = [...orders.map((o: any) => o.cloid), ...(arm.bePendingCloid ? [arm.bePendingCloid] : [])]
+        .filter((c, i, a) => c && a.indexOf(c) === i);
 
       // ===== FASE DE POSICIÓN (la entrada ya llenó): SL + cierre + drift =====
       if (arm.status === "filled" || arm.status === "protecting" || arm.status === "protected") {
@@ -389,19 +392,22 @@ export const reconcileSpotDefenseArm = internalAction({
                   let placed = await openByCloid(info, user, newCloid);
                   if (!placed) {
                     const renewBe = await ctx.runMutation(internal.spotDefenseBots.renewSpotDefenseReconcile, { armId, token });
-                    if (renewBe.ok) {
-                      try {
-                        const rbe = await placeStopLoss(exchange, assetId, szDecimals, "Short", realSize, posEntryPx, arm.stopLossPct, newCloid, beTrigger);
-                        placed = rbe.state === "resting" || rbe.state === "filled";   // pending (ambiguo) → próximo ciclo lo detecta por openByCloid
-                      } catch { placed = false; }   // determinista → reintentar; el SL viejo sigue protegiendo
-                    }
+                    if (!renewBe.ok) return { skipped: "lease_lost" };
+                    // (Codex 3c-3ab r4) TRACKEAR el newCloid ANTES del RPC: aunque el viejo siga vivo o
+                    // crasheemos, el nuevo entra en ownCloids → cleanup/cierre/stop lo cancelan (nunca huérfano).
+                    await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseBePendingCloid, { armId, token, cloid: newCloid });
+                    try {
+                      const rbe = await placeStopLoss(exchange, assetId, szDecimals, "Short", realSize, posEntryPx, arm.stopLossPct, newCloid, beTrigger);
+                      placed = rbe.state === "resting" || rbe.state === "filled";   // pending (ambiguo) → próximo ciclo lo detecta por openByCloid
+                    } catch { placed = false; }   // determinista → reintentar; el SL viejo sigue protegiendo
+                  } else if (arm.bePendingCloid !== newCloid) {
+                    // recovery: ya colocado en un intento previo → asegurar que quede trackeado.
+                    await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseBePendingCloid, { armId, token, cloid: newCloid });
                   }
                   if (placed) {
                     // (Codex 3c-3ab r2) NO sobrescribir la fila `sl` (única, upsert por rol) hasta CONFIRMAR
                     // por HL que el viejo murió: si no, una cancelación fallida dejaría el viejo vivo y FUERA
-                    // del tracking (ownCloids sale de DB) → orden reduceOnly huérfana. La fila conserva el
-                    // oldCloid hasta la prueba negativa; el newCloid es determinista (openByCloid lo detecta
-                    // ya colocado en el reintento), así que no se recoloca ni se acumula.
+                    // del tracking → orden reduceOnly huérfana. El newCloid ya está trackeado vía bePendingCloid.
                     await cancelOwnByCloid(exchange, assetId, [oldCloid]);
                     const oldDead = !(await openByCloid(info, user, oldCloid));
                     if (oldDead) {
@@ -409,12 +415,14 @@ export const reconcileSpotDefenseArm = internalAction({
                         armId, token, cloid: newCloid, triggerPx: beTrigger, size: realSize, observedStatus: "open", markSubmitted: true, attempt: newAttempt,
                       });
                       await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseBeMoved, { armId, token });
+                      // El newCloid ya vive en la fila `sl` → limpiar el pendiente (evita doble-tracking).
+                      await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseBePendingCloid, { armId, token, cloid: null });
                       await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "protected" });
                       return { result: "be_moved" };
                     }
-                    return { result: "be_old_still_live" };   // viejo aún vivo → sigue trackeado; reintento próximo ciclo
+                    return { result: "be_old_still_live" };   // viejo aún vivo; new trackeado vía bePendingCloid; reintento
                   }
-                  return { result: "be_pending" };   // new no confirmado → SL viejo intacto y vivo; reintenta
+                  return { result: "be_pending" };   // new no confirmado; bePendingCloid trackea el intento
                 }
               }
             } else if (slOrder.observedStatus === "pending" && slOrder.submittedAt != null

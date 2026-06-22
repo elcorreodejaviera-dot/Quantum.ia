@@ -704,6 +704,10 @@ export default defineSchema({
     stopLossPct: v.number(),
     breakevenPct: v.optional(v.number()),
     beMoved: v.optional(v.boolean()),
+    // (Codex 3c-3ab r4) CLOID del SL break-even en ROTACIÓN: se coloca con el viejo aún vivo y la fila
+    // `sl` no se sobrescribe hasta confirmar muerto el viejo → mientras tanto el nuevo se trackea aquí
+    // para que ensureOrdersDead/cierre/stop lo cancelen y nunca quede una orden reduceOnly huérfana.
+    bePendingCloid: v.optional(v.string()),
     tps: v.optional(v.array(v.object({ gainPct: v.number(), closePct: v.number() }))),
     // SL post-fill
     slAttempts: v.optional(v.number()),

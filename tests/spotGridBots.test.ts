@@ -333,4 +333,40 @@ describe("pause/list/get — ownership (JAV-91, Codex BAJO)", () => {
     expect(over?.stats.truncated).toBe(true);                   // cap+1 → truncado
     expect(over?.stats.cyclesCount).toBe(cap);                  // cuenta tope al cap, no cap+1
   });
+
+  it("(JAV-104) flotante marca a mercado con lastPrice (NO el ancla currentPrice); priceStale por lastPriceAt", async () => {
+    // Inventario en mano: una BUY llenada de 0.001 @ 60000 sin SELL → heldQty=0.001, heldAvgCost=60000.
+    async function detail(over: { lastPrice?: number; lastPriceAt?: number; currentPrice?: number }) {
+      const t = makeConvexTest();
+      const { userId, botId } = await seedBotFor(t, "owner1");
+      const now = Date.now();
+      await t.run(async (ctx: MutationCtx) => {
+        await ctx.db.patch(botId, over);
+        await ctx.db.insert("spot_grid_orders", {
+          botId, userId, cloid: "0xbuy", assetId: 10107, side: "buy", price: 60000, quantity: 0.001,
+          quoteSize: 60, gridLevel: 0, generation: 1, cycleId: 0, status: "filled",
+          filledQty: 0.001, avgFillPx: 60000, filledFeeUsd: 0, createdAt: now,
+        });
+      });
+      const d = await as(t, "owner1").query(api.spotGridBots.getSpotGridDetail, { botId });
+      return d?.accounting;
+    }
+
+    // Precio vivo fresco distinto del ancla: flotante usa lastPrice (65000), NO currentPrice (50000).
+    const fresh = await detail({ lastPrice: 65000, lastPriceAt: Date.now(), currentPrice: 50000 });
+    expect(fresh?.heldQty).toBeCloseTo(0.001, 9);
+    expect(fresh?.heldAvgCost).toBeCloseTo(60000, 6);
+    expect(fresh?.floatingPnl).toBeCloseTo((65000 - 60000) * 0.001, 9);   // = +5·0.001 = 0.005
+    expect(fresh?.priceStale).toBe(false);
+
+    // Sin lastPriceAt (legacy / nunca reconciliado nuevo): priceStale=true y refPrice cae a currentPrice.
+    const stale = await detail({ currentPrice: 50000 });
+    expect(stale?.priceStale).toBe(true);
+    expect(stale?.floatingPnl).toBeCloseTo((50000 - 60000) * 0.001, 9);   // fallback al ancla = -0.01
+
+    // lastPriceAt viejo (>5min) → priceStale aunque haya lastPrice.
+    const old = await detail({ lastPrice: 65000, lastPriceAt: Date.now() - 6 * 60 * 1000, currentPrice: 50000 });
+    expect(old?.priceStale).toBe(true);
+    expect(old?.floatingPnl).toBeCloseTo((65000 - 60000) * 0.001, 9);     // sigue marcando con lastPrice
+  });
 });

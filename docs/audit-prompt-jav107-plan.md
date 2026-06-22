@@ -1,4 +1,16 @@
-# Auditoría de PLAN (RONDA 2) — JAV-107: Bot de defensa de posiciones SPOT
+# Auditoría de PLAN (RONDA 3) — JAV-107: Bot de defensa de posiciones SPOT
+
+> **RONDA 3.** La ronda 2 dio NO-GO con 4 bloqueantes, TODOS incorporados al plan (sección "Cambios tras
+> Codex r2"): **(1)** reserva de margen REAL atómica en `reserveSpotDefenseArm` (mutation OCC con
+> `committedMarginForAccount` `executions.ts:73` + `resolveLeverage` `leverage.ts:36` + `MARGIN_SAFETY_BUFFER`
+> + cap), no solo preflight; **(2)** detector de drift en cada reconcile (szi real ≠ esperado → cancelar
+> solo lo propio, marcar `manual_intervention`, sin market close ciego); **(3)** cap atómico con clave
+> coherente `spot-defense:<botId>` (persistir bot primero) validado en `reserveSpotDefenseArm` +
+> `markArmSubmitting` + `gateArmBeforeOrder`; **(4)** cobertura parcial explícita (persistir
+> `requestedNotionalUsd`+`effectiveNotionalUsd`, % cubierto, confirmación + bloqueo bajo umbral).
+> Confirma que estos 4 cierres son correctos y suficientes, busca huecos nuevos y emite GO / NO-GO.
+
+
 
 Eres un auditor senior de código money-path en Hyperliquid. Audita el **DISEÑO** de abajo (todavía
 NO hay código). Emite **GO / NO-GO** por hallazgo, con severidad (ALTO / MEDIO / BAJO). No reescribas

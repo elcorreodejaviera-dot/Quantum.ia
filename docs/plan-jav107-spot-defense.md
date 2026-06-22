@@ -68,6 +68,30 @@ Ronda 1 de Codex dio NO-GO con 6 hallazgos, todos cerrados en este diseño:
 6. **Gate mainnet dedicado (MEDIO):** insuficiente reusar solo `tradingEnabled`. Añadir
    `mainnetSpotDefenseApproval` obligatorio en **create, arm, reconcile y pre-order**. Ver Fase 3 §gate.
 
+## Cambios tras Codex r2 (NO-GO ronda 2) — incorporados abajo
+
+1. **Reserva de margen REAL atómica (ALTO):** el sizing no puede vivir solo en una action de preflight.
+   Crear **`reserveSpotDefenseArm`** (mutation, espejo de `triggerArms.reserveArm`) que en UNA sola
+   transacción OCC: lee `availableCollateral` (snapshot pasado por la action), `marginCommitted` vía
+   **`committedMarginForAccount(ctx, hlAccountId)`** (`executions.ts:73`), resuelve leverage/margen con
+   **`resolveLeverage`** (`leverage.ts:36`, fuente auditada), aplica `MARGIN_SAFETY_BUFFER`, valida el
+   **cap del plan**, e inserta la generación del arm. El precheck/action solo lee HL y pasa snapshots; la
+   verdad de reserva es esta mutation (anti-carrera). Ver Fase 2/3.
+2. **Drift por intervención manual (ALTO):** flat al armar NO basta — el usuario puede abrir/cerrar el
+   mismo coin después (posición HL es neta). **Detector de drift en cada reconcile:** si el `szi` real
+   ≠ tamaño esperado del arm (tras fills/TPs) → **cancelar solo órdenes propias (por cloid), marcar el
+   arm `manual_intervention` (nuevo estado) / `unknown`, y NUNCA hacer market close ciego.** (Decisión:
+   se mantiene la cuenta compartible por baseAsset —no se exige dedicada— y se cubre el riesgo con el
+   detector de drift.) Ver Fase 1 (estado) y Fase 3 (reconcile).
+3. **Cap atómico con clave coherente (ALTO):** `spot-defense:<botId>` no existe en preflight (aún no hay
+   `botId`). **Orden:** persistir el bot primero → reservar con clave `spot-defense:<botId>`. El cap NO
+   es solo preflight: se valida en **`reserveSpotDefenseArm`, `markArmSubmitting` y `gateArmBeforeOrder`**
+   (variante NO-lanzante `coverageUsage.ts:134`). Ver Fase 2.
+4. **Cobertura parcial explícita (MEDIO):** si `effectiveNotionalUsd < requestedNotionalUsd` (cap/margen
+   recortó) → **confirmación explícita del usuario** en UI, **persistir ambos** `requestedNotionalUsd` y
+   `effectiveNotionalUsd`, mostrar **% cubierto**, y **bloquear** si cae bajo un umbral mínimo
+   configurable. Ver Fase 1 (campos) y Fase 4 (UI).
+
 ## Cambios por fase (money-path → cada fase: Codex GO plan+código, CodeRabbit, deploy + HL_NETWORK)
 
 ### Fase 1 — Schema + connector cloid (sin money-path activo)
@@ -75,14 +99,18 @@ Ronda 1 de Codex dio NO-GO con 6 hallazgos, todos cerrados en este diseño:
   - **`spot_defense_bots`** (modelada en `bots` + `spot_grid_bots`): `userId`, `spotPositionId`
     (`v.id("spot_positions")`), `asset`/`baseAsset`, `hlAccountId`, `side:"Short"`, `leverage`,
     `autoLeverage`, `bufferPct`, `stopLossPct`, `breakevenPct`, `tps`, `autoRearm`, `triggerMode`
-    (`"manual"|"dca"`), `triggerPrice` (precio explícito normalizado), `notionalUsd` (snapshot
-    `amount × precio × (1+buffer)`), `active`, `status`, `disarmPending`/`disarmRequestedAt`,
+    (`"manual"|"dca"`), `triggerPrice` (precio explícito normalizado), **`requestedNotionalUsd`**
+    (lo pedido = `amount × precio × (1+buffer)`) y **`effectiveNotionalUsd`** (lo realmente reservado tras
+    cap/margen; Codex r2 #4 — persistir AMBOS para no ocultar infra-cobertura), `minCoveragePct`
+    (umbral mínimo configurable bajo el cual se bloquea), `active`, `status`,
+    `disarmPending`/`disarmRequestedAt`,
     campos de rearm (igual que `bots`), `createdAt`/`updatedAt`. Índices: `by_user`,
     `by_user_position` (`userId,spotPositionId` — unicidad 1 bot por posición), `by_user_account`.
   - **`spot_defense_arms`** (modelada en `trigger_arms` pero SIN pool y con **una sola entrada**):
     `botId`(→spot_defense_bots), `userId`, `hlAccountId`, `asset`, `network`, `generation`, `status`
     (reusar el enum de `trigger_arms` recortado: arming/submitting/armed/filled/protecting/protected/
-    disarming/disarmed/closed/failed/unknown — **sin** `armed_lower_only`),
+    disarming/disarmed/closed/failed/unknown — **sin** `armed_lower_only`, **+ `manual_intervention`**
+    (Codex r2 #2: drift detectado → ni reconcile ciego ni market close)),
     **`desiredState:"armed"|"disarmed"`** (Codex r1 #5, igual que `trigger_arms.desiredState`),
     `side:"Short"`, `triggerPx`,
     `size`, `appliedLeverage`, `reservedNotional`/`marginReserved`, `notionalUsd`, `stopLossPct`,
@@ -113,16 +141,25 @@ Ronda 1 de Codex dio NO-GO con 6 hallazgos, todos cerrados en este diseño:
     y exige `triggerPrice < markPx` (un SELL trigger de bajada no puede nacer disparado). En modo DCA, si
     `dca >= markPx` → **rechazar** con mensaje claro (caso BTC DCA $82.350 vs ~$64k). El gate se **repite
     antes de enviar la orden** en la action de arm (Fase 3).
-  - **§sizing seguro (Codex r1 #1):** el nocional NO sale solo de `amount`. `precheckSpotDefenseCreate`
-    calcula `notionalEfectivo = min(` `amount × markPx × (1+buffer)`, **cota por margen real**
-    `withdrawable × leverageEfectivo × (1 − MARGIN_SAFETY_BUFFER)`, **cap del plan restante** `)` con
-    `leverageEfectivo = min(leverage, maxLeverage del activo)`. Si la cota manda, avisar en UI que el
-    short queda por debajo de la posición spot (cobertura parcial). Persistir el `notionalUsd` resultante.
+  - **§sizing seguro + reserva atómica (Codex r1 #1 + r2 #1):** `precheckSpotDefenseCreate` (action)
+    solo LEE HL (`markPx`, `availableCollateral` = USDC libre, posición flat, open orders) y calcula el
+    `requestedNotionalUsd = amount × markPx × (1+buffer)`. La VERDAD de reserva vive en
+    **`reserveSpotDefenseArm`** (mutation, espejo de `triggerArms.reserveArm`) que en UNA transacción OCC:
+    `marginCommitted = committedMarginForAccount(ctx, hlAccountId)` (`executions.ts:73`),
+    `{appliedLeverage, marginRequired} = resolveLeverage({autoLeverage, manualLeverage:leverage,
+    reservedNotional, availableCollateral, marginCommitted, assetMaxLeverage})` (`leverage.ts:36`),
+    guard `marginCommitted + marginRequired ≤ availableCollateral × (1 − MARGIN_SAFETY_BUFFER)`, valida
+    el **cap del plan** (clave `spot-defense:<botId>`), recorta a `effectiveNotionalUsd` si manda la cota,
+    e inserta la generación del arm. Persistir `requestedNotionalUsd` y `effectiveNotionalUsd` (r2 #4).
+  - **§orden de creación (Codex r2 #3):** persistir el bot PRIMERO (`persistSpotDefenseBot`) → así existe
+    `botId` para la clave de cap `spot-defense:<botId>` → luego `reserveSpotDefenseArm`. El cap se valida
+    **atómicamente** en `reserveSpotDefenseArm`, `markArmSubmitting` y `gateArmBeforeOrder` (variante
+    NO-lanzante `coverageUsage.ts:134`), no solo en preflight.
   - `listMySpotDefenseBots`, `getSpotDefenseDetail` (ownership, tope órdenes/cap como en grid),
     `pauseSpotDefenseBot`, lease/record/mark de órdenes y arms (espejo de `spotGridBots.ts` +
     `triggerArms.ts`), `closeArmAndScheduleRearm` / `setRearm*`, **CAS `markArmSubmitting` /
-    `gateArmBeforeOrder` (Codex r1 #5)** equivalentes a `triggerArms.ts` (cuarentena: `desiredState`
-    debe seguir `"armed"`, status `submitting`, sin orden previa).
+    `gateArmBeforeOrder` (Codex r1 #5 + r2 #3)** equivalentes a `triggerArms.ts` (cuarentena:
+    `desiredState` debe seguir `"armed"`, status `submitting`, sin orden previa, **cap revalidado**).
 - `convex/coverageUsage.ts` (Codex r1 #4): **rediseñar el consumo con claves explícitas namespaced** en
   vez de keyear por `poolId` crudo. `consumedCoverageByPool` → `consumedCoverageByKey(ctx,userId)` que
   devuelve un mapa `{ "pool:<poolId>": usd, "spot-defense:<botId>": usd }`; los pool-arms usan
@@ -147,8 +184,15 @@ Ronda 1 de Codex dio NO-GO con 6 hallazgos, todos cerrados en este diseño:
     (`placeStopLoss`), mover a BE cuando ganancia ≥ `breakevenPct` (latch `beMoved`, mismo guard
     anti-auto-disparo `beTrigger > markPx + tick` que `triggerEngine.ts`), colocar TPs parciales si
     `tps` no vacío (reduceOnly), cerrar ciclo y, si `autoRearm`, reprogramar. Idempotencia por
-    cloid + lookup + lease/fencing (igual que grid/trigger). `stopSpotDefenseBot`: cancela por cloid lo
-    propio y, si hay posición viva, cierre a mercado reduceOnly. Revalida gate + `hlNetwork()===network`.
+    cloid + lookup + lease/fencing (igual que grid/trigger).
+  - **§detector de drift (Codex r2 #2):** en cada reconcile, comparar el `szi` REAL del coin con el
+    **tamaño esperado del arm** (size − Σ cierres TP confirmados). Si difieren más allá de una tolerancia
+    (dust) → es intervención manual sobre el coin neto: **cancelar SOLO las órdenes propias (por cloid),
+    marcar el arm `manual_intervention`, NO hacer market close ciego** y emitir alerta. El bot no vuelve
+    a operar ese arm hasta que el usuario lo resuelva (reanudar = nuevo arm con cuenta flat).
+  - `stopSpotDefenseBot`: cancela por cloid SOLO lo propio; cierra a mercado reduceOnly **solo el tamaño
+    contable del arm** (no la posición neta ajena), abortando si detecta drift. Revalida gate mainnet +
+    `hlNetwork()===network`.
   - `reconcileSpotDefenseArm` revalida también el **gate mainnet** en cada ciclo (#6) y el
     `hlNetwork()===network`.
 - `convex/crons.ts`: nuevo cron **"reconcile spot defense" cada 1 min** (mismo patrón que "reconcile
@@ -167,6 +211,9 @@ Ronda 1 de Codex dio NO-GO con 6 hallazgos, todos cerrados en este diseño:
     **Manual / Anclado al DCA** + input de precio (precargado con `position.dca` en modo DCA, editable
     en manual). Sizing mostrado desde `amount × precio × (1+buffer)`. Guarda vía
     `api.spotDefenseBots.*` (create/persist). Sin `canTradeLive` no crea (igual que el de pool).
+    **Cobertura parcial (Codex r2 #4):** si `effectiveNotionalUsd < requestedNotionalUsd`, mostrar el
+    **% cubierto** y exigir **confirmación explícita** antes de crear; bloquear si cae bajo
+    `minCoveragePct`.
   - **Tarjeta en vivo:** clonar `CoberturaViva` (:174) → `DefensaSpotViva` con la **misma paleta y clases
     `cv-*`**, pero con **un solo `cv-tile` de Trigger** (en vez de "Trigger abajo/arriba"). Alimentada por
     `getSpotDefenseDetail` (arm vivo + órdenes) + saldo HL (`useHLAccountsBalances`, ya a nivel padre).

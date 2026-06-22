@@ -47,3 +47,26 @@ export function spotGridCloidInput(
   const base = `${botId}:${generation}:${cycleId}:${level}:${side}:${tranche}`;
   return kind === "grid" ? base : `${kind}:${base}`;
 }
+
+// (JAV-107) ROL de la orden del bot de defensa SPOT. `entry` = la única orden trigger SELL que abre el
+// short de cobertura; `sl` = stop loss post-fill; `tp` = take-profits parciales (reduceOnly). Mismo
+// patrón que el motor de triggers de pool, pero con UNA sola entrada.
+export type SpotDefenseCloidKind = "entry" | "sl" | "tp";
+
+/**
+ * Cloid determinista de una orden del bot de defensa spot. El input incluye `generation` (sube por
+ * arranque/re-arm) para que un re-arm NUNCA colisione por `by_cloid` con órdenes del arm anterior.
+ * `tpIndex` solo aplica a `kind="tp"` (0..N-1) → unicidad por TP individual; `attempt` rota el cloid al
+ * recolocar SL/TP (confirmar-antes-de-rotar, anti-doble). Namespace prefijado por `kind` (disjunto del
+ * spot grid y del motor de pool).
+ */
+export function spotDefenseCloidInput(
+  botId: string,
+  generation: number,
+  kind: SpotDefenseCloidKind,
+  attempt: number = 0,
+  tpIndex?: number,
+): string {
+  const idx = kind === "tp" && tpIndex !== undefined ? `:${tpIndex}` : "";
+  return `spot-defense:${botId}:${generation}:${kind}${idx}:${attempt}`;
+}

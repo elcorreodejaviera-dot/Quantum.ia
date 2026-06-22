@@ -625,4 +625,134 @@ export default defineSchema({
   })
     .index("by_bot", ["botId"])
     .index("by_bot_cycle", ["botId", "cycleId"]),
+
+  // --- JAV-107: Bot de defensa de posiciones SPOT (short de cobertura de un holding) ---
+  // Motor SEPARADO del de pool (trigger_arms): defiende un holding spot suelto (spot_positions) con UN
+  // solo trigger SELL (precio explícito manual o anclado al DCA), no por rango LP. Mismas reglas de
+  // cuenta (JAV-102 por baseAsset) y tope de plan (JAV-77) que la cobertura.
+  spot_defense_bots: defineTable({
+    userId: v.id("users"),
+    spotPositionId: v.id("spot_positions"),    // holding defendido (clave de unicidad: 1 bot por posición)
+    hlAccountId: v.id("hl_api_credentials"),   // cuenta HL vinculada (exclusividad por baseAsset)
+    asset: v.string(),                         // coin HL (p.ej. "BTC")
+    baseAsset: v.string(),                     // normalizado backend (WETH→ETH/WBTC→BTC) — clave de colisión
+    side: v.literal("Short"),                  // defensa = short al caer
+    leverage: v.number(),
+    autoLeverage: v.optional(v.boolean()),
+    bufferPct: v.optional(v.number()),
+    stopLossPct: v.number(),
+    breakevenPct: v.optional(v.number()),
+    tps: v.optional(v.array(v.object({ gainPct: v.number(), closePct: v.number() }))),  // opcionales
+    autoRearm: v.optional(v.boolean()),
+    // Trigger explícito: "manual" (precio a mano) | "dca" (anclado a spot_positions.dca).
+    triggerMode: v.union(v.literal("manual"), v.literal("dca")),
+    triggerPrice: v.number(),                  // precio del trigger normalizado al tick
+    // (Codex r2 #4) Nocional pedido (amount×precio×(1+buffer)) vs el realmente reservado tras cap/margen.
+    requestedNotionalUsd: v.number(),
+    effectiveNotionalUsd: v.optional(v.number()),
+    minCoveragePct: v.optional(v.number()),    // umbral mínimo de cobertura bajo el cual se bloquea
+    active: v.boolean(),
+    status: v.union(v.literal("running"), v.literal("paused"), v.literal("stopped"), v.literal("error")),
+    network: v.union(v.literal("mainnet"), v.literal("testnet")),
+    generation: v.number(),                    // +1 por arranque/re-arm (idempotencia de cloids)
+    disarmPending: v.optional(v.boolean()),
+    disarmRequestedAt: v.optional(v.number()),
+    // auto-rearm durable (espejo de `bots`)
+    rearmStatus: v.optional(v.union(v.literal("pending"), v.literal("running"), v.literal("blocked"))),
+    nextRearmAt: v.optional(v.number()),
+    rearmAttempts: v.optional(v.number()),
+    lastRearmError: v.optional(v.string()),
+    lastRearmErrorKind: v.optional(v.union(
+      v.literal("transient"), v.literal("blocked_margin"),
+      v.literal("blocked_config"), v.literal("retry_incompatible"))),
+    rearmLeaseToken: v.optional(v.string()),
+    rearmLeaseUntil: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_user", ["userId"])
+    .index("by_user_position", ["userId", "spotPositionId"])  // unicidad: 1 bot por posición spot
+    .index("by_user_account", ["userId", "hlAccountId"])      // exclusividad de cuenta (JAV-102)
+    .index("by_account", ["hlAccountId"])                     // escaneo cross-tabla de exclusividad
+    .index("by_rearm_status", ["rearmStatus", "nextRearmAt"]),
+
+  // Un "armado" del bot de defensa (versión = generation). Como trigger_arms pero SIN pool y con UNA sola
+  // entrada (single trigger SELL). Snapshot inmutable de la intención + lease/fencing.
+  spot_defense_arms: defineTable({
+    botId: v.id("spot_defense_bots"),
+    userId: v.id("users"),
+    hlAccountId: v.id("hl_api_credentials"),
+    asset: v.string(),
+    network: v.string(),                       // INMUTABLE — el cliente de cancelación se construye de aquí
+    generation: v.number(),
+    status: v.union(
+      v.literal("arming"), v.literal("submitting"), v.literal("armed"), v.literal("disarming"),
+      v.literal("disarmed"), v.literal("filled"), v.literal("protecting"), v.literal("protected"),
+      v.literal("closed"), v.literal("failed"), v.literal("unknown"),
+      // (Codex r2 #2) drift por intervención manual sobre el coin neto: ni reconcile ciego ni market close.
+      v.literal("manual_intervention")),
+    desiredState: v.union(v.literal("armed"), v.literal("disarmed")),   // (Codex r1 #5) gates CAS pre-envío
+    side: v.literal("Short"),
+    triggerPx: v.number(),                     // ya normalizado al tick
+    size: v.number(),
+    appliedLeverage: v.number(),
+    reservedNotional: v.number(),
+    marginReserved: v.number(),
+    // (Codex r2 #4) unidad de cobertura del plan (cap por `spot-defense:<botId>`).
+    requestedNotionalUsd: v.optional(v.number()),
+    effectiveNotionalUsd: v.optional(v.number()),
+    stopLossPct: v.number(),
+    breakevenPct: v.optional(v.number()),
+    beMoved: v.optional(v.boolean()),
+    tps: v.optional(v.array(v.object({ gainPct: v.number(), closePct: v.number() }))),
+    // SL post-fill
+    slAttempts: v.optional(v.number()),
+    slSubmittedAt: v.optional(v.number()),
+    protectDeadline: v.optional(v.number()),
+    // fill
+    filledSize: v.optional(v.number()),
+    entryPrice: v.optional(v.number()),
+    filledAt: v.optional(v.number()),
+    closeConfirmSince: v.optional(v.number()),
+    // ciclo de vida / fencing
+    submittedAt: v.optional(v.number()),
+    error: v.optional(v.string()),
+    fromRearm: v.optional(v.boolean()),
+    closeReason: v.optional(v.union(
+      v.literal("sl"), v.literal("manual"), v.literal("emergency"), v.literal("disarm"))),
+    emergencyClosing: v.optional(v.union(v.literal("emergency"), v.literal("disarm"))),
+    reconcileLeaseUntil: v.optional(v.number()),
+    reconcileLeaseToken: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_bot_generation", ["botId", "generation"])
+    .index("by_bot_status", ["botId", "status"])
+    .index("by_status_updated", ["status", "updatedAt"])
+    .index("by_updated", ["updatedAt"])
+    .index("by_account", ["hlAccountId"])
+    .index("by_filledAt", ["filledAt"])
+    .index("by_user_status", ["userId", "status"]),
+
+  // Cada orden nativa de un arm de defensa. CLOID = identidad primaria determinista (spotDefenseCloidInput).
+  spot_defense_orders: defineTable({
+    armId: v.id("spot_defense_arms"),
+    role: v.union(v.literal("entry"), v.literal("sl"), v.literal("tp")),
+    tpIndex: v.optional(v.number()),           // solo role:"tp" (0..N-1) — unicidad por (armId,"tp",tpIndex)
+    cloid: v.string(),
+    oid: v.optional(v.string()),
+    triggerPx: v.number(),
+    size: v.number(),
+    reduceOnly: v.boolean(),
+    attempt: v.optional(v.number()),
+    observedStatus: v.union(
+      v.literal("pending"), v.literal("open"), v.literal("triggered"), v.literal("filled"),
+      v.literal("canceled"), v.literal("rejected"), v.literal("unknown")),
+    submittedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_arm_role", ["armId", "role"])
+    .index("by_arm_role_index", ["armId", "role", "tpIndex"])
+    .index("by_cloid", ["cloid"]),
 });

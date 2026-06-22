@@ -274,11 +274,26 @@ export const reconcileSpotDefenseArm = internalAction({
         const posEntryPx = (p && Number(p.position?.entryPx) > 0) ? Number(p.position.entryPx) : arm.entryPrice;
         const slOrder = orders.find((o: any) => o.role === "sl");
 
+        // (3c-3c) Confirmar fills de los TPs ANTES del drift: un TP llenado reduce la posición de forma
+        // LEGÍTIMA → el tamaño esperado baja en consecuencia (size − Σ TP cerrados). Si no se hiciera
+        // antes, un TP recién llenado dispararía un falso "drift".
+        const tpOrders = orders.filter((o: any) => o.role === "tp");
+        let filledTpQty = 0;
+        for (const tp of tpOrders) {
+          const tf = await fillsByCloid(info, user, tp.cloid);
+          if (tf.size > 0) {
+            filledTpQty += tf.size;
+            if (tp.observedStatus !== "filled") {
+              await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseOrderObserved, { armId, token, role: "tp", tpIndex: tp.tpIndex, observedStatus: "filled" });
+            }
+          }
+        }
+
         // (Codex r2 #2) Detector de DRIFT: la posición es NETA por coin; si el usuario abrió/cerró manual
         // el mismo activo, el tamaño real ≠ el esperado del arm → cancelar SOLO lo propio, marcar
-        // manual_intervention y NUNCA market close ciego.
-        const expected = arm.size;
-        if (!flat && Math.abs(realSize - expected) > expected * DRIFT_TOL) {
+        // manual_intervention y NUNCA market close ciego. `expected` resta los TPs ya cerrados (3c-3c).
+        const expected = Math.max(0, arm.size - filledTpQty);
+        if (!flat && expected > 0 && Math.abs(realSize - expected) > expected * DRIFT_TOL) {
           await cancelOwnByCloid(exchange, assetId, ownCloids);
           await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "manual_intervention", error: `[manual] drift: szi real ${realSize} vs esperado ${expected}` });
           elog("spot_defense", "drift", { armId: String(armId), realSize, expected });
@@ -468,8 +483,43 @@ export const reconcileSpotDefenseArm = internalAction({
             // Solo declarar protected si el SL quedó resting/filled Y se persistió; si no, protecting.
             await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: rec.ok && r.state !== "pending" ? "protected" : "protecting" });
           }
-          // BE/TP → Fase 3c-2.
-          void markPx;
+
+          // (3c-3c) TPs parciales: Buy reduceOnly por DEBAJO de la entrada (tpsl:"tp" → fira al CAER el
+          // precio = ganancia del short), cerrando closePct% del tamaño. Idempotente por (armId,"tp",i):
+          // se colocan UNA vez; los fills ya se confirmaron arriba (alimentan el drift). cloid determinista.
+          const tps = arm.tps ?? [];
+          for (let i = 0; i < tps.length; i++) {
+            const existing = tpOrders.find((o: any) => o.tpIndex === i);
+            const live = existing && (existing.observedStatus === "filled" || existing.observedStatus === "open"
+              || existing.observedStatus === "triggered" || (existing.observedStatus === "pending" && existing.submittedAt != null));
+            if (live) continue;
+            const tpCloid = await toHlCloid(spotDefenseCloidInput(String(armId), arm.generation, "tp", 0, i));
+            if (await openByCloid(info, user, tpCloid)) {   // ya colocado (crash/recovery)
+              await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseOrderObserved, { armId, token, role: "tp", tpIndex: i, observedStatus: "open" });
+              continue;
+            }
+            const tpTriggerPx = roundHlPrice(posEntryPx * (1 - tps[i].gainPct / 100), szDecimals, "floor");
+            const tpSize = floorToDecimals((arm.size * tps[i].closePct) / 100, szDecimals);
+            if (!(tpSize > 0) || !(tpTriggerPx > 0)) continue;
+            const renewTp = await ctx.runMutation(internal.spotDefenseBots.renewSpotDefenseReconcile, { armId, token });
+            if (!renewTp.ok) return { skipped: "lease_lost" };
+            await ctx.runMutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { armId, token, tpIndex: i, cloid: tpCloid, triggerPx: tpTriggerPx, size: tpSize, observedStatus: "pending" });
+            const limitPx = aggressiveHlPriceStr(tpTriggerPx * (1 + ENTRY_TRIGGER_SLIPPAGE), szDecimals, true);   // cerrar short = BUY → ceil
+            const acT = abortAfter(HL_ORDER_TIMEOUT_MS);
+            try {
+              const respT: any = await exchange.order({
+                orders: [{ a: assetId, b: true, p: limitPx, s: String(tpSize), r: true,
+                  t: { trigger: { isMarket: true, triggerPx: formatHlPrice(tpTriggerPx, szDecimals), tpsl: "tp" } }, c: tpCloid as `0x${string}` }],
+                grouping: "na",
+              }, { signal: acT.signal, expiresAfter: Date.now() + HL_ORDER_TIMEOUT_MS });
+              const st = respT?.response?.data?.statuses?.[0];
+              const obs = st?.filled?.oid != null ? "filled" : (st?.resting?.oid != null || st === "waitingForTrigger") ? "open" : st?.error ? "rejected" : "open";
+              const oid = st?.resting?.oid != null ? String(st.resting.oid) : st?.filled?.oid != null ? String(st.filled.oid) : undefined;
+              await ctx.runMutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { armId, token, tpIndex: i, cloid: tpCloid, triggerPx: tpTriggerPx, size: tpSize, observedStatus: obs, oid, markSubmitted: true });
+            } catch {
+              await ctx.runMutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { armId, token, tpIndex: i, cloid: tpCloid, triggerPx: tpTriggerPx, size: tpSize, observedStatus: "rejected" });   // reintenta próximo ciclo
+            } finally { acT.clear(); }
+          }
         }
         return { result: "position_reconciled" };
       }

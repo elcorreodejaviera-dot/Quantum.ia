@@ -445,6 +445,24 @@ describe("Fase 3a — ciclo de vida del arm (claim/settle/fencing/cuarentena)", 
     expect((await t.run((ctx: MutationCtx) => ctx.db.get(armId)))?.slAttempts).toBe(2);
   });
 
+  it("(3c-3c) recordSpotDefenseTpOrder: upsert idempotente por tpIndex bajo lease", async () => {
+    const t = makeConvexTest();
+    const { armId } = await reservedArm(t);
+    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
+    const base = { armId, token: claim.token, tpIndex: 0, cloid: "0xtp0", triggerPx: 1900, size: 0.005 };
+    await t.mutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { ...base, observedStatus: "pending" });
+    await t.mutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { ...base, observedStatus: "filled", markSubmitted: true });
+    // otro tpIndex = otra fila
+    await t.mutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { armId, token: claim.token, tpIndex: 1, cloid: "0xtp1", triggerPx: 1800, size: 0.005, observedStatus: "open" });
+    const tps = await t.run((ctx: MutationCtx) => ctx.db.query("spot_defense_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", "tp")).collect());
+    expect(tps.length).toBe(2);   // tpIndex 0 upsert (no duplica) + tpIndex 1
+    const tp0 = tps.find((o) => o.tpIndex === 0);
+    expect(tp0?.observedStatus).toBe("filled");
+    expect(typeof tp0?.submittedAt).toBe("number");
+    const bad = await t.mutation(internal.spotDefenseBots.recordSpotDefenseTpOrder, { ...base, observedStatus: "open", token: "x" });
+    expect(bad.ok).toBe(false);
+  });
+
   it("(Codex 3c-1 r2 #2) pre-record pending NO marca submittedAt; sí al enviar (markSubmitted)", async () => {
     const t = makeConvexTest();
     const { armId } = await reservedArm(t);

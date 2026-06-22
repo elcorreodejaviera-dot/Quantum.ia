@@ -763,6 +763,37 @@ export const setSpotDefenseCloseConfirm = internalMutation({
   },
 });
 
+// (3c-3c) Upsert idempotente de un TP parcial (role "tp", único por tpIndex) bajo lease.
+export const recordSpotDefenseTpOrder = internalMutation({
+  args: {
+    armId: v.id("spot_defense_arms"), token: v.string(), tpIndex: v.number(),
+    cloid: v.string(), oid: v.optional(v.string()),
+    triggerPx: v.number(), size: v.number(),
+    observedStatus: v.union(
+      v.literal("pending"), v.literal("open"), v.literal("triggered"), v.literal("filled"),
+      v.literal("canceled"), v.literal("rejected"), v.literal("unknown")),
+    markSubmitted: v.optional(v.boolean()),
+  },
+  handler: async (ctx, { armId, token, tpIndex, cloid, oid, triggerPx, size, observedStatus, markSubmitted }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    const now = Date.now();
+    const existing = await ctx.db.query("spot_defense_orders").withIndex("by_arm_role_index", (q) => q.eq("armId", armId).eq("role", "tp").eq("tpIndex", tpIndex)).first();
+    if (existing) {
+      const patch: Record<string, unknown> = { observedStatus, triggerPx, size, cloid, updatedAt: now };
+      if (oid !== undefined) patch.oid = oid;
+      if (markSubmitted) patch.submittedAt = now;
+      await ctx.db.patch(existing._id, patch);
+      return { ok: true as const, orderId: existing._id };
+    }
+    const orderId = await ctx.db.insert("spot_defense_orders", {
+      armId, role: "tp", tpIndex, cloid, oid, triggerPx, size, reduceOnly: true, observedStatus,
+      ...(markSubmitted ? { submittedAt: now } : {}), createdAt: now, updatedAt: now,
+    });
+    return { ok: true as const, orderId };
+  },
+});
+
 // Máquina de estados del arm (fencing + ALLOWED + cuarentena post-submit). Al alcanzar terminal con
 // disarmPending → completa la pausa (active=false). Espejo recortado de triggerArms.settleArm.
 export const settleSpotDefenseArm = internalMutation({

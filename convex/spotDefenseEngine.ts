@@ -387,15 +387,24 @@ export const reconcileSpotDefenseArm = internalAction({
                     }
                   }
                   if (placed) {
-                    await cancelOwnByCloid(exchange, assetId, [oldCloid]);   // recién ahora se quita el viejo
-                    await ctx.runMutation(internal.spotDefenseBots.recordSpotDefenseSlOrder, {
-                      armId, token, cloid: newCloid, triggerPx: beTrigger, size: realSize, observedStatus: "open", markSubmitted: true, attempt: newAttempt,
-                    });
-                    await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseBeMoved, { armId, token });
-                    await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "protected" });
-                    return { result: "be_moved" };
+                    // (Codex 3c-3ab r2) NO sobrescribir la fila `sl` (única, upsert por rol) hasta CONFIRMAR
+                    // por HL que el viejo murió: si no, una cancelación fallida dejaría el viejo vivo y FUERA
+                    // del tracking (ownCloids sale de DB) → orden reduceOnly huérfana. La fila conserva el
+                    // oldCloid hasta la prueba negativa; el newCloid es determinista (openByCloid lo detecta
+                    // ya colocado en el reintento), así que no se recoloca ni se acumula.
+                    await cancelOwnByCloid(exchange, assetId, [oldCloid]);
+                    const oldDead = !(await openByCloid(info, user, oldCloid));
+                    if (oldDead) {
+                      await ctx.runMutation(internal.spotDefenseBots.recordSpotDefenseSlOrder, {
+                        armId, token, cloid: newCloid, triggerPx: beTrigger, size: realSize, observedStatus: "open", markSubmitted: true, attempt: newAttempt,
+                      });
+                      await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseBeMoved, { armId, token });
+                      await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "protected" });
+                      return { result: "be_moved" };
+                    }
+                    return { result: "be_old_still_live" };   // viejo aún vivo → sigue trackeado; reintento próximo ciclo
                   }
-                  return { result: "be_pending" };   // no confirmado → SL viejo intacto y vivo; reintenta
+                  return { result: "be_pending" };   // new no confirmado → SL viejo intacto y vivo; reintenta
                 }
               }
             } else if (slOrder.observedStatus === "pending" && slOrder.submittedAt != null

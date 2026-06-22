@@ -486,20 +486,19 @@ export const getSpotDefenseBotInternal = internalQuery({
   handler: async (ctx, { botId }) => await ctx.db.get(botId),
 });
 
-// Estados VIVOS (no terminales) de spot_defense_arms (para el cron de reconcile).
-const SD_LIVE_STATUSES = [
-  "arming", "submitting", "armed", "disarming", "filled", "protecting", "protected", "unknown", "manual_intervention",
-] as const;
-
-// IDs de arms vivos del usuario-base (todos), ordenados por antigüedad (sin starvation). Topado.
+// IDs de arms vivos (no terminales) por `by_updated` ASC GLOBAL — más antiguo primero, SIN sesgo por
+// estado (Codex 3c-2 #2: listar por estado starveaba a filled/protecting/protected, los críticos para
+// SL/cierre, si había >tope arms en estados tempranos). Topado; corta sin recorrer todo el historial.
 export const listLiveSpotDefenseArmIdsInternal = internalQuery({
   args: { limit: v.optional(v.number()) },
   handler: async (ctx, { limit }) => {
     const cap = limit ?? 200;
     const ids: Id<"spot_defense_arms">[] = [];
-    for (const st of SD_LIVE_STATUSES) {
-      const rows = await ctx.db.query("spot_defense_arms").withIndex("by_status_updated", (q) => q.eq("status", st)).collect();
-      for (const r of rows) { ids.push(r._id); if (ids.length >= cap) return ids; }
+    for await (const a of ctx.db.query("spot_defense_arms").withIndex("by_updated").order("asc")) {
+      if (!ARM_TERMINAL.has(a.status)) {
+        ids.push(a._id);
+        if (ids.length >= cap) break;
+      }
     }
     return ids;
   },

@@ -325,6 +325,38 @@ describe("Fase 3a — ciclo de vida del arm (claim/settle/fencing/cuarentena)", 
     expect(bad.ok).toBe(false);
   });
 
+  it("(Codex 3c-2 #2) el listado del cron va por antigüedad global, no por estado (sin starvation)", async () => {
+    const t = makeConvexTest();
+    const ids = await t.run(async (ctx: MutationCtx) => {
+      const userId = await seedUser(ctx, { role: "admin" });
+      const hlAccountId = await seedCredential(ctx, userId);
+      const spotPositionId = await ctx.db.insert("spot_positions", { asset: "BTC", amount: 1, dca: 1, userId: "ck" });
+      const now = Date.now();
+      const botId = await ctx.db.insert("spot_defense_bots", {
+        userId, spotPositionId, hlAccountId, asset: "BTC", baseAsset: "BTC", side: "Short",
+        leverage: 10, stopLossPct: 1, triggerMode: "manual", triggerPrice: 1, requestedNotionalUsd: 100,
+        active: true, status: "running", network: "testnet", generation: 1, createdAt: now, updatedAt: now,
+      });
+      const mk = (status: any, updatedAt: number) => ctx.db.insert("spot_defense_arms", {
+        botId, userId, hlAccountId, asset: "BTC", network: "testnet", generation: 1,
+        status, desiredState: "armed", side: "Short", triggerPx: 1, size: 1, appliedLeverage: 10,
+        reservedNotional: 100, marginReserved: 10, stopLossPct: 1, createdAt: updatedAt, updatedAt,
+      });
+      // Muchos arms tempranos VIEJOS no deben tapar a un filled/protected más NUEVO si el orden es por antigüedad:
+      const a1 = await mk("arming", 1000);
+      const a2 = await mk("submitting", 2000);
+      const closed = await mk("closed", 2500);   // terminal → excluido
+      const a3 = await mk("filled", 3000);
+      const a4 = await mk("protected", 4000);
+      return { a1, a2, closed, a3, a4 };
+    });
+    const list = await t.query(internal.spotDefenseBots.listLiveSpotDefenseArmIdsInternal, { limit: 10 });
+    expect(list).toEqual([ids.a1, ids.a2, ids.a3, ids.a4]);   // por updatedAt ASC, sin el closed
+    // con tope 2 = los 2 MÁS ANTIGUOS no terminales (turno justo por antigüedad)
+    const top2 = await t.query(internal.spotDefenseBots.listLiveSpotDefenseArmIdsInternal, { limit: 2 });
+    expect(top2).toEqual([ids.a1, ids.a2]);
+  });
+
   it("(Codex 3c-1 r3) attempt persiste arm.slAttempts → el cloid rota al recolocar", async () => {
     const t = makeConvexTest();
     const { armId } = await reservedArm(t);

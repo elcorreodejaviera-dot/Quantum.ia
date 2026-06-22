@@ -314,11 +314,11 @@ export const reconcileSpotDefenseArm = internalAction({
           await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseCloseConfirm, { armId, token, value: null });
         }
 
-        // (Codex 3c-1 cabo) Pausa/kill con posición ABIERTA → cierre ACTIVO: cancelar lo propio + market
-        // close reduceOnly del tamaño contable (el drift ya se excluyó arriba → no toca exposición ajena).
-        // Marca emergencyClosing="disarm" → la rama flat cierra con closeReason "disarm" el próximo ciclo.
+        // (Codex 3c-1 cabo + 3c-2 #1) Pausa/kill con posición ABIERTA → cierre ACTIVO. ORDEN CRÍTICO:
+        // el market close va PRIMERO y el SL NO se cancela hasta CONFIRMAR flat → la posición nunca queda
+        // desnuda si el close falla/timeoutea/llena parcial (ambas son reduceOnly: el SL sigue protegiendo
+        // y juntas no pueden sobre-cerrar). El drift ya se excluyó arriba → no toca exposición ajena.
         if (wantDisarm) {
-          await ensureSpotDefenseOrdersDead(info, exchange, user, assetId, ownCloids);
           await ctx.runMutation(internal.spotDefenseBots.setSpotDefenseEmergencyClosing, { armId, token, value: "disarm" });
           const renewC = await ctx.runMutation(internal.spotDefenseBots.renewSpotDefenseReconcile, { armId, token });
           if (!renewC.ok) return { skipped: "lease_lost" };
@@ -329,8 +329,17 @@ export const reconcileSpotDefenseArm = internalAction({
               orders: [{ a: assetId, b: true, p: closeLimitPx, s: String(floorToDecimals(realSize, szDecimals)), r: true, t: { limit: { tif: "Ioc" } } }],
               grouping: "na",
             }, { signal: acC.signal, expiresAfter: Date.now() + HL_ORDER_TIMEOUT_MS });
-          } catch { /* reduceOnly: el próximo ciclo reintenta hasta confirmar flat */ } finally { acC.clear(); }
-          return { result: "closing" };
+          } catch { /* reduceOnly + SL aún vivo: el próximo ciclo reintenta hasta confirmar flat */ } finally { acC.clear(); }
+          // Confirmar szi POST-close: solo si quedó flat se cancela el SL residual (la rama flat del
+          // próximo ciclo cierra con closeReason "disarm"). Si sigue abierta, el SL se mantiene → no desnuda.
+          const ch2: any = await info.clearinghouseState({ user });
+          const p2 = (ch2.assetPositions ?? []).find((x: any) => x.position?.coin === arm.asset.toUpperCase());
+          const flatNow = Math.abs(p2 ? Number(p2.position?.szi ?? 0) : 0) === 0;
+          if (flatNow) {
+            await ensureSpotDefenseOrdersDead(info, exchange, user, assetId, ownCloids);
+            return { result: "closed_flat_pending_confirm" };
+          }
+          return { result: "closing" };   // aún abierta → SL sigue vivo protegiendo, reintento próximo ciclo
         }
 
         // Posición abierta y SIN pausa: asegurar el SL (Short → Buy por encima de la entrada).

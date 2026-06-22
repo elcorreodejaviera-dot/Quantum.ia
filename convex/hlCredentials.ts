@@ -63,6 +63,16 @@ export const revokeById = mutation({
     if (liveGrid) {
       throw new Error("La cuenta tiene un Spot Grid activo; deténlo antes de revocar.");
     }
+    // (JAV-107) Tampoco revocar con un arm de defensa spot NO terminal: perderíamos la clave para
+    // cancelar/cerrar el short y su SL en HL (posición/orden resting viva → fondos atascados).
+    const liveDefenseArm = (await ctx.db
+      .query("spot_defense_arms")
+      .withIndex("by_account", (q) => q.eq("hlAccountId", id))
+      .collect())
+      .find((a) => !["disarmed", "closed", "failed"].includes(a.status));
+    if (liveDefenseArm) {
+      throw new Error("La cuenta tiene un bot de defensa spot activo; pausa/cierra el trigger antes de revocar.");
+    }
     const linked = await ctx.db
       .query("bots")
       .withIndex("by_user_account", (q) => q.eq("userId", user._id).eq("hlAccountId", id))

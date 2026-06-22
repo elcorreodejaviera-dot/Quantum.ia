@@ -7,7 +7,7 @@ import { elog } from "./log";
 import { spotDefenseCloidInput } from "./cloids";
 import { hlNetwork } from "./hlNetwork";
 import { committedMarginForAccount } from "./executions";
-import { AUTO_LEVERAGE_CAP, MANUAL_LEVERAGE_MIN, MANUAL_LEVERAGE_MAX, MARGIN_SAFETY_BUFFER } from "./leverage";
+import { resolveLeverage, AUTO_LEVERAGE_CAP, MANUAL_LEVERAGE_MIN, MANUAL_LEVERAGE_MAX, MARGIN_SAFETY_BUFFER } from "./leverage";
 import {
   spotDefenseCoverageKey, remainingCoverageForKey,
   assertWithinPlanCoverageForKey, coverageAdmissibleForKey,
@@ -32,6 +32,33 @@ const ARM_TERMINAL = new Set(["disarmed", "closed", "failed"]);
 async function isMainnetSpotDefenseApproved(ctx: QueryCtx | MutationCtx): Promise<boolean> {
   const gate = await ctx.db.query("system_config").withIndex("by_key", (q) => q.eq("key", MAINNET_GATE_KEY)).first();
   return (gate?.value as { enabled?: boolean } | undefined)?.enabled === true;
+}
+
+// (Codex Fase 2 NO-GO #1) Admisión LIVE del bot de defensa, equivalente a executions.assertLiveAdmissible
+// pero sobre `spot_defense_bots`. Revalida los gates globales + permiso + estado del bot + cuenta + red +
+// gate mainnet en CADA punto sensible (reserva y ambos CAS), cerrando la ventana entre persist y envío:
+// si entre medias se apaga el kill-switch, se activa simulación, se revoca canTradeLive, se desvincula la
+// credencial, se pausa el bot o cambia la red, la reserva/CAS NO procede.
+async function assertSpotDefenseLiveAdmissible(
+  ctx: QueryCtx | MutationCtx, botId: Id<"spot_defense_bots">,
+): Promise<boolean> {
+  const bot = await ctx.db.get(botId);
+  if (!bot) return false;
+  const user = await ctx.db.get(bot.userId);
+  if (!user) return false;
+  const [trading, sim] = await Promise.all([
+    ctx.db.query("system_config").withIndex("by_key", (q) => q.eq("key", "tradingEnabled")).first(),
+    ctx.db.query("system_config").withIndex("by_key", (q) => q.eq("key", "simulationMode")).first(),
+  ]);
+  if (trading?.value !== true || sim?.value !== false) return false;
+  if (!(await hasPermission(ctx, user, "canTradeLive"))) return false;
+  // (Codex #4) El bot debe estar activo, corriendo y sin pausa en curso.
+  if (!bot.active || bot.status !== "running" || bot.disarmPending) return false;
+  if (bot.network !== hlNetwork()) return false;
+  if (bot.network === "mainnet" && !(await isMainnetSpotDefenseApproved(ctx))) return false;
+  const cred = await ctx.db.get(bot.hlAccountId);
+  if (!cred || cred.userId !== bot.userId) return false;   // la cuenta sigue siendo del dueño
+  return true;
 }
 
 export const getMainnetSpotDefenseApproval = query({
@@ -189,11 +216,13 @@ export const persistSpotDefenseBot = mutation({
       updatedAt: now,
     };
     if (existing) {
-      // Con un arm vivo la única operación segura es pausar; reconfigurar lo dejaría incoherente.
+      // (Codex Fase 2 NO-GO #3) Con un arm NO terminal, cualquier patch de config/cuenta/trigger/nocional
+      // dejaría el trigger vivo incoherente — se rechaza SIEMPRE (no solo cuando active=true). La única
+      // operación segura es pausar (pauseSpotDefenseBot → disarmPending → el motor desarma).
       const live = (await ctx.db.query("spot_defense_arms").withIndex("by_bot_generation", (q) =>
         q.eq("botId", existing._id)).collect()).find((a) => !ARM_TERMINAL.has(a.status));
-      if (live && args.active) {
-        throw new Error("El bot tiene una cobertura activa; pausa el trigger antes de reconfigurar.");
+      if (live) {
+        throw new Error("El bot tiene una cobertura activa; pausa el trigger (no se puede reconfigurar con un armado vivo).");
       }
       await ctx.db.patch(existing._id, common);
       return { botId: existing._id };
@@ -225,10 +254,10 @@ export const reserveSpotDefenseArm = internalMutation({
   handler: async (ctx, args): Promise<any> => {
     const bot = await ctx.db.get(args.botId);
     if (!bot) throw new Error("[blocked_config] Bot de defensa no encontrado.");
-    if (bot.status === "stopped") throw new Error("[blocked_config] El bot está detenido.");
-    if (bot.network !== hlNetwork()) throw new Error("[blocked_config] La red del bot no coincide con la del backend.");
-    if (bot.network === "mainnet" && !(await isMainnetSpotDefenseApproved(ctx))) {
-      throw new Error("[blocked_config] Defensa spot en mainnet no aprobada.");
+    // (Codex Fase 2 NO-GO #1+#4) Admisión LIVE autoritativa: switches globales + canTradeLive + bot
+    // active/running/!disarmPending + cuenta owned + red + gate mainnet, en la MISMA OCC que reserva.
+    if (!(await assertSpotDefenseLiveAdmissible(ctx, bot._id))) {
+      throw new Error("[blocked_config] No admisible para trading real (switch/permiso/estado/cuenta/red/gate).");
     }
     if (!Number.isFinite(args.triggerPx) || args.triggerPx <= 0) throw new Error("[blocked_config] triggerPx inválido.");
     if (!Number.isFinite(args.availableCollateral) || args.availableCollateral < 0) {
@@ -250,22 +279,17 @@ export const reserveSpotDefenseArm = internalMutation({
       throw new Error("[blocked_margin] Sin colateral usable para abrir la cobertura (fondea la cuenta).");
     }
 
-    // (3) Leverage aplicado: manual validado y acotado al máx del activo; auto = min(tope, máx activo).
-    const maxLev = Number.isInteger(args.assetMaxLeverage) && args.assetMaxLeverage >= 1 ? args.assetMaxLeverage : 1;
-    let appliedLeverage: number;
-    if (bot.autoLeverage === true) {
-      appliedLeverage = Math.min(AUTO_LEVERAGE_CAP, maxLev);
-    } else {
-      const lev = Math.round(bot.leverage);
-      if (lev < MANUAL_LEVERAGE_MIN || lev > MANUAL_LEVERAGE_MAX) {
-        throw new Error(`[blocked_config] leverage manual fuera de rango.`);
-      }
-      appliedLeverage = Math.min(lev, maxLev);
-    }
-    if (appliedLeverage < 1) throw new Error("[blocked_config] leverage efectivo inválido.");
+    // (3) Cota de leverage para acotar el nocional por margen ANTES de capar. El leverage definitivo lo
+    // resuelve `resolveLeverage` abajo (fuente única auditada); aquí solo se usa el techo para el cap.
+    const maxLevForCap = Number.isInteger(args.assetMaxLeverage) && args.assetMaxLeverage >= 1
+      ? args.assetMaxLeverage : AUTO_LEVERAGE_CAP;
+    const hardCapForMargin = bot.autoLeverage === true
+      ? Math.min(AUTO_LEVERAGE_CAP, maxLevForCap)
+      : Math.min(Math.round(bot.leverage), maxLevForCap);
+    if (!(hardCapForMargin >= 1)) throw new Error("[blocked_config] leverage efectivo inválido.");
 
     // (4) Sizing CAPADO (Codex r2 #1+#4): nocional = min(pedido, cota por margen, cap del plan restante).
-    const marginCapNotional = usableReal * appliedLeverage;
+    const marginCapNotional = usableReal * hardCapForMargin;
     const requested = bot.requestedNotionalUsd;
     const remaining = await remainingCoverageForKey(ctx, bot.userId, spotDefenseCoverageKey(bot._id));
     const target = Math.min(requested, marginCapNotional, remaining);
@@ -279,9 +303,24 @@ export const reserveSpotDefenseArm = internalMutation({
     if (bot.minCoveragePct !== undefined && effectiveNotionalUsd < (bot.minCoveragePct / 100) * requested) {
       throw new Error(`[blocked_margin] Cobertura efectiva (${effectiveNotionalUsd.toFixed(2)}) por debajo del umbral mínimo (${bot.minCoveragePct}% de ${requested.toFixed(2)}).`);
     }
-    const marginReserved = effectiveNotionalUsd / appliedLeverage;
 
-    // (5) Hard-cap del plan AUTORITATIVO (idempotente, fail-closed) con el nocional EFECTIVO.
+    // (5) Leverage + margen por el helper ÚNICO auditado (Codex Fase 2 NO-GO #5): manual valida rango y
+    // RECHAZA > máx del activo (no capa en silencio); auto calcula el mínimo entero que cabe. El nocional
+    // efectivo ya está acotado por `hardCapForMargin`, así que el helper siempre encuentra solución.
+    const { appliedLeverage, marginRequired: marginReserved } = resolveLeverage({
+      autoLeverage: bot.autoLeverage === true,
+      manualLeverage: bot.leverage,
+      reservedNotional: effectiveNotionalUsd,
+      availableCollateral: args.availableCollateral,
+      marginCommitted, assetMaxLeverage: args.assetMaxLeverage,
+    });
+    if ((marginCommitted + marginReserved) > args.availableCollateral * (1 - MARGIN_SAFETY_BUFFER)) {
+      throw new Error(
+        `[blocked_margin] Margen insuficiente: comprometido ${marginCommitted.toFixed(2)} + requerido ` +
+        `${marginReserved.toFixed(2)} > colateral ${args.availableCollateral.toFixed(2)}.`);
+    }
+
+    // (6) Hard-cap del plan AUTORITATIVO (idempotente, fail-closed) con el nocional EFECTIVO.
     await assertWithinPlanCoverageForKey(ctx, bot.userId, spotDefenseCoverageKey(bot._id), effectiveNotionalUsd);
 
     // (6) Insertar arm (arming) + orden entry (pending, sin submittedAt — se fija en el CAS).

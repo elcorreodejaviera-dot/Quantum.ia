@@ -352,7 +352,7 @@ function GridDetail({ botId, onDeleted }) {
       <div className="sg-kpis">
         {/* (JAV-103) Equity marcado a mercado = realizado + flotante → comparable con plataformas que siembran (BingX). */}
         <Kpi label="Ganancia total" val={usd(accounting?.totalEquityPnl ?? stats.totalNetProfit)} accent={(accounting?.totalEquityPnl ?? stats.totalNetProfit) > 0}
-          sub="realizado + flotante (a mercado)" />
+          sub={accounting?.accountingTruncated ? 'parcial (tope de lectura contable)' : 'realizado + flotante (a mercado)'} />
         <Kpi label="Realizado" val={usd(accounting?.realizedNetProfit ?? stats.totalNetProfit)} accent={(accounting?.realizedNetProfit ?? stats.totalNetProfit) > 0}
           sub={stats.truncated ? `parcial (≥${stats.cycleCap} ciclos)` : 'ciclos cerrados'} />
         <Kpi label="Flotante" val={usd(accounting?.floatingPnl ?? 0)} accent={(accounting?.floatingPnl ?? 0) > 0}

@@ -204,6 +204,17 @@ describe("deriveSeededGrid (JAV-103)", () => {
     expect(d.seedPercent).toBeLessThan(1);
   });
 
+  // (CodeRabbit JAV-103, Major) El peor caso (M BUYs reservadas + seed que llena con slippage máx 2%) NUNCA
+  // debe superar investmentAmount: la derivación reparte sobre un presupuesto recortado por ese tope.
+  it("peor caso M·orderSize + seedNotional·(1+2%) ≤ investmentAmount", () => {
+    for (const investmentAmount of [500, 1000, 2500]) {
+      const d = deriveSeededGrid({ ...btc, minPrice: 45000, investmentAmount });
+      const buysLock = d.M * d.orderSize;
+      const seedWorstCase = d.seedNotional * (1 + 0.02);
+      expect(buysLock + seedWorstCase).toBeLessThanOrEqual(investmentAmount + 1e-9);
+    }
+  });
+
   it("capital insuficiente para ≥2 compras y ≥2 ventas → lanza", () => {
     expect(() => deriveSeededGrid({ ...btc, minPrice: 45000, investmentAmount: 30 })).toThrow(/[Cc]apital/);
   });

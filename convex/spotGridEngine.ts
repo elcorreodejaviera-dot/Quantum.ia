@@ -36,6 +36,13 @@ const ANCHOR_MAX_AGE_MS = 5 * 60 * 1000;
 const M_MIN = 2;                       // mínimo de niveles de COMPRA (abajo)
 const K_MIN = 2;                       // mínimo de niveles de VENTA sembrados (arriba)
 const UPSIDE_CAP_FRAC = 0.5;           // cuando el suelo NO cabe, la venta nunca toma > la mitad del presupuesto
+// (CodeRabbit JAV-103, Major) Tope DURO de slippage del seed = mismo techo que el clamp de
+// `getSeedMaxSlippageInternal` (0.02). La semilla se compra con LIMIT IOC agresivo: si llena por encima del
+// precio ancla puede gastar hasta seedNotional·(1+slip). Para que el peor caso (M BUYs + seed con slippage)
+// NUNCA supere `investmentAmount`, `deriveSeededGrid` reparte sobre un presupuesto recortado por este tope.
+// Es una CONSTANTE (no el valor live del config) para que el reparto sea determinista entre creación y
+// bootstrap (prometido==colocado) y cubra cualquier slippage admisible.
+const SEED_SLIPPAGE_BUDGET_MAX = 0.02;
 const SEED_LEVEL = -1;                 // nivel sentinela de la orden de COMPRA semilla
 const LIQ_LEVEL = -2;                  // nivel sentinela de la orden de liquidación
 const DEFAULT_SEED_MAX_SLIPPAGE = 0.003;   // slippage del LIMIT IOC de semilla/liquidación si no hay config
@@ -243,13 +250,16 @@ export function deriveSeededGrid(p: {
   const step = 1 + p.gridProfitPercent / 100;
   const sizeTick = 10 ** (-p.szDecimals);
   const minNotEff = minNotional + p.currentPrice * sizeTick;
+  // (CodeRabbit JAV-103, Major) Presupuesto recortado por el peor slippage del seed → garantiza que
+  // M·orderSize + seedNotional·(1+slip) ≤ investmentAmount para cualquier slip ≤ SEED_SLIPPAGE_BUDGET_MAX.
+  const budgetForOrders = p.investmentAmount / (1 + SEED_SLIPPAGE_BUDGET_MAX);
   const nFull = Math.floor(Math.log(p.currentPrice / p.minPrice) / Math.log(step));
-  const nCapital = Math.floor(p.investmentAmount / minNotEff);
+  const nCapital = Math.floor(budgetForOrders / minNotEff);
   if (nFull < M_MIN) throw new Error("deriveSeededGrid: rango demasiado estrecho para ≥2 compras (sube el % o baja el suelo).");
   if (nCapital < M_MIN + K_MIN) throw new Error("deriveSeededGrid: capital insuficiente para sembrar (≥2 compras y ≥2 ventas con el mínimo de HL). Sube la inversión.");
 
   for (let N = Math.min(nCapital, ABS_MAX_GRID_LEVELS); N >= M_MIN + K_MIN; N--) {
-    const orderSize = floorQuoteForBudget(p.investmentAmount, N).orderSize;
+    const orderSize = floorQuoteForBudget(budgetForOrders, N).orderSize;
     if (orderSize < minNotional) continue;
     let M: number, K: number;
     if (nFull <= N - K_MIN) { M = nFull; K = N - M; }                 // el suelo CABE → el extra va al upside
@@ -758,7 +768,14 @@ export const stopSpotGridBot = action({
         const baseBal = await getSpotBalance(info, address, resolved.baseAsset);
         // (Codex código r1, ALTO#3) Vender SOLO el inventario del bot: min(free, heldQtyContable). Si en la
         // cuenta hubiese base ajena/manual (aunque la cuenta es dedicada), NO se toca.
-        const held = (await ctx.runQuery(internal.spotGridBots.getHeldInventoryInternal, { botId })).heldQty;
+        const inv = await ctx.runQuery(internal.spotGridBots.getHeldInventoryInternal, { botId });
+        // (CodeRabbit JAV-103, Major) Fail-closed: si la lectura del inventario está truncada, heldQty puede
+        // venir subcontado/inflado → NO liquidar a ciegas. Se marca error reintentable y se aborta.
+        if (inv.truncated) {
+          await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, { botId, token, status: "error", errorMessage: "inventario truncado: no se puede liquidar con seguridad; reintenta", clearLease: true });
+          throw new Error("Inventario truncado: liquidación abortada por seguridad. Reintenta Stop+liquidar.");
+        }
+        const held = inv.heldQty;
         const liqQty = floorSpotSize(Math.min(baseBal.free, held), szDecimals);
         if (liqQty > 0 && refPrice * liqQty >= MIN_SPOT_NOTIONAL_USD) {
           const slip = (await ctx.runQuery(internal.spotGridBots.getSeedMaxSlippageInternal, {})).seedMaxSlippage;
@@ -790,7 +807,7 @@ export const stopSpotGridBot = action({
         // Re-verificar tras la venta: residuo del bot (min free/held) cuyo valor ≥ min-notional → error
         // (NO stopped); el usuario reintenta Stop+liquidar → nonce nuevo vende el resto.
         const post = await getSpotBalance(info, address, resolved.baseAsset);
-        const heldAfter = (await ctx.runQuery(internal.spotGridBots.getHeldInventoryInternal, { botId })).heldQty;
+        const heldAfter = (await ctx.runQuery(internal.spotGridBots.getHeldInventoryInternal, { botId })).heldQty;   // post-venta: la liquidación recién hecha YA se descuenta
         if (refPrice * floorSpotSize(Math.min(post.free, heldAfter), szDecimals) >= MIN_SPOT_NOTIONAL_USD) {
           await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, { botId, token, status: "error", errorMessage: "liquidación incompleta: queda inventario", clearLease: true });
           throw new Error("Liquidación incompleta: quedó inventario sin vender. Reintenta Stop+liquidar.");

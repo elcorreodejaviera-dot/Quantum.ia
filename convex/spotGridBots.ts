@@ -308,20 +308,28 @@ export const getSpotGridDetail = query({
     // exacto): el flotante orienta la comparación con BingX, NO es un ledger financiero contable. Lectura
     // ACOTADA: si se topa, `accountingTruncated`.
     let boughtQty = 0, boughtCost = 0, acctTrunc = truncated;
+    // (CodeRabbit JAV-103, Major) Restar la base ya LIQUIDADA (kind="liquidation"): no se vuelve ciclo, así
+    // que sin esto el inventario contable quedaría inflado tras un Stop+liquidar.
+    let liquidatedQty = 0, liquidatedCost = 0;
     for (const st of ["filled", "partially_filled"] as const) {
       const rows = await ctx.db.query("spot_grid_orders")
         .withIndex("by_bot_status", (q) => q.eq("botId", botId).eq("status", st))
         .take(SPOT_GRID_DETAIL_CYCLE_CAP + 1);
       if (rows.length > SPOT_GRID_DETAIL_CYCLE_CAP) acctTrunc = true;
       for (const o of rows.slice(0, SPOT_GRID_DETAIL_CYCLE_CAP)) {
-        if (o.side !== "buy") continue;
-        const q = o.filledQty ?? 0;
-        boughtQty += q;
-        boughtCost += q * (o.avgFillPx ?? o.price) + (o.filledFeeUsd ?? 0);
+        if (o.side === "buy") {
+          const q = o.filledQty ?? 0;
+          boughtQty += q;
+          boughtCost += q * (o.avgFillPx ?? o.price) + (o.filledFeeUsd ?? 0);
+        } else if (o.side === "sell" && o.kind === "liquidation") {
+          const q = o.filledQty ?? 0;
+          liquidatedQty += q;
+          liquidatedCost += q * (o.costBasis ?? bot.seedAvgPx ?? o.avgFillPx ?? o.price);
+        }
       }
     }
-    const soldQty = capped.reduce((s, c) => s + (c.quantity ?? 0), 0);
-    const soldCost = capped.reduce((s, c) => s + (c.buyPrice ?? 0) * (c.quantity ?? 0), 0);
+    const soldQty = capped.reduce((s, c) => s + (c.quantity ?? 0), 0) + liquidatedQty;
+    const soldCost = capped.reduce((s, c) => s + (c.buyPrice ?? 0) * (c.quantity ?? 0), 0) + liquidatedCost;
     const heldQty = Math.max(0, boughtQty - soldQty);
     const heldCostUsd = Math.max(0, boughtCost - soldCost);
     const heldAvgCost = heldQty > 1e-12 ? heldCostUsd / heldQty : 0;
@@ -630,18 +638,26 @@ export const listActiveSpotGridBotsInternal = internalQuery({
 export const getHeldInventoryInternal = internalQuery({
   args: { botId: v.id("spot_grid_bots") },
   handler: async (ctx, { botId }) => {
-    let boughtQty = 0;
+    // (CodeRabbit JAV-103, Major) Inventario = base comprada − base vendida en ciclos − base ya LIQUIDADA.
+    // Las órdenes kind="liquidation" NO se vuelven ciclos; sin restarlas, tras un Stop+liquidar exitoso el
+    // bot seguiría mostrando inventario y un reintento consideraría liquidable base que ya no le pertenece.
+    let boughtQty = 0, liquidatedQty = 0, truncated = false;
     for (const st of ["filled", "partially_filled"] as const) {
       const rows = await ctx.db.query("spot_grid_orders")
         .withIndex("by_bot_status", (q) => q.eq("botId", botId).eq("status", st))
         .take(SPOT_GRID_DETAIL_CYCLE_CAP + 1);
+      if (rows.length > SPOT_GRID_DETAIL_CYCLE_CAP) truncated = true;
       for (const o of rows.slice(0, SPOT_GRID_DETAIL_CYCLE_CAP)) {
         if (o.side === "buy") boughtQty += o.filledQty ?? 0;
+        else if (o.side === "sell" && o.kind === "liquidation") liquidatedQty += o.filledQty ?? 0;
       }
     }
     const cycles = await ctx.db.query("spot_grid_cycles").withIndex("by_bot", (q) => q.eq("botId", botId)).take(SPOT_GRID_DETAIL_CYCLE_CAP + 1);
+    if (cycles.length > SPOT_GRID_DETAIL_CYCLE_CAP) truncated = true;
     const soldQty = cycles.slice(0, SPOT_GRID_DETAIL_CYCLE_CAP).reduce((s, c) => s + (c.quantity ?? 0), 0);
-    return { heldQty: Math.max(0, boughtQty - soldQty) };
+    // (CodeRabbit JAV-103, Major) `truncated` => la lectura del inventario es PARCIAL. El caller (stop)
+    // hace fail-closed: NUNCA liquidar contra un inventario subcontado (heldQty inflado).
+    return { heldQty: Math.max(0, boughtQty - soldQty - liquidatedQty), truncated };
   },
 });
 

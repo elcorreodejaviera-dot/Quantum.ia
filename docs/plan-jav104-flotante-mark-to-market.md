@@ -51,7 +51,7 @@ export const setSpotGridLastPrice = internalMutation({
   handler: async (ctx, { botId, token, lastPrice }) => {
     const bot = await ctx.db.get(botId);
     if (!leaseOk(bot, token)) return { ok: false as const };
-    if (!(lastPrice > 0)) return { ok: false as const };   // no persistir precios inválidos
+    if (!Number.isFinite(lastPrice) || !(lastPrice > 0)) return { ok: false as const };   // rechaza NaN/Infinity y ≤ 0
     await ctx.db.patch(botId, { lastPrice, lastPriceAt: Date.now(), updatedAt: Date.now() });
     return { ok: true as const };
   },
@@ -86,8 +86,8 @@ const STALE_MS = 5 * 60 * 1000;
 const priceStale = !bot.lastPriceAt || Date.now() - bot.lastPriceAt > STALE_MS;
 const floatingPnl = refPrice != null && heldQty > 1e-12 ? (refPrice - heldAvgCost) * heldQty : 0;
 ```
-Exponer `lastPriceAt` en el `bot` que devuelve la query si la UI lo necesita (hoy la UI solo lee
-`priceStale`/`floatingPnl`/`heldQty`, así que puede bastar con lo actual).
+`lastPriceAt` es **estrictamente un campo interno de persistencia** usado solo para derivar `priceStale`;
+**no se expone** en el response al cliente (la UI solo consume `priceStale`/`floatingPnl`/`heldQty`).
 
 ## UI — `src/components/SpotGridView.jsx`
 Sin cambios de lógica: ya consume `accounting.floatingPnl` y `accounting.priceStale`. Verificar que el

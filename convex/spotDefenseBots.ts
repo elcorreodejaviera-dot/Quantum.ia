@@ -463,6 +463,30 @@ export const pauseSpotDefenseBot = mutation({
 
 const SD_RECONCILE_LEASE_MS = SPOT_DEFENSE_LEASE_MS;
 
+export const getSpotDefenseBotInternal = internalQuery({
+  args: { botId: v.id("spot_defense_bots") },
+  handler: async (ctx, { botId }) => await ctx.db.get(botId),
+});
+
+// Terminalización "pre-orden" (espejo de failArmPreOrder): cuando updateLeverage es RECHAZADO de forma
+// DETERMINISTA, está GARANTIZADO que la entrada aún no se envió (corre antes de exchange.order) → cerrar
+// a failed YA (libera margen sin esperar la cuarentena), SOLO si: lease vigente, status submitting, sin
+// fill, y la orden `entry` sigue pre-envío (pending, sin oid, sin submittedAt).
+export const failSpotDefensePreOrder = internalMutation({
+  args: { armId: v.id("spot_defense_arms"), token: v.string(), error: v.string() },
+  handler: async (ctx, { armId, token, error }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm) return { ok: false as const };
+    if (arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (arm.status !== "submitting") return { ok: false as const };
+    if (arm.filledSize != null || arm.entryPrice != null) return { ok: false as const };
+    const entry = await ctx.db.query("spot_defense_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", "entry")).first();
+    if (!entry || entry.observedStatus !== "pending" || entry.oid != null || entry.submittedAt != null) return { ok: false as const };
+    await ctx.db.patch(armId, { status: "failed", error, reconcileLeaseUntil: 0, reconcileLeaseToken: undefined, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
 export const getSpotDefenseArmInternal = internalQuery({
   args: { armId: v.id("spot_defense_arms") },
   handler: async (ctx, { armId }) => {

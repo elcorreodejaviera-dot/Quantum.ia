@@ -13,15 +13,6 @@ const IS_TESTNET = import.meta.env.VITE_HL_NETWORK === 'testnet';
 const NETWORKS = ['Todas', 'Ethereum', 'Arbitrum', 'Base', 'Optimism'];
 const PAIRS = ['Todos', 'BTC/USDC', 'ETH/USDC'];
 
-const POOLS = [
-  { id: 1, pair: 'BTC/USDC', network: 'Arbitrum', min: 63200, max: 72400, liquidity: 86240, fees24h: 118, apr: 42.6, exposure: 0.74, status: 'En rango' },
-  { id: 2, pair: 'ETH/USDC', network: 'Arbitrum', min: 3420, max: 4020, liquidity: 54110, fees24h: 71, apr: 37.2, exposure: 0.62, status: 'En rango' },
-  { id: 3, pair: 'BTC/USDC', network: 'Base', min: 64600, max: 70100, liquidity: 39220, fees24h: 64, apr: 51.8, exposure: 0.81, status: 'Cerca del borde' },
-  { id: 4, pair: 'ETH/USDC', network: 'Base', min: 3600, max: 3880, liquidity: 33680, fees24h: 58, apr: 58.4, exposure: 0.77, status: 'En rango' },
-  { id: 5, pair: 'BTC/USDC', network: 'Optimism', min: 61500, max: 74200, liquidity: 28400, fees24h: 39, apr: 31.7, exposure: 0.49, status: 'En rango' },
-  { id: 6, pair: 'ETH/USDC', network: 'Optimism', min: 3860, max: 4240, liquidity: 24560, fees24h: 22, apr: 24.9, exposure: 0.88, status: 'Fuera de rango' },
-];
-
 const ALERT_COOLDOWN_MS = 60 * 60 * 1000;
 
 const ALERT_TYPE_LABELS = {
@@ -2456,7 +2447,7 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
   const { account: bal } = useHLAccountBalance(selected?.tradingAccountAddress ?? null);
 
   const poolCapital = pool.liquidity > 0 ? pool.liquidity : 0;
-  const capitalIsReal = !!pool.liquidityReal;       // false = estimado (mock), no lectura on-chain
+  const capitalIsReal = !!pool.liquidityReal;       // false = aún sin lectura on-chain (liquidez en 0)
   const effectiveCapital = poolCapital * (1 + bufferPct / 100);
   const thisBotMargin = leverage > 0 ? effectiveCapital / leverage : 0;
   const marginUsed = bal?.totalMarginUsed ?? 0;     // margen usado en la cuenta (no "otros bots")
@@ -2640,7 +2631,7 @@ function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
 
   const selected = accounts.find((a) => a.id === hlAccountId) ?? null;
   const poolCapital = pool.liquidity > 0 ? pool.liquidity : 0;
-  const capitalIsReal = !!pool.liquidityReal;       // false = estimado (mock)
+  const capitalIsReal = !!pool.liquidityReal;       // false = aún sin lectura on-chain (liquidez en 0)
   const opCapital = poolCapital * (capitalPct / 100);
 
   async function handleSave() {
@@ -3689,7 +3680,7 @@ function Dashboard({ user, onLogout, userId }) {
     }));
   }, [botsFromDb, localBotState]);
 
-  // Normaliza símbolos wrapped (WETH→ETH, WBTC→BTC) para lookup de precios y mock
+  // Normaliza símbolos wrapped (WETH→ETH, WBTC→BTC) para lookup de precios
   function normalizeAsset(sym) {
     if (sym === 'WETH') return 'ETH';
     if (sym === 'WBTC') return 'BTC';
@@ -3700,13 +3691,14 @@ function Dashboard({ user, onLogout, userId }) {
     return pair.split('/').map(normalizeAsset).join('/');
   }
 
-  // Fusionar config de Convex con campos mock (liquidez/APR) e inyectar precio, funding y APY en tiempo real
+  // (JAV-105) Config de Convex + precio/funding/APY en vivo. Los datos financieros (liquidez/APR/fees)
+  // arrancan en 0/null y los sobreescribe la lectura on-chain real (positionData) cuando llega — NUNCA
+  // se rellenan con cifras demo. `apy: null` (no 0) para que las alertas apy_below ignoren los pools sin
+  // dato real de APY (evita falso positivo mientras carga); las vistas lo pintan como 0 vía `?? 0`.
   const pools = React.useMemo(() => {
     if (!poolsFromDb || poolsFromDb.length === 0) return [];
     return poolsFromDb.map((p) => {
-      const normalizedPair = normalizePair(p.pair);
       const asset = normalizeAsset(p.pair?.split('/')[0]);
-      const mock = POOLS.find((m) => m.pair === normalizedPair && m.network === p.network) ?? {};
       const pd = positionData[p._id];
       return {
         liquidity: 0,
@@ -3718,19 +3710,18 @@ function Dashboard({ user, onLogout, userId }) {
         amountToRepay: 0,
         liquidationThreshold: 0,
         availableToBorrow: 0,
-        ...mock,
         ...p,
         id: p._id,
         min: p.minRange,
         max: p.maxRange,
-        apy: p.apy ?? mock.apr ?? 0,
-        fees24h: p.fees1d ?? mock.fees24h ?? 0,
+        apy: p.apy ?? null,
+        fees24h: p.fees1d ?? 0,
         price: prices[asset] ?? null,
         funding: funding[asset] ?? null,
-        // Posición LP real del usuario sobreescribe mock cuando está disponible
+        // Posición LP real del usuario sobreescribe los 0 iniciales cuando está disponible
         ...(pd != null ? {
           liquidity: pd.liquidityUsd,
-          liquidityReal: true,          // lectura on-chain real (vs mock estimado)
+          liquidityReal: true,          // lectura on-chain real (vs 0 inicial mientras carga)
           exposure: pd.exposure,
           feesUncollectedUsd: pd.feesUncollectedUsd ?? null,   // F1: fees sin cobrar (null = sin dato)
           valueAtEntryUsd: pd.valueAtEntryUsd ?? null,         // (JAV-58 Fase D) para el PNL

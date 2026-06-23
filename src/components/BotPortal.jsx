@@ -1243,7 +1243,7 @@ function PurchaseHistorySection({ asset }) {
   );
 }
 
-function SpotPositions({ prices, connected, userId, tradingEnabled, isAdmin, userLoaded, canTradeLive }) {
+function SpotPositions({ prices, connected, userId, tradingEnabled, isAdmin, userLoaded, canTradeLive, canManageBots }) {
   const positionsFromDb = useQuery(api.spot_positions.listMyPositions);
   const addPositionMutation = useMutation(api.spot_positions.addPosition);
   const updatePositionMutation = useMutation(api.spot_positions.updatePosition);
@@ -1714,7 +1714,7 @@ function SpotPositions({ prices, connected, userId, tradingEnabled, isAdmin, use
                   {defBot && (
                     <DefensaSpotViva botId={defBot._id} bot={defBot} accountById={accountById}
                       balancesByAddress={defenseBalanceByAddress} currentPrice={position.currentPrice}
-                      canTradeLive={canTradeLive} />
+                      canTradeLive={canTradeLive} canManageBots={canManageBots} />
                   )}
                   {canTradeLive ? (
                     <button className="mini-btn" style={{ marginTop: defBot ? 8 : 0 }}
@@ -2592,7 +2592,7 @@ const SD_ARM_LABEL = {
 // Tarjeta en vivo de la Defensa Spot (JAV-107 Fase 4c). Clonada de CoberturaViva con la misma paleta
 // `cv-*`, pero con UN solo cv-tile de Trigger (un único short de bajada). Se alimenta de
 // getSpotDefenseDetail (bot + arm vivo + órdenes) + saldo HL de la cuenta del bot.
-function DefensaSpotViva({ botId, bot: botFromList, accountById, balancesByAddress, currentPrice, canTradeLive }) {
+function DefensaSpotViva({ botId, bot: botFromList, accountById, balancesByAddress, currentPrice, canTradeLive, canManageBots }) {
   const detail = useQuery(api.spotDefenseBots.getSpotDefenseDetail, { botId });
   const pause = useMutation(api.spotDefenseBots.pauseSpotDefenseBot);
   const armAction = useAction(api.spotDefenseEngine.armSpotDefenseBot);
@@ -2737,15 +2737,16 @@ function DefensaSpotViva({ botId, bot: botFromList, accountById, balancesByAddre
       {error && <p style={{ color: 'var(--red)', fontSize: 12, marginTop: 6 }}>{error}</p>}
 
       <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-        {/* (Codex 4c BAJO) Gate de cliente por permiso: el backend sigue siendo la autoridad (arm exige
-            canTradeLive+canManageBots; pause exige requireBotManager), pero sin permiso no ofrecemos la
-            acción para no presentar botones que fallarían. */}
-        {needsArm && canTradeLive && (
+        {/* (Codex 4c r2 BAJO) Gate de cliente fiel al backend: armar exige canTradeLive + canManageBots
+            (armSpotDefenseBot); pausar exige solo canManageBots (requireBotManager). Así un usuario con
+            canManageBots pero sin canTradeLive SÍ puede pausar (reducir riesgo) aunque no pueda armar. El
+            backend sigue siendo la autoridad; esto solo evita ofrecer botones que fallarían. */}
+        {needsArm && canTradeLive && canManageBots && (
           <button className="mini-btn active" onClick={handleRetryArm} disabled={busy}>
             {busy ? '…' : 'Reintentar armado'}
           </button>
         )}
-        {bot.active && !bot.disarmPending && canTradeLive && (
+        {bot.active && !bot.disarmPending && canManageBots && (
           <button className="mini-btn" onClick={handlePause} disabled={busy}>
             {busy ? '…' : 'Pausar defensa'}
           </button>
@@ -4008,6 +4009,7 @@ function Dashboard({ user, onLogout, userId }) {
               isAdmin={isAdmin}
               userLoaded={userLoaded}
               canTradeLive={canTradeLive}
+              canManageBots={canManageBots}
             />
             <AuditLogPanel isAdmin={isAdmin} mySignals={signals} />
             <AlertsPanel

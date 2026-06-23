@@ -678,6 +678,49 @@ describe("removePosition — guard de defensa viva (Codex 4c ALTO)", () => {
   });
 });
 
+describe("recordSpotDefenseSlOrder — limpia oid/submittedAt en reintento pre-RPC (CodeRabbit)", () => {
+  it("un PREPARE nuevo (sin markSubmitted) borra el oid/submittedAt del intento anterior", async () => {
+    const t = makeConvexTest();
+    const { botId } = await t.run((ctx: MutationCtx) => seedDefenseBot(ctx));
+    const r = await t.mutation(internal.spotDefenseBots.reserveSpotDefenseArm, {
+      botId, triggerPx: 2000, availableCollateral: 1000, assetMaxLeverage: 20, szDecimals: 3,
+    });
+    const armId = r.armId;
+    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId });
+    const token = claim.token;
+    // Intento ENVIADO (submittedAt + oid).
+    await t.mutation(internal.spotDefenseBots.recordSpotDefenseSlOrder, { armId, token, cloid: "0xsl0", oid: "55", triggerPx: 2100, size: 0.01, observedStatus: "open", markSubmitted: true });
+    const sent = await t.run((ctx: MutationCtx) => ctx.db.query("spot_defense_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", "sl")).first());
+    expect(sent?.oid).toBe("55");
+    expect(typeof sent?.submittedAt).toBe("number");
+    // Nuevo PREPARE pre-RPC (sin markSubmitted ni oid) → limpia ambos.
+    await t.mutation(internal.spotDefenseBots.recordSpotDefenseSlOrder, { armId, token, cloid: "0xsl1", triggerPx: 2100, size: 0.01, observedStatus: "pending" });
+    const prep = await t.run((ctx: MutationCtx) => ctx.db.query("spot_defense_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", "sl")).first());
+    expect(prep?.oid).toBeUndefined();
+    expect(prep?.submittedAt).toBeUndefined();
+  });
+});
+
+describe("listLiveSpotDefenseArmIdsInternal — solo arms NO terminales (CodeRabbit)", () => {
+  it("incluye vivos (armed/protected) y excluye terminales (closed/failed/disarmed)", async () => {
+    const t = makeConvexTest();
+    const { botId, userId, hlAccountId } = await t.run((ctx: MutationCtx) => seedDefenseBot(ctx));
+    const mk = (status: "armed" | "protected" | "closed" | "failed" | "disarmed") =>
+      t.run((ctx: MutationCtx) => ctx.db.insert("spot_defense_arms", {
+        botId, userId, hlAccountId, asset: "BTC", network: "testnet", generation: 1, status, desiredState: "armed" as const,
+        side: "Short" as const, triggerPx: 2000, size: 0.01, appliedLeverage: 10, reservedNotional: 20, marginReserved: 2,
+        stopLossPct: 1, createdAt: Date.now(), updatedAt: Date.now(),
+      }));
+    const armed = await mk("armed");
+    const prot = await mk("protected");
+    await mk("closed"); await mk("failed"); await mk("disarmed");
+    const ids = await t.query(internal.spotDefenseBots.listLiveSpotDefenseArmIdsInternal, {});
+    expect(ids).toContain(armed);
+    expect(ids).toContain(prot);
+    expect(ids.length).toBe(2);
+  });
+});
+
 describe("settleSpotDefenseRearm — persiste lastRearmErrorKind (Codex 4c BAJO)", () => {
   it("clasifica el prefijo [blocked_margin] del error en lastRearmErrorKind", async () => {
     const t = makeConvexTest();

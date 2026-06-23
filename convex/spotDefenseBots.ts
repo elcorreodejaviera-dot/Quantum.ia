@@ -26,6 +26,13 @@ const MIN_PERP_NOTIONAL_USD = 10;
 const SPOT_DEFENSE_LEASE_MS = 2 * 60 * 1000;
 
 const ARM_TERMINAL = new Set(["disarmed", "closed", "failed"]);
+// (CodeRabbit) Complemento EXACTO de ARM_TERMINAL: estados NO terminales de un arm. Se usa para consultar
+// arms vivos por `by_status_updated` (sin escanear el historial terminal). Mantener en sync con el enum
+// de `spot_defense_arms.status` del schema.
+const SD_ARM_NON_TERMINAL = [
+  "arming", "submitting", "armed", "disarming", "filled", "protecting", "protected", "unknown",
+  "manual_intervention",
+] as const;
 // Transiciones permitidas de un arm de defensa (single-entry). Evita degradar estados (p.ej. protected→
 // armed) y acota la máquina de estados. Espejo recortado de ALLOWED_ARM del motor de pool.
 const ALLOWED_SD: Record<string, Set<string>> = {
@@ -261,7 +268,9 @@ export const persistSpotDefenseBot = mutation({
       if (live) {
         throw new Error("El bot tiene una cobertura activa; pausa el trigger (no se puede reconfigurar con un armado vivo).");
       }
-      await ctx.db.patch(existing._id, common);
+      // (CodeRabbit) Reactivar un bot que quedó `stopped` (tras pausar) debe volver a `running`, o el
+      // siguiente armado falla en assertSpotDefenseLiveAdmissible (exige status==="running").
+      await ctx.db.patch(existing._id, { ...common, status: args.active ? "running" : "stopped" });
       return { botId: existing._id };
     }
     const botId = await ctx.db.insert("spot_defense_bots", {
@@ -517,10 +526,14 @@ export const listLiveSpotDefenseArmIdsInternal = internalQuery({
   handler: async (ctx, { limit }) => {
     const cap = limit ?? 200;
     const ids: Id<"spot_defense_arms">[] = [];
-    for await (const a of ctx.db.query("spot_defense_arms").withIndex("by_updated").order("asc")) {
-      if (!ARM_TERMINAL.has(a.status)) {
+    // (CodeRabbit) Consultar SOLO los estados NO terminales por `by_status_updated` en vez de escanear toda
+    // la tabla por `by_updated` (que arranca por los más viejos = historial terminal acumulado). Complemento
+    // EXACTO de ARM_TERMINAL (disarmed/closed/failed).
+    for (const status of SD_ARM_NON_TERMINAL) {
+      for await (const a of ctx.db.query("spot_defense_arms")
+        .withIndex("by_status_updated", (q) => q.eq("status", status)).order("asc")) {
         ids.push(a._id);
-        if (ids.length >= cap) break;
+        if (ids.length >= cap) return ids;
       }
     }
     return ids;
@@ -758,10 +771,12 @@ export const recordSpotDefenseSlOrder = internalMutation({
     if (attempt !== undefined && attempt !== arm.slAttempts) await ctx.db.patch(armId, { slAttempts: attempt });
     const existing = await ctx.db.query("spot_defense_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", "sl")).first();
     if (existing) {
-      const patch: Record<string, unknown> = { observedStatus, triggerPx, size, cloid, updatedAt: now };
-      if (oid !== undefined) patch.oid = oid;
-      if (markSubmitted) patch.submittedAt = now;
-      await ctx.db.patch(existing._id, patch);
+      // (CodeRabbit) Un reintento PREPARADO (pre-RPC, markSubmitted falso) NO debe heredar el oid/submittedAt
+      // del intento anterior — si no, el reconcile trataría el SL nuevo como ya enviado (mismo fix que el TP).
+      await ctx.db.patch(existing._id, {
+        observedStatus, triggerPx, size, cloid, updatedAt: now,
+        oid, submittedAt: markSubmitted ? now : undefined,
+      });
       return { ok: true as const, orderId: existing._id };
     }
     const orderId = await ctx.db.insert("spot_defense_orders", {

@@ -269,15 +269,20 @@ export const reconcileSpotDefenseArm = internalAction({
       ]);
       const bot = await ctx.runQuery(internal.spotDefenseBots.getSpotDefenseBotInternal, { botId: arm.botId });
       const canLive = await ctx.runQuery(internal.users.hasTradeLiveForUserInternal, { userId: arm.userId });
-      // (Codex 3c-1 NO-GO #5) Gate dedicado de mainnet: si está cerrado, NO colocar/cancelar en mainnet.
+      // (Codex 3c-1 NO-GO #5 / CodeRabbit CRÍTICO) Gate dedicado de mainnet: si está cerrado, NO colocar NI
+      // cancelar/cerrar en mainnet. NO debe mezclarse en `killed` (eso haría `wantDisarm=true` → un market
+      // close / cancelByCloid en mainnet justo con el gate cerrado). Se trata como BLOQUEO duro: corta el
+      // reconcile antes de cualquier exchange.* (más abajo). Una pausa pendiente espera al gate abierto.
       const mainnetGate = await ctx.runQuery(internal.spotDefenseBots.getMainnetSpotDefenseApprovedInternal, {});
+      const mainnetBlocked = arm.network === "mainnet" && !mainnetGate.approved;
       const killed =
         tradingConfig?.value !== true || simConfig?.value === true ||
         !bot || !bot.active || bot.status !== "running" || bot.disarmPending === true ||
         hlNetwork() !== arm.network || (bot && bot.hlAccountId !== arm.hlAccountId) ||
-        !canLive || credential.userId !== arm.userId ||
-        (arm.network === "mainnet" && !mainnetGate.approved);
+        !canLive || credential.userId !== arm.userId;
       const wantDisarm = killed || arm.desiredState === "disarmed";
+      // Gate mainnet cerrado = barrera de operación live: no se toca HL en ninguna rama (ni desarme).
+      if (mainnetBlocked) return { skipped: "mainnet_spot_defense_not_approved" };
 
       // (Codex 3c-3ab r4) Incluir el SL break-even EN ROTACIÓN (aún no en la fila `sl`) para que el
       // cleanup/cierre/stop lo cancelen y nunca quede una orden reduceOnly huérfana en HL.

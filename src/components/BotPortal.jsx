@@ -1250,7 +1250,10 @@ function SpotPositions({ prices, connected, userId, tradingEnabled, isAdmin, use
   const removePositionMutation = useMutation(api.spot_positions.removePosition);
   const recordPurchaseMutation = useMutation(api.spot_positions.recordPurchase);
   // Bots de defensa spot del usuario (JAV-107 Fase 4) + cuentas HL + saldos en vivo para la tarjeta viva.
-  const defenseBots = useQuery(api.spotDefenseBots.listMySpotDefenseBots) ?? [];
+  // (CodeRabbit) undefined = aún cargando: NO colapsar a "sin defensa" (habilitaría Eliminar y la pill).
+  const defenseBotsResult = useQuery(api.spotDefenseBots.listMySpotDefenseBots);
+  const defenseBotsLoading = defenseBotsResult === undefined;
+  const defenseBots = defenseBotsResult ?? [];
   const hlAccounts = useQuery(api.hlCredentials.list) ?? [];
   const accountById = React.useMemo(() => {
     const m = {};
@@ -1515,6 +1518,11 @@ function SpotPositions({ prices, connected, userId, tradingEnabled, isAdmin, use
             ? calcNewDCA(position.amount, position.dca, addQty, addPrice)
             : null;
           const defBot = defenseByPositionId[position.id] ?? null;   // bot de defensa de esta posición
+          // (CodeRabbit) Crear/reconfigurar/armar exigen canTradeLive + canManageBots (backend); pausar
+          // solo canManageBots (criterio Codex, se gatea dentro de la tarjeta).
+          const canManageSpotDefense = canTradeLive && canManageBots;
+          // Defensa viva = no se puede reconfigurar (persistSpotDefenseBot lo rechaza) ni borrar la posición.
+          const defenseLive = !!defBot && (defBot.active || defBot.status !== 'stopped' || defBot.disarmPending);
 
           return (
             <article className="spot-card" key={position.asset}>
@@ -1556,9 +1564,10 @@ function SpotPositions({ prices, connected, userId, tradingEnabled, isAdmin, use
                     className="mini-btn danger"
                     // (Codex 4c ALTO) No permitir borrar la posición con una defensa viva: dejaría el
                     // bot/short huérfano. El backend lo rechaza igual; aquí se bloquea y explica antes.
-                    disabled={!!defBot && (defBot.active || defBot.status !== 'stopped' || defBot.disarmPending)}
-                    title={!!defBot && (defBot.active || defBot.status !== 'stopped' || defBot.disarmPending)
-                      ? 'Pausa/detén la defensa spot antes de eliminar esta posición'
+                    // (CodeRabbit) También deshabilitar mientras cargan las defensas (defBot aún null).
+                    disabled={defenseBotsLoading || defenseLive}
+                    title={defenseBotsLoading ? 'Cargando estado de la defensa…'
+                      : defenseLive ? 'Pausa/detén la defensa spot antes de eliminar esta posición'
                       : 'Eliminar esta posición spot (irreversible)'}
                     onClick={() => {
                       if (window.confirm(`¿Eliminar la posición spot ${position.asset}?\nSe borrará del portal de forma permanente (no afecta tus fondos en Hyperliquid).`)) {
@@ -1571,7 +1580,11 @@ function SpotPositions({ prices, connected, userId, tradingEnabled, isAdmin, use
                   >
                     🗑 Eliminar
                   </button>
-                  <span className="pill">{defBot ? (defBot.active ? 'Defensa activa' : 'Defensa pausada') : 'Sin defensa'}</span>
+                  <span className="pill">{
+                    defenseBotsLoading ? 'Cargando defensa…'
+                      : defBot ? (defBot.disarmPending ? 'Deteniéndose' : (defBot.active ? 'Defensa activa' : 'Defensa pausada'))
+                      : 'Sin defensa'
+                  }</span>
                 </div>
               </div>
 
@@ -1716,20 +1729,24 @@ function SpotPositions({ prices, connected, userId, tradingEnabled, isAdmin, use
                       balancesByAddress={defenseBalanceByAddress} currentPrice={position.currentPrice}
                       canTradeLive={canTradeLive} canManageBots={canManageBots} />
                   )}
-                  {canTradeLive ? (
+                  {canManageSpotDefense ? (
                     <button className="mini-btn" style={{ marginTop: defBot ? 8 : 0 }}
+                      // (CodeRabbit) Con un arm vivo, persistSpotDefenseBot rechaza el patch → no ofrecer
+                      // "Reconfigurar"; pedir pausar primero.
+                      disabled={defenseLive}
+                      title={defenseLive ? 'Pausa/detén la defensa antes de reconfigurarla' : undefined}
                       onClick={() => setDefenseModalFor(position.id)}>
-                      {defBot ? '⚙ Reconfigurar defensa' : '🛡 Configurar defensa'}
+                      {defBot ? (defenseLive ? '⏸ Pausa para reconfigurar' : '⚙ Reconfigurar defensa') : '🛡 Configurar defensa'}
                     </button>
                   ) : (
                     <p className="network" style={{ fontSize: 12 }}>
-                      Necesitas permiso de trading real para defender este holding. Pídeselo a un administrador.
+                      Necesitas permisos de trading real y gestión de bots para defender este holding. Pídeselos a un administrador.
                     </p>
                   )}
                 </div>
               )}
               {defenseModalFor === position.id && (
-                <SpotDefenseBotModal position={position} bot={defBot} canTradeLive={canTradeLive}
+                <SpotDefenseBotModal position={position} bot={defBot} canTradeLive={canTradeLive} canManageBots={canManageBots}
                   onClose={() => setDefenseModalFor(null)} />
               )}
             </article>
@@ -2920,7 +2937,7 @@ function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
 // al CAER el precio hasta el trigger). Clonado de ProtectionBotModal pero SIN pool/rango/reentrada; en su
 // lugar lleva un bloque Trigger (Manual / anclado al DCA). Persiste el bot (mutation) y luego ARRANCA el
 // armado inicial (action armSpotDefenseBot) — ningún cron arma un bot recién creado (Fase 4a).
-function SpotDefenseBotModal({ position, bot, canTradeLive, onClose, onSaved }) {
+function SpotDefenseBotModal({ position, bot, canTradeLive, canManageBots, onClose, onSaved }) {
   const persist = useMutation(api.spotDefenseBots.persistSpotDefenseBot);
   const arm = useAction(api.spotDefenseEngine.armSpotDefenseBot);
   const accounts = useQuery(api.hlCredentials.list) ?? [];
@@ -2964,10 +2981,12 @@ function SpotDefenseBotModal({ position, bot, canTradeLive, onClose, onSaved }) 
   const triggerAbovePrice = position.currentPrice != null && effTriggerPrice >= position.currentPrice;
 
   async function handleSave() {
-    // Solo-real: sin canTradeLive NO se crea (nada de bot simulado silencioso).
-    if (!canTradeLive) { setError('Necesitas permiso de trading real para crear este bot. Pídeselo a un administrador.'); return; }
+    // Solo-real: crear/armar exige canTradeLive + canManageBots (igual que el backend: persist+arm).
+    if (!(canTradeLive && canManageBots)) { setError('Necesitas permisos de trading real y de gestión de bots para crear este bot. Pídeselos a un administrador.'); return; }
     if (!hlAccountId) { setError('Selecciona la cuenta HL dedicada.'); return; }
     if (!(effTriggerPrice > 0)) { setError('El precio del trigger debe ser > 0.'); return; }
+    // (CodeRabbit) El SL es obligatorio para el motor (protege el short); rechazar stopLossPct ≤ 0.
+    if (!(stopLossPct > 0)) { setError('El Stop Loss debe ser mayor que 0%.'); return; }
     // Un SELL que dispara al BAJAR nacería disparado si el trigger ya está en/sobre el precio actual.
     if (triggerAbovePrice) { setError('El trigger debe estar por DEBAJO del precio actual (un SELL de bajada nacería disparado).'); return; }
     if (!(requestedNotionalUsd > 0)) { setError('Nocional inválido (revisa cantidad del holding / precio / buffer).'); return; }
@@ -3120,7 +3139,7 @@ function SpotDefenseBotModal({ position, bot, canTradeLive, onClose, onSaved }) 
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
           <button className="ghost-btn" onClick={onClose} disabled={saving} style={{ flex: 1 }}>Cancelar</button>
           <button className="primary-btn" onClick={handleSave}
-            disabled={saving || !hlAccountId || triggerAbovePrice || !(requestedNotionalUsd > 0) || (partialEst && !acceptPartial)}
+            disabled={saving || !hlAccountId || triggerAbovePrice || !(stopLossPct > 0) || !(requestedNotionalUsd > 0) || (partialEst && !acceptPartial)}
             style={{ flex: 1 }}>
             {saving ? 'Activando…' : (bot ? 'Guardar cambios' : 'Activar Defensa')}
           </button>

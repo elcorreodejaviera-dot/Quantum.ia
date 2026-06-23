@@ -4,7 +4,7 @@ import type { QueryCtx, MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { requireAdmin, requireBotManager, getUserOrNull, writeAdminLog, hasPermission, deriveBaseAsset } from "./helpers";
 import { elog } from "./log";
-import { spotDefenseCloidInput } from "./cloids";
+import { spotDefenseCloidInput, toHlCloid } from "./cloids";
 import { hlNetwork } from "./hlNetwork";
 import { committedMarginForAccount } from "./executions";
 import { resolveLeverage, AUTO_LEVERAGE_CAP, MANUAL_LEVERAGE_MIN, MANUAL_LEVERAGE_MAX, MARGIN_SAFETY_BUFFER } from "./leverage";
@@ -58,6 +58,24 @@ const SD_SUBMIT_QUARANTINE_MS = 90 * 1000;
 const SD_REARM_COOLDOWN_MS = 5 * 60 * 1000;
 const SD_REARM_BACKOFF_MS = 5 * 60 * 1000;
 const SD_REARM_LEASE_MS = 2 * 60 * 1000;
+
+// (CodeRabbit) Política ÚNICA de auto-rearm durable tras un `failed` TERMINAL. Se llama desde TODOS los
+// caminos que terminalizan `failed` (settleSpotDefenseArm + los patch directos pre-envío:
+// markArmSubmitting / gateArmBeforeOrder / failSpotDefensePreOrder), para que un bot con autoRearm nunca
+// quede sin arm vivo y sin rearm pendiente. El guard `rearmStatus===undefined` NO pisa un ciclo de rearm
+// en curso (running) ni uno ya agendado (pending/blocked): ese caso lo gestiona settleSpotDefenseRearm del
+// cron (backoff + escalado a blocked). Respeta disarmPending (pausa en curso).
+async function scheduleDurableRearmAfterFailed(
+  ctx: MutationCtx, botId: Id<"spot_defense_bots">, error: string | undefined, now: number,
+): Promise<void> {
+  const bot = await ctx.db.get(botId);
+  if (!bot || bot.disarmPending || !bot.active || bot.status !== "running" || bot.autoRearm !== true) return;
+  if (bot.rearmStatus !== undefined) return;
+  await ctx.db.patch(botId, {
+    rearmStatus: "pending", nextRearmAt: now + SD_REARM_COOLDOWN_MS, rearmAttempts: 0,
+    lastRearmError: error, rearmLeaseToken: undefined, rearmLeaseUntil: undefined, updatedAt: now,
+  });
+}
 
 // --- Gate de mainnet (admin) -------------------------------------------------------------------
 
@@ -390,7 +408,10 @@ export const reserveSpotDefenseArm = internalMutation({
       createdAt: now, updatedAt: now,
     });
     await ctx.db.patch(bot._id, { effectiveNotionalUsd, generation, updatedAt: now });
-    const cloid = spotDefenseCloidInput(String(armId), generation, "entry");
+    // (Codex NO-GO r2) El CLOID del entry DEBE ser un cloid HL válido ("0x"+32hex), igual que SL/TP: se
+    // persiste, se envía a HL (`c:`) y se reconcilia por él (orderStatus/openByCloid/cancelByCloid/fills).
+    // Antes se guardaba el input lógico crudo (`spot-defense:...`) → HL podía rechazar/no reconciliar.
+    const cloid = await toHlCloid(spotDefenseCloidInput(String(armId), generation, "entry"));
     await ctx.db.insert("spot_defense_orders", {
       armId, role: "entry", cloid, oid: undefined,
       triggerPx: args.triggerPx, size, reduceOnly: false, observedStatus: "pending",
@@ -417,7 +438,9 @@ export const markArmSubmitting = internalMutation({
     // globales + canTradeLive + bot active/running/!disarm + cuenta owned + red + gate mainnet.
     if (!(await assertSpotDefenseLiveAdmissible(ctx, arm.botId))) return { ok: false as const, reason: "blocked" as const };
     if (!(await coverageAdmissibleForKey(ctx, arm.userId, spotDefenseCoverageKey(arm.botId), arm.effectiveNotionalUsd))) {
-      await ctx.db.patch(armId, { status: "failed", error: "[blocked_margin] cap/plan/suspensión (markArmSubmitting)", updatedAt: Date.now() });
+      const tFail = Date.now();
+      await ctx.db.patch(armId, { status: "failed", error: "[blocked_margin] cap/plan/suspensión (markArmSubmitting)", updatedAt: tFail });
+      await scheduleDurableRearmAfterFailed(ctx, arm.botId, "[blocked_margin] cap/plan/suspensión (markArmSubmitting)", tFail);
       return { ok: false as const, reason: "blocked" as const };
     }
     const now = Date.now();
@@ -441,10 +464,12 @@ export const gateArmBeforeOrder = internalMutation({
     // un kill-switch / simulación / revocación de permiso / desvínculo de cuenta entre el CAS y el RPC.
     if (!(await assertSpotDefenseLiveAdmissible(ctx, arm.botId))) return { ok: false as const };
     if (!(await coverageAdmissibleForKey(ctx, arm.userId, spotDefenseCoverageKey(arm.botId), arm.effectiveNotionalUsd))) {
+      const tFail = Date.now();
       await ctx.db.patch(armId, {
         status: "failed", error: "[blocked_margin] cap/plan/suspensión (gateArmBeforeOrder)",
-        reconcileLeaseUntil: 0, reconcileLeaseToken: undefined, updatedAt: Date.now(),
+        reconcileLeaseUntil: 0, reconcileLeaseToken: undefined, updatedAt: tFail,
       });
+      await scheduleDurableRearmAfterFailed(ctx, arm.botId, "[blocked_margin] cap/plan/suspensión (gateArmBeforeOrder)", tFail);
       return { ok: false as const };
     }
     await ctx.db.patch(armId, { reconcileLeaseUntil: Date.now() + SPOT_DEFENSE_LEASE_MS, updatedAt: Date.now() });
@@ -664,7 +689,9 @@ export const failSpotDefensePreOrder = internalMutation({
     if (arm.filledSize != null || arm.entryPrice != null) return { ok: false as const };
     const entry = await ctx.db.query("spot_defense_orders").withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", "entry")).first();
     if (!entry || entry.observedStatus !== "pending" || entry.oid != null || entry.submittedAt != null) return { ok: false as const };
-    await ctx.db.patch(armId, { status: "failed", error, reconcileLeaseUntil: 0, reconcileLeaseToken: undefined, updatedAt: Date.now() });
+    const tFail = Date.now();
+    await ctx.db.patch(armId, { status: "failed", error, reconcileLeaseUntil: 0, reconcileLeaseToken: undefined, updatedAt: tFail });
+    await scheduleDurableRearmAfterFailed(ctx, arm.botId, error, tFail);
     return { ok: true as const };
   },
 });
@@ -906,6 +933,10 @@ export const settleSpotDefenseArm = internalMutation({
           rearmStatus: "pending", nextRearmAt: now + SD_REARM_COOLDOWN_MS, rearmAttempts: 0,
           lastRearmError: undefined, rearmLeaseToken: undefined, rearmLeaseUntil: undefined, updatedAt: now,
         });
+      } else if (args.status === "failed") {
+        // (CodeRabbit) Retry DURABLE también cuando el armado FALLA (inicial desde la UI, o un `armed`/
+        // `submitting` que nunca llenó y se terminalizó). Política única → helper compartido.
+        await scheduleDurableRearmAfterFailed(ctx, arm.botId, args.error, now);
       }
     }
     return { ok: true as const };

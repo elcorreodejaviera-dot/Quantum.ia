@@ -665,7 +665,34 @@ export const reconcileSpotDefenseArm = internalAction({
         const r = await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "disarmed", closeReason: "disarm" });
         return r.ok ? { result: "disarmed" } : { skipped: "disarm_not_applied" };
       }
-      return { result: "armed_waiting" };
+      // (Codex NO-GO r2 Fix1) Confirmar el estado REAL de la entry por orderStatus + openByCloid + fills
+      // ANTES de declararla muerta (espejo del reconcile de TP / triggerEngine): un trigger que DISPARÓ
+      // sale del book (ya no "open") pero está llenándose, y userFills puede laggear → marcarla `failed`
+      // sería un falso negativo que liberaría la reserva de una entry que en realidad llenó.
+      const spe: any = await info.orderStatus({ user, oid: entry.cloid as `0x${string}` });
+      const speState = spe?.status === "order" ? spe.order?.status : undefined;
+      const entryOpen = await openByCloid(info, user, entry.cloid);
+      // Viva en el book / esperando trigger / disparándose / llenándose → seguir esperando (no tocar).
+      if (entryOpen || speState === "open" || speState === "triggered"
+          || speState === "waitingForTrigger" || speState === "waitingForFill") {
+        return { result: "armed_waiting" };
+      }
+      // orderStatus dice `filled` pero userFills aún no lo refleja → esperar la fill data (no terminalizar).
+      if (speState === "filled") return { skipped: "entry_fill_pending" };
+      // Candidata a MUERTA (terminal/rechazada/unknown: ni open, ni triggered/filling, ni filled). Solo
+      // entonces: grace (pudo no reflejarse aún) + prueba negativa por CLOID + re-fill de último momento →
+      // `failed` (libera la reserva; el auto-rearm reabre si aplica — settleSpotDefenseArm).
+      const recoveryAt = arm.submittedAt ?? entry.submittedAt ?? arm.updatedAt ?? arm.createdAt;
+      if (Date.now() - recoveryAt <= SL_SUBMIT_GRACE_MS) return { skipped: "entry_pending_grace" };
+      const allDead = await ensureSpotDefenseOrdersDead(info, exchange, user, assetId, [entry.cloid]);
+      if (!allDead) return { skipped: "entry_cancel_confirm" };
+      const f3 = await fillsByCloid(info, user, entry.cloid);
+      if (f3.size > 0 && f3.avgPx > 0) {
+        await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "filled", filledSize: f3.size, entryPrice: f3.avgPx });
+        return { result: "filled" };
+      }
+      const rf = await ctx.runMutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "failed", error: "[blocked_config] entry no viva en HL sin fill (rechazo/incierto)" });
+      return rf.ok ? { result: "entry_dead_failed" } : { skipped: "entry_dead_quarantined" };
     } finally {
       await ctx.runMutation(internal.spotDefenseBots.releaseSpotDefenseReconcile, { armId, token });
     }

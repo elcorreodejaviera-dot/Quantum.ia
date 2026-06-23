@@ -721,6 +721,58 @@ describe("listLiveSpotDefenseArmIdsInternal — solo arms NO terminales (CodeRab
   });
 });
 
+describe("reserveSpotDefenseArm — entry cloid es CLOID HL válido (Codex NO-GO r2)", () => {
+  it("el cloid de la entry persistida (y el enviado a HL) cumple ^0x[0-9a-f]{32}$", async () => {
+    const t = makeConvexTest();
+    const { botId } = await t.run((ctx: MutationCtx) => seedDefenseBot(ctx));
+    const r = await t.mutation(internal.spotDefenseBots.reserveSpotDefenseArm, {
+      botId, triggerPx: 2000, availableCollateral: 1000, assetMaxLeverage: 20, szDecimals: 3,
+    });
+    const entry = await t.run((ctx: MutationCtx) => ctx.db.query("spot_defense_orders")
+      .withIndex("by_arm_role", (q) => q.eq("armId", r.armId).eq("role", "entry")).first());
+    expect(entry?.cloid).toMatch(/^0x[0-9a-f]{32}$/);
+    expect(r.cloid).toBe(entry?.cloid);   // el motor envía r.cloid a HL → debe ser el mismo identificador
+  });
+});
+
+describe("settleSpotDefenseArm — auto-rearm durable tras failed (CodeRabbit)", () => {
+  async function reservedClaimedArm(t: any, over: any = {}) {
+    const { botId } = await t.run((ctx: MutationCtx) => seedDefenseBot(ctx, over));
+    const r = await t.mutation(internal.spotDefenseBots.reserveSpotDefenseArm, {
+      botId, triggerPx: 2000, availableCollateral: 1000, assetMaxLeverage: 20, szDecimals: 3,
+    });
+    const claim = await t.mutation(internal.spotDefenseBots.claimSpotDefenseReconcile, { armId: r.armId });
+    return { botId, armId: r.armId, token: claim.token };
+  }
+
+  it("failed con autoRearm=true agenda rearmStatus=pending (retry durable del armado inicial)", async () => {
+    const t = makeConvexTest();
+    const { botId, armId, token } = await reservedClaimedArm(t, { autoRearm: true });   // arming → submittedAt null (sin cuarentena)
+    const res = await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "failed", error: "[blocked_config] x" });
+    expect(res.ok).toBe(true);
+    const bot = await t.run((ctx: MutationCtx) => ctx.db.get(botId));
+    expect(bot?.rearmStatus).toBe("pending");
+    expect(typeof bot?.nextRearmAt).toBe("number");
+  });
+
+  it("failed SIN autoRearm NO agenda rearm", async () => {
+    const t = makeConvexTest();
+    const { botId, armId, token } = await reservedClaimedArm(t);   // autoRearm undefined
+    await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "failed", error: "x" });
+    const bot = await t.run((ctx: MutationCtx) => ctx.db.get(botId));
+    expect(bot?.rearmStatus).toBeUndefined();
+  });
+
+  it("failed NO pisa un ciclo de rearm en curso (rearmStatus ya definido)", async () => {
+    const t = makeConvexTest();
+    const { botId, armId, token } = await reservedClaimedArm(t, { autoRearm: true });
+    await t.run((ctx: MutationCtx) => ctx.db.patch(botId, { rearmStatus: "running", rearmLeaseToken: "rl", rearmLeaseUntil: Date.now() + 60_000 }));
+    await t.mutation(internal.spotDefenseBots.settleSpotDefenseArm, { armId, token, status: "failed", error: "x" });
+    const bot = await t.run((ctx: MutationCtx) => ctx.db.get(botId));
+    expect(bot?.rearmStatus).toBe("running");   // el cron (settleSpotDefenseRearm) lo gestiona, no este path
+  });
+});
+
 describe("settleSpotDefenseRearm — persiste lastRearmErrorKind (Codex 4c BAJO)", () => {
   it("clasifica el prefijo [blocked_margin] del error en lastRearmErrorKind", async () => {
     const t = makeConvexTest();

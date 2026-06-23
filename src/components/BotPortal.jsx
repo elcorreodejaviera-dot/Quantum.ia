@@ -2388,14 +2388,16 @@ function NumberInput({ value, onChange, ...rest }) {
   return <input type="number" {...rest} value={text} onChange={handleChange} onBlur={handleBlur} />;
 }
 
-// Filas de take-profits (gainPct / closePct). Cantidad fija según el tipo de bot.
+// Filas de take-profits (gainPct / closePct). Añadir/quitar libremente; lista vacía = sin TPs.
 function TakeProfitRows({ tps, setTps }) {
   const update = (i, field, val) =>
     setTps(tps.map((t, idx) => (idx === i ? { ...t, [field]: Number(val) } : t)));
+  const removeRow = (i) => setTps(tps.filter((_, idx) => idx !== i));
+  const addRow = () => setTps([...tps, { gainPct: 0.5, closePct: 50 }]);
   return (
     <>
       {tps.map((tp, i) => (
-        <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 6 }}>
+        <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 8, marginTop: 6, alignItems: 'end' }}>
           <label className="config-field" style={{ margin: 0 }}>
             <span>TP{i + 1} — % ganancia</span>
             <NumberInput step="0.1" min="0" value={tp.gainPct}
@@ -2406,8 +2408,18 @@ function TakeProfitRows({ tps, setTps }) {
             <NumberInput step="1" min="0" value={tp.closePct}
               onChange={(n) => update(i, 'closePct', n)} />
           </label>
+          <button type="button" className="ghost-btn" style={{ padding: '6px 10px', alignSelf: 'center' }}
+            onClick={() => removeRow(i)} aria-label={`Quitar TP${i + 1}`}>✕</button>
         </div>
       ))}
+      <button type="button" className="ghost-btn" style={{ marginTop: 8, fontSize: 12 }} onClick={addRow}>
+        + Añadir Take Profit
+      </button>
+      {tps.length === 0 && (
+        <span style={{ display: 'block', fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
+          Sin Take Profits — el bot no cerrará parcialmente en ganancia.
+        </span>
+      )}
     </>
   );
 }
@@ -2909,7 +2921,7 @@ function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
         )}
 
         <div className="config-field" style={{ padding: '8px 0 4px' }}>
-          <span>Take Profits (3 niveles)</span>
+          <span>Take Profits (opcional)</span>
           <TakeProfitRows tps={tps} setTps={setTps} />
         </div>
 

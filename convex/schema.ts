@@ -672,6 +672,7 @@ export default defineSchema({
   })
     .index("by_user", ["userId"])
     .index("by_user_position", ["userId", "spotPositionId"])  // unicidad: 1 bot por posición spot
+    .index("by_position", ["spotPositionId"])                 // (4c) guard de borrado: bot huérfano sin userId
     .index("by_user_account", ["userId", "hlAccountId"])      // exclusividad de cuenta (JAV-102)
     .index("by_account", ["hlAccountId"])                     // escaneo cross-tabla de exclusividad
     .index("by_rearm_status", ["rearmStatus", "nextRearmAt"]),

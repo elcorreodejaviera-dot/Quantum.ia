@@ -582,14 +582,21 @@ export const settleSpotDefenseRearm = internalMutation({
     const bot = await ctx.db.get(botId);
     if (!bot || bot.rearmLeaseToken !== token || (bot.rearmLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
     const now = Date.now();
+    // (Codex 4c BAJO) Clasificar el motivo desde el prefijo [kind] del error para que la tarjeta muestre
+    // un diagnóstico (espeja el `lastRearmErrorKind` del motor de pools). Sin prefijo conocido → transient.
+    const errorKind = !error ? undefined
+      : error.includes("[blocked_margin]") ? "blocked_margin" as const
+      : error.includes("[blocked_config]") || error.includes("[blocked") ? "blocked_config" as const
+      : error.includes("[retry_incompatible]") ? "retry_incompatible" as const
+      : "transient" as const;
     if (outcome === "ok" || outcome === "cancel") {
-      await ctx.db.patch(botId, { rearmStatus: undefined, nextRearmAt: undefined, rearmLeaseToken: undefined, rearmLeaseUntil: undefined, lastRearmError: error, updatedAt: now });
+      await ctx.db.patch(botId, { rearmStatus: undefined, nextRearmAt: undefined, rearmLeaseToken: undefined, rearmLeaseUntil: undefined, lastRearmError: error, lastRearmErrorKind: errorKind, updatedAt: now });
     } else {
       const attempts = (bot.rearmAttempts ?? 0) + 1;
       await ctx.db.patch(botId, {
         rearmStatus: outcome === "blocked" ? "blocked" : "pending",
         nextRearmAt: now + SD_REARM_BACKOFF_MS, rearmAttempts: attempts,
-        rearmLeaseToken: undefined, rearmLeaseUntil: undefined, lastRearmError: error, updatedAt: now,
+        rearmLeaseToken: undefined, rearmLeaseUntil: undefined, lastRearmError: error, lastRearmErrorKind: errorKind, updatedAt: now,
       });
     }
     return { ok: true as const };

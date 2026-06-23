@@ -634,3 +634,60 @@ describe("consumedCoverageByKey — claves namespaced sin colisión (Codex r2#3/
     expect(keys.length).toBe(2);   // claves distintas, sin dedupe cruzada
   });
 });
+
+describe("removePosition — guard de defensa viva (Codex 4c ALTO)", () => {
+  it("RECHAZA borrar una posición con bot de defensa activo (no deja bot huérfano)", async () => {
+    const t = makeConvexTest();
+    const { spotPositionId } = await t.run((ctx: MutationCtx) => seedDefenseBot(ctx));   // active/running
+    await expect(
+      t.withIdentity({ subject: "clerk_x" }).mutation(api.spot_positions.removePosition, { id: spotPositionId }),
+    ).rejects.toThrow(/defensa spot activa/i);
+    expect(await t.run((ctx: MutationCtx) => ctx.db.get(spotPositionId))).not.toBeNull();
+  });
+
+  it("RECHAZA borrar si hay un arm NO terminal aunque el bot esté stopped", async () => {
+    const t = makeConvexTest();
+    const { spotPositionId } = await t.run(async (ctx: MutationCtx) => {
+      const r = await seedDefenseBot(ctx, { active: false, status: "stopped" });
+      await ctx.db.insert("spot_defense_arms", {
+        botId: r.botId, userId: r.userId, hlAccountId: r.hlAccountId, asset: "BTC", network: "testnet",
+        generation: 1, status: "armed", desiredState: "armed", side: "Short", triggerPx: 2000, size: 0.01,
+        appliedLeverage: 10, reservedNotional: 20, marginReserved: 2, stopLossPct: 1,
+        createdAt: Date.now(), updatedAt: Date.now(),
+      });
+      return r;
+    });
+    await expect(
+      t.withIdentity({ subject: "clerk_x" }).mutation(api.spot_positions.removePosition, { id: spotPositionId }),
+    ).rejects.toThrow(/defensa spot activa/i);
+  });
+
+  it("PERMITE borrar si el bot está stopped y sin arm vivo", async () => {
+    const t = makeConvexTest();
+    const { spotPositionId } = await t.run((ctx: MutationCtx) => seedDefenseBot(ctx, { active: false, status: "stopped" }));
+    await t.withIdentity({ subject: "clerk_x" }).mutation(api.spot_positions.removePosition, { id: spotPositionId });
+    expect(await t.run((ctx: MutationCtx) => ctx.db.get(spotPositionId))).toBeNull();
+  });
+
+  it("PERMITE borrar una posición sin ninguna defensa", async () => {
+    const t = makeConvexTest();
+    const spotPositionId = await t.run((ctx: MutationCtx) =>
+      ctx.db.insert("spot_positions", { asset: "ETH", amount: 1, dca: 3000, userId: "clerk_x" }));
+    await t.withIdentity({ subject: "clerk_x" }).mutation(api.spot_positions.removePosition, { id: spotPositionId });
+    expect(await t.run((ctx: MutationCtx) => ctx.db.get(spotPositionId))).toBeNull();
+  });
+});
+
+describe("settleSpotDefenseRearm — persiste lastRearmErrorKind (Codex 4c BAJO)", () => {
+  it("clasifica el prefijo [blocked_margin] del error en lastRearmErrorKind", async () => {
+    const t = makeConvexTest();
+    const { botId } = await t.run((ctx: MutationCtx) => seedDefenseBot(ctx));
+    const token = "rt1";
+    await t.run((ctx: MutationCtx) => ctx.db.patch(botId, { rearmLeaseToken: token, rearmLeaseUntil: Date.now() + 60_000, rearmStatus: "running" }));
+    const r = await t.mutation(internal.spotDefenseBots.settleSpotDefenseRearm, { botId, token, outcome: "blocked", error: "[blocked_margin] sin colateral usable" });
+    expect(r.ok).toBe(true);
+    const bot = await t.run((ctx: MutationCtx) => ctx.db.get(botId));
+    expect(bot?.lastRearmErrorKind).toBe("blocked_margin");
+    expect(bot?.rearmStatus).toBe("blocked");
+  });
+});

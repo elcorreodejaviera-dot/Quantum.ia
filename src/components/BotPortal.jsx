@@ -1554,7 +1554,12 @@ function SpotPositions({ prices, connected, userId, tradingEnabled, isAdmin, use
                   </button>
                   <button
                     className="mini-btn danger"
-                    title="Eliminar esta posición spot (irreversible)"
+                    // (Codex 4c ALTO) No permitir borrar la posición con una defensa viva: dejaría el
+                    // bot/short huérfano. El backend lo rechaza igual; aquí se bloquea y explica antes.
+                    disabled={!!defBot && (defBot.active || defBot.status !== 'stopped' || defBot.disarmPending)}
+                    title={!!defBot && (defBot.active || defBot.status !== 'stopped' || defBot.disarmPending)
+                      ? 'Pausa/detén la defensa spot antes de eliminar esta posición'
+                      : 'Eliminar esta posición spot (irreversible)'}
                     onClick={() => {
                       if (window.confirm(`¿Eliminar la posición spot ${position.asset}?\nSe borrará del portal de forma permanente (no afecta tus fondos en Hyperliquid).`)) {
                         removePositionMutation({ id: position.id }).catch((err) => {
@@ -1708,7 +1713,8 @@ function SpotPositions({ prices, connected, userId, tradingEnabled, isAdmin, use
                 <div className="spot-defense-section" style={{ marginTop: 10 }}>
                   {defBot && (
                     <DefensaSpotViva botId={defBot._id} bot={defBot} accountById={accountById}
-                      balancesByAddress={defenseBalanceByAddress} currentPrice={position.currentPrice} />
+                      balancesByAddress={defenseBalanceByAddress} currentPrice={position.currentPrice}
+                      canTradeLive={canTradeLive} />
                   )}
                   {canTradeLive ? (
                     <button className="mini-btn" style={{ marginTop: defBot ? 8 : 0 }}
@@ -2586,7 +2592,7 @@ const SD_ARM_LABEL = {
 // Tarjeta en vivo de la Defensa Spot (JAV-107 Fase 4c). Clonada de CoberturaViva con la misma paleta
 // `cv-*`, pero con UN solo cv-tile de Trigger (un único short de bajada). Se alimenta de
 // getSpotDefenseDetail (bot + arm vivo + órdenes) + saldo HL de la cuenta del bot.
-function DefensaSpotViva({ botId, bot: botFromList, accountById, balancesByAddress, currentPrice }) {
+function DefensaSpotViva({ botId, bot: botFromList, accountById, balancesByAddress, currentPrice, canTradeLive }) {
   const detail = useQuery(api.spotDefenseBots.getSpotDefenseDetail, { botId });
   const pause = useMutation(api.spotDefenseBots.pauseSpotDefenseBot);
   const armAction = useAction(api.spotDefenseEngine.armSpotDefenseBot);
@@ -2601,15 +2607,16 @@ function DefensaSpotViva({ botId, bot: botFromList, accountById, balancesByAddre
   const asset = bot.asset;
   const pair = `${asset}/USDC`;
 
-  // Estado/tono: arm vivo > pausándose > rearm bloqueado/armando > activo sin armar > pausado.
+  // Estado/tono: (Codex 4c MEDIO) `disarmPending` tiene PRIORIDAD sobre el arm — tras pausar, el arm sigue
+  // vivo hasta que el reconcile lo cierra, pero la UI debe mostrar "Deteniéndose" (amber), no verde.
   let estado, tone;
-  if (arm) {
+  if (bot.disarmPending) {
+    estado = 'Deteniéndose'; tone = 'amber';
+  } else if (arm) {
     estado = SD_ARM_LABEL[arm.status] ?? arm.status;
     tone = arm.status === 'failed' || arm.status === 'manual_intervention' ? 'red'
       : (arm.status === 'protected' || arm.status === 'filled' || arm.status === 'armed') ? 'green'
       : arm.status === 'disarming' ? 'amber' : 'faint';
-  } else if (bot.disarmPending) {
-    estado = 'Deteniéndose'; tone = 'amber';
   } else if (bot.rearmStatus === 'blocked') {
     estado = `Bloqueado${bot.lastRearmErrorKind ? ': ' + bot.lastRearmErrorKind : ''}`; tone = 'red';
   } else if (bot.rearmStatus === 'pending' || bot.rearmStatus === 'running') {
@@ -2730,12 +2737,15 @@ function DefensaSpotViva({ botId, bot: botFromList, accountById, balancesByAddre
       {error && <p style={{ color: 'var(--red)', fontSize: 12, marginTop: 6 }}>{error}</p>}
 
       <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-        {needsArm && (
+        {/* (Codex 4c BAJO) Gate de cliente por permiso: el backend sigue siendo la autoridad (arm exige
+            canTradeLive+canManageBots; pause exige requireBotManager), pero sin permiso no ofrecemos la
+            acción para no presentar botones que fallarían. */}
+        {needsArm && canTradeLive && (
           <button className="mini-btn active" onClick={handleRetryArm} disabled={busy}>
             {busy ? '…' : 'Reintentar armado'}
           </button>
         )}
-        {bot.active && !bot.disarmPending && (
+        {bot.active && !bot.disarmPending && canTradeLive && (
           <button className="mini-btn" onClick={handlePause} disabled={busy}>
             {busy ? '…' : 'Pausar defensa'}
           </button>

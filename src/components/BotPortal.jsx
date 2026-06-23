@@ -1816,13 +1816,18 @@ function AuditLogPanel({ isAdmin, mySignals }) {
 
   const rows = isAdmin ? (adminLogs ?? []) : (mySignals ?? []);
   const title = isAdmin ? 'Logs de auditoría' : 'Historial simulado';
+  // Convex devuelve undefined mientras resuelve la query (no en 'skip', que también
+  // es undefined): solo hay carga real si el admin ya aplicó un filtro.
+  const adminLoading = isAdmin && hasActiveFilter && adminLogs === undefined;
 
   return (
     <section className="panel">
       <div className="section-head">
         <h2>{title}</h2>
         {isAdmin && <span className="pill red">ADMIN</span>}
-        {(!isAdmin || hasActiveFilter) && <span className="pill">{rows.length} registros</span>}
+        {(!isAdmin || hasActiveFilter) && (
+          <span className="pill">{adminLoading ? 'Cargando…' : `${rows.length} registros`}</span>
+        )}
         {isAdmin && rows.length > 0 && (
           <button className="mini-btn" onClick={() => exportCsv(rows)}>Exportar CSV</button>
         )}
@@ -1863,9 +1868,11 @@ function AuditLogPanel({ isAdmin, mySignals }) {
       {rows.length === 0 ? (
         <p className="network" style={{ paddingTop: 8 }}>
           {isAdmin
-            ? (hasActiveFilter
-                ? 'Sin registros con los filtros actuales.'
-                : 'Usá los filtros (fechas, asset, red o tipo) para buscar registros.')
+            ? (adminLoading
+                ? 'Cargando registros…'
+                : (hasActiveFilter
+                    ? 'Sin registros con los filtros actuales.'
+                    : 'Usá los filtros (fechas, asset, red o tipo) para buscar registros.'))
             : 'Sin señales todavía. Los bots activos dispararán señales automáticamente.'}
         </p>
       ) : (

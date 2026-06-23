@@ -1798,9 +1798,13 @@ function AuditLogPanel({ isAdmin, mySignals }) {
   const [fromDate, setFromDate] = React.useState('');
   const [toDate, setToDate] = React.useState('');
 
+  // No volcamos todos los registros por defecto: el admin debe acotar con algún
+  // filtro (fechas, asset, red o real/simulado) antes de que se listen.
+  const hasActiveFilter = Boolean(asset || network || simulated || fromDate || toDate);
+
   const adminLogs = useQuery(
     api.tradesHistory.listAllSignals,
-    isAdmin ? {
+    isAdmin && hasActiveFilter ? {
       asset: asset || undefined,
       network: network || undefined,
       simulated: simulated === '' ? undefined : simulated === 'true',
@@ -1812,13 +1816,18 @@ function AuditLogPanel({ isAdmin, mySignals }) {
 
   const rows = isAdmin ? (adminLogs ?? []) : (mySignals ?? []);
   const title = isAdmin ? 'Logs de auditoría' : 'Historial simulado';
+  // Convex devuelve undefined mientras resuelve la query (no en 'skip', que también
+  // es undefined): solo hay carga real si el admin ya aplicó un filtro.
+  const adminLoading = isAdmin && hasActiveFilter && adminLogs === undefined;
 
   return (
     <section className="panel">
       <div className="section-head">
         <h2>{title}</h2>
         {isAdmin && <span className="pill red">ADMIN</span>}
-        <span className="pill">{rows.length} registros</span>
+        {(!isAdmin || hasActiveFilter) && (
+          <span className="pill">{adminLoading ? 'Cargando…' : `${rows.length} registros`}</span>
+        )}
         {isAdmin && rows.length > 0 && (
           <button className="mini-btn" onClick={() => exportCsv(rows)}>Exportar CSV</button>
         )}
@@ -1858,7 +1867,13 @@ function AuditLogPanel({ isAdmin, mySignals }) {
 
       {rows.length === 0 ? (
         <p className="network" style={{ paddingTop: 8 }}>
-          {isAdmin ? 'Sin registros con los filtros actuales.' : 'Sin señales todavía. Los bots activos dispararán señales automáticamente.'}
+          {isAdmin
+            ? (adminLoading
+                ? 'Cargando registros…'
+                : (hasActiveFilter
+                    ? 'Sin registros con los filtros actuales.'
+                    : 'Usá los filtros (fechas, asset, red o tipo) para buscar registros.'))
+            : 'Sin señales todavía. Los bots activos dispararán señales automáticamente.'}
         </p>
       ) : (
         <div className="audit-table">

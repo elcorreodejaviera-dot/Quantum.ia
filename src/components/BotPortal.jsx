@@ -9,6 +9,9 @@ import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, use
 import { capitalPerPosition, leverageText, slOrderOpen, beState as beStateOf, explainBot } from '../lib/armView'
 
 const IS_TESTNET = import.meta.env.VITE_HL_NETWORK === 'testnet';
+// Red que el frontend CREE estar usando; el backend la revalida (assertExpectedNetwork) y rechaza si
+// difiere. Money-path: se envía como expectedNetwork en el armado de la defensa spot (JAV-107 Fase 4).
+const HL_NETWORK = IS_TESTNET ? 'testnet' : 'mainnet';
 
 const NETWORKS = ['Todas', 'Ethereum', 'Arbitrum', 'Base', 'Optimism'];
 const PAIRS = ['Todos', 'BTC/USDC', 'ETH/USDC'];
@@ -1174,8 +1177,6 @@ function RiskPanel({ pools }) {
   );
 }
 
-const DEFAULT_PROTECTOR = { active: true, side: 'Short', leverage: 4, buySize: 15, maxBuys: 3, capitalReserve: 5000, orderType: 'Cobertura DCA', takeProfit: 'Rebajar DCA', hlWallet: '', stopLoss: 1, tradeAmount: 0, moveSlToBE: false, moveSlToBEAt: 1 };
-
 function HLMarketPanel() {
   const [hlSearch, setHlSearch] = React.useState('');
   const { allPrices, connected: hlConnected } = useHyperliquidAllMids();
@@ -1210,21 +1211,6 @@ function HLMarketPanel() {
   );
 }
 
-function protectorKey(userId, asset) {
-  return `protector_${userId ?? 'anon'}_${asset}`;
-}
-
-function loadProtector(userId, asset) {
-  try {
-    const saved = localStorage.getItem(protectorKey(userId, asset));
-    return saved ? { ...DEFAULT_PROTECTOR, ...JSON.parse(saved) } : DEFAULT_PROTECTOR;
-  } catch (_) { return DEFAULT_PROTECTOR; }
-}
-
-function saveProtector(userId, asset, protector) {
-  try { localStorage.setItem(protectorKey(userId, asset), JSON.stringify(protector)); } catch (_) {}
-}
-
 function PurchaseHistorySection({ asset }) {
   const history = useQuery(api.spot_positions.listPurchaseHistory, { asset });
   if (!history) return <p className="network" style={{ padding: '8px 0' }}>Cargando...</p>;
@@ -1257,13 +1243,38 @@ function PurchaseHistorySection({ asset }) {
   );
 }
 
-function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabled, isAdmin, userLoaded }) {
+function SpotPositions({ prices, connected, userId, tradingEnabled, isAdmin, userLoaded, canTradeLive, canManageBots }) {
   const positionsFromDb = useQuery(api.spot_positions.listMyPositions);
   const addPositionMutation = useMutation(api.spot_positions.addPosition);
   const updatePositionMutation = useMutation(api.spot_positions.updatePosition);
   const removePositionMutation = useMutation(api.spot_positions.removePosition);
   const recordPurchaseMutation = useMutation(api.spot_positions.recordPurchase);
-  const recordSignalMutation = useMutation(api.tradesHistory.recordSignal);
+  // Bots de defensa spot del usuario (JAV-107 Fase 4) + cuentas HL + saldos en vivo para la tarjeta viva.
+  // (CodeRabbit) undefined = aún cargando: NO colapsar a "sin defensa" (habilitaría Eliminar y la pill).
+  const defenseBotsResult = useQuery(api.spotDefenseBots.listMySpotDefenseBots);
+  const defenseBotsLoading = defenseBotsResult === undefined;
+  const defenseBots = defenseBotsResult ?? [];
+  const hlAccounts = useQuery(api.hlCredentials.list) ?? [];
+  const accountById = React.useMemo(() => {
+    const m = {};
+    for (const a of hlAccounts) m[a.id] = a;
+    return m;
+  }, [hlAccounts]);
+  const defenseByPositionId = React.useMemo(() => {
+    const m = {};
+    for (const b of defenseBots) m[b.spotPositionId] = b;
+    return m;
+  }, [defenseBots]);
+  // Direcciones únicas de las cuentas de los bots de defensa → UN agregador de saldos (dedup).
+  const defenseAddresses = React.useMemo(() => {
+    const s = new Set();
+    for (const b of defenseBots) {
+      const acc = b.hlAccountId ? accountById[b.hlAccountId] : null;
+      if (acc?.tradingAccountAddress) s.add(acc.tradingAccountAddress);
+    }
+    return [...s];
+  }, [defenseBots, accountById]);
+  const { byAddress: defenseBalanceByAddress } = useHLAccountsBalances(defenseAddresses);
   // (JAV-57 #1) Sin datos demo: el estado autenticado arranca VACÍO y se llena solo desde Convex.
   // Un usuario nuevo no debe ver capital ficticio (alimentaba valor/PnL y señales/triggers).
   const [positions, setPositions] = React.useState([]);
@@ -1274,8 +1285,7 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
   const [openHistory, setOpenHistory] = React.useState({});
   const [editingAssets, setEditingAssets] = React.useState({});
   const [drafts, setDrafts] = React.useState({});
-  const cooldownRef = React.useRef({});
-  const COOLDOWN_MS = 60 * 60 * 1000;
+  const [defenseModalFor, setDefenseModalFor] = React.useState(null);   // position.id con el modal abierto
 
   // (JAV-57 #3) Cambio de sesión/usuario: limpiar de inmediato el estado del usuario ANTERIOR para no
   // mostrar posiciones ajenas ni mantener vivo el effect de señales mientras la query se recarga. El
@@ -1283,7 +1293,6 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
   React.useEffect(() => {
     setPositions([]);
     setDrafts({});
-    cooldownRef.current = {};
   }, [userId]);
 
   React.useEffect(() => {
@@ -1296,7 +1305,7 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
     // listMyPositions guarda userId = identity.subject (Clerk), igual que el prop userId del componente.
     if (positionsFromDb.some((p) => p.userId !== userId)) return;
     setPositions(positionsFromDb.map((p) => ({
-      ...p, id: p._id, currentPrice: null, protector: loadProtector(userId, p.asset),
+      ...p, id: p._id, currentPrice: null,
     })));
     setDrafts((prev) => {
       const next = { ...prev };
@@ -1312,41 +1321,6 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
       ...pos, currentPrice: prices[pos.asset] ?? pos.currentPrice,
     })));
   }, [prices]);
-
-  const recordSpotSignal = React.useCallback(async (asset, triggerType, price, amount, protector) => {
-    try {
-      const lev = protector?.leverage ?? 0;
-      const sl = protector?.stopLoss ?? 1;
-      const be = protector?.moveSlToBE ? ` BE@${protector.moveSlToBEAt ?? 1}%` : '';
-      const side = protector?.side ?? 'Short';
-      const action = `Cobertura ${side} ${asset} ${lev}x SL${sl}%${be}`;
-
-      // El protector spot solo registra señal (simulación). La ejecución real es de los
-      // pool-bots por botId (Parte C / Fase 3, bloqueada por JAV-37).
-      await recordSignalMutation({ action, asset, amount, price, network: 'Spot', botName: `Bot protector ${asset}`, triggerType });
-    } catch (error) {
-      console.error('Failed to record spot protector signal', error);
-    }
-  }, [recordSignalMutation]);
-
-  const EVM_RE_AUTO = /^0x[a-fA-F0-9]{40}$/;
-
-  // Evaluación automática — corre en cada tick de precio
-  React.useEffect(() => {
-    for (const pos of positions) {
-      const p = pos.protector;
-      if (!p?.active || !pos.currentPrice || p.orderType === 'Trigger manual') continue;
-      if (!p.tradeAmount || p.tradeAmount <= 0) continue;             // guard: monto configurado
-      if (!p.hlWallet || !EVM_RE_AUTO.test(p.hlWallet)) continue;     // guard: wallet HL válida
-      if (!simulationMode && !tradingEnabled) continue;               // guard: no live without backend flag
-      const now = Date.now();
-      if (now - (cooldownRef.current[pos.asset] ?? 0) < COOLDOWN_MS) continue;
-      if (pos.currentPrice <= pos.dca) {
-        cooldownRef.current[pos.asset] = now;
-        recordSpotSignal(pos.asset, 'auto', pos.currentPrice, p.tradeAmount, p);
-      }
-    }
-  }, [positions, recordSpotSignal, simulationMode, tradingEnabled]);
 
   function handleDraftChange(asset, field, value) {
     setDrafts((prev) => ({ ...prev, [asset]: { ...prev[asset], [field]: value } }));
@@ -1365,15 +1339,6 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
     if (pos?.id) {
       updatePositionMutation({ id: pos.id, [field]: num }).catch((err) => console.error('updatePosition failed', err));
     }
-  }
-
-  function updateProtector(asset, patch) {
-    setPositions((items) => items.map((item) => {
-      if (item.asset !== asset) return item;
-      const updated = { ...item.protector, ...patch };
-      saveProtector(userId, asset, updated);
-      return { ...item, protector: updated };
-    }));
   }
 
   const SPOT_ASSETS = ['BTC', 'ETH'];
@@ -1552,6 +1517,12 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
           const purchasePreview = addQty > 0 && addPrice > 0
             ? calcNewDCA(position.amount, position.dca, addQty, addPrice)
             : null;
+          const defBot = defenseByPositionId[position.id] ?? null;   // bot de defensa de esta posición
+          // (CodeRabbit) Crear/reconfigurar/armar exigen canTradeLive + canManageBots (backend); pausar
+          // solo canManageBots (criterio Codex, se gatea dentro de la tarjeta).
+          const canManageSpotDefense = canTradeLive && canManageBots;
+          // Defensa viva = no se puede reconfigurar (persistSpotDefenseBot lo rechaza) ni borrar la posición.
+          const defenseLive = !!defBot && (defBot.active || defBot.status !== 'stopped' || defBot.disarmPending);
 
           return (
             <article className="spot-card" key={position.asset}>
@@ -1591,7 +1562,13 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
                   </button>
                   <button
                     className="mini-btn danger"
-                    title="Eliminar esta posición spot (irreversible)"
+                    // (Codex 4c ALTO) No permitir borrar la posición con una defensa viva: dejaría el
+                    // bot/short huérfano. El backend lo rechaza igual; aquí se bloquea y explica antes.
+                    // (CodeRabbit) También deshabilitar mientras cargan las defensas (defBot aún null).
+                    disabled={defenseBotsLoading || defenseLive}
+                    title={defenseBotsLoading ? 'Cargando estado de la defensa…'
+                      : defenseLive ? 'Pausa/detén la defensa spot antes de eliminar esta posición'
+                      : 'Eliminar esta posición spot (irreversible)'}
                     onClick={() => {
                       if (window.confirm(`¿Eliminar la posición spot ${position.asset}?\nSe borrará del portal de forma permanente (no afecta tus fondos en Hyperliquid).`)) {
                         removePositionMutation({ id: position.id }).catch((err) => {
@@ -1603,7 +1580,11 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
                   >
                     🗑 Eliminar
                   </button>
-                  <span className="pill">{position.protector?.active ? 'Bot activo' : 'Bot pausado'}</span>
+                  <span className="pill">{
+                    defenseBotsLoading ? 'Cargando defensa…'
+                      : defBot ? (defBot.disarmPending ? 'Deteniéndose' : (defBot.active ? 'Defensa activa' : 'Defensa pausada'))
+                      : 'Sin defensa'
+                  }</span>
                 </div>
               </div>
 
@@ -1742,17 +1723,31 @@ function SpotPositions({ prices, connected, userId, simulationMode, tradingEnabl
               )}
 
               {isOpen && (
-                <SpotProtectorBot
-                  asset={position.asset}
-                  protector={position.protector}
-                  currentPrice={position.currentPrice}
-                  simulationMode={simulationMode}
-                  tradingEnabled={tradingEnabled}
-                  onChange={(patch) => updateProtector(position.asset, patch)}
-                  onFireSignal={(triggerType, price, amount) => recordSpotSignal(position.asset, triggerType, price, amount, position.protector)}
-                  isAdmin={isAdmin}
-                  userLoaded={userLoaded}
-                />
+                <div className="spot-defense-section" style={{ marginTop: 10 }}>
+                  {defBot && (
+                    <DefensaSpotViva botId={defBot._id} bot={defBot} accountById={accountById}
+                      balancesByAddress={defenseBalanceByAddress} currentPrice={position.currentPrice}
+                      canTradeLive={canTradeLive} canManageBots={canManageBots} />
+                  )}
+                  {canManageSpotDefense ? (
+                    <button className="mini-btn" style={{ marginTop: defBot ? 8 : 0 }}
+                      // (CodeRabbit) Con un arm vivo, persistSpotDefenseBot rechaza el patch → no ofrecer
+                      // "Reconfigurar"; pedir pausar primero.
+                      disabled={defenseLive}
+                      title={defenseLive ? 'Pausa/detén la defensa antes de reconfigurarla' : undefined}
+                      onClick={() => setDefenseModalFor(position.id)}>
+                      {defBot ? (defenseLive ? '⏸ Pausa para reconfigurar' : '⚙ Reconfigurar defensa') : '🛡 Configurar defensa'}
+                    </button>
+                  ) : (
+                    <p className="network" style={{ fontSize: 12 }}>
+                      Necesitas permisos de trading real y gestión de bots para defender este holding. Pídeselos a un administrador.
+                    </p>
+                  )}
+                </div>
+              )}
+              {defenseModalFor === position.id && (
+                <SpotDefenseBotModal position={position} bot={defBot} canTradeLive={canTradeLive} canManageBots={canManageBots}
+                  onClose={() => setDefenseModalFor(null)} />
               )}
             </article>
           );
@@ -2603,6 +2598,181 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
   );
 }
 
+// Etiquetas de estado del arm de defensa (espejo de ARM_STATE_LABEL pero para el ciclo single-short).
+const SD_ARM_LABEL = {
+  arming: 'Armando', submitting: 'Enviando', armed: 'Armado (trigger vivo)', filled: 'Disparado',
+  protecting: 'Colocando SL', protected: 'Protegido (SL vivo)', disarming: 'Desarmando',
+  disarmed: 'Desarmado', closed: 'Cerrado', failed: 'Falló', manual_intervention: 'Intervención manual',
+  unknown: 'Estado incierto',
+};
+
+// Tarjeta en vivo de la Defensa Spot (JAV-107 Fase 4c). Clonada de CoberturaViva con la misma paleta
+// `cv-*`, pero con UN solo cv-tile de Trigger (un único short de bajada). Se alimenta de
+// getSpotDefenseDetail (bot + arm vivo + órdenes) + saldo HL de la cuenta del bot.
+function DefensaSpotViva({ botId, bot: botFromList, accountById, balancesByAddress, currentPrice, canTradeLive, canManageBots }) {
+  const detail = useQuery(api.spotDefenseBots.getSpotDefenseDetail, { botId });
+  const pause = useMutation(api.spotDefenseBots.pauseSpotDefenseBot);
+  const armAction = useAction(api.spotDefenseEngine.armSpotDefenseBot);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState('');
+
+  const bot = detail?.bot ?? botFromList;
+  const arm = detail?.arm ?? null;
+  const orders = detail?.orders ?? [];
+  if (!bot) return null;
+
+  const asset = bot.asset;
+  const pair = `${asset}/USDC`;
+
+  // Estado/tono: (Codex 4c MEDIO) `disarmPending` tiene PRIORIDAD sobre el arm — tras pausar, el arm sigue
+  // vivo hasta que el reconcile lo cierra, pero la UI debe mostrar "Deteniéndose" (amber), no verde.
+  let estado, tone;
+  if (bot.disarmPending) {
+    estado = 'Deteniéndose'; tone = 'amber';
+  } else if (arm) {
+    estado = SD_ARM_LABEL[arm.status] ?? arm.status;
+    tone = arm.status === 'failed' || arm.status === 'manual_intervention' ? 'red'
+      : (arm.status === 'protected' || arm.status === 'filled' || arm.status === 'armed') ? 'green'
+      : arm.status === 'disarming' ? 'amber' : 'faint';
+  } else if (bot.rearmStatus === 'blocked') {
+    estado = `Bloqueado${bot.lastRearmErrorKind ? ': ' + bot.lastRearmErrorKind : ''}`; tone = 'red';
+  } else if (bot.rearmStatus === 'pending' || bot.rearmStatus === 'running') {
+    estado = 'Armando'; tone = 'amber';
+  } else if (bot.active) {
+    estado = 'Sin armar'; tone = 'amber';
+  } else { estado = 'Pausado'; tone = 'faint'; }
+
+  // Activo pero sin arm vivo ni rearm en curso = creado/quedó sin armar (Codex 4b #1): ofrecer reintento.
+  const needsArm = !!bot.active && !arm && !bot.disarmPending
+    && bot.rearmStatus !== 'pending' && bot.rearmStatus !== 'running';
+
+  const triggerPx = arm?.triggerPx ?? bot.triggerPrice ?? null;
+  const dist = (triggerPx != null && currentPrice) ? ((triggerPx - currentPrice) / currentPrice) * 100 : null;
+  const capital = arm?.effectiveNotionalUsd ?? bot.effectiveNotionalUsd ?? null;
+  const levText = arm?.appliedLeverage ? `${arm.appliedLeverage}x` : (bot.leverage ? `${bot.leverage}x` : '');
+
+  const acc = bot.hlAccountId ? accountById?.[bot.hlAccountId] : null;
+  const walletLabel = acc?.label
+    || (acc?.tradingAccountAddress ? `${acc.tradingAccountAddress.slice(0, 6)}…${acc.tradingAccountAddress.slice(-4)}` : '—');
+  const hlBalance = acc?.tradingAccountAddress ? balancesByAddress?.[acc.tradingAccountAddress] : null;
+  const pos = hlBalance?.openPositions?.find((p) => p.coin === asset) ?? null;
+
+  const slOrder = orders.find((o) => o.role === 'sl' && (o.observedStatus === 'open' || o.observedStatus === 'pending')) ?? null;
+
+  async function handlePause() {
+    setBusy(true); setError('');
+    try { await pause({ botId }); } catch (e) { setError(e?.message ?? 'No se pudo pausar.'); } finally { setBusy(false); }
+  }
+  async function handleRetryArm() {
+    setBusy(true); setError('');
+    try { await armAction({ botId, expectedNetwork: HL_NETWORK, confirm: true }); }
+    catch (e) { setError(e?.message ?? 'No se pudo armar.'); } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="cobertura-viva">
+      <div className="cobertura-head">
+        <strong>Defensa Spot</strong>
+        <span className={`pill ${tone}`}>{estado}</span>
+      </div>
+
+      {needsArm && (
+        <div className="cobertura-explain">
+          <p className="cv-explain-line">El bot está activo pero sin cobertura armada. Reintenta el armado.</p>
+        </div>
+      )}
+
+      {slOrder && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '6px 0', fontSize: 13 }}>
+          <span className="cv-label">Stop Loss</span>
+          <strong>${formatPrice(pair, slOrder.triggerPx)}</strong>
+          {arm?.beMoved && <span className="pill green">BE</span>}
+          {pos && (
+            <strong className={pos.unrealizedPnl >= 0 ? 'positive' : 'negative'} style={{ marginLeft: 'auto' }}>
+              {pos.unrealizedPnl >= 0 ? '+' : ''}{formatUsd2(pos.unrealizedPnl)}
+            </strong>
+          )}
+        </div>
+      )}
+
+      <div className="cobertura-tiles">
+        <div className="cv-tile">
+          <span className="cv-label">Trigger</span>
+          <strong>${triggerPx != null ? formatPrice(pair, triggerPx) : '—'}</strong>
+          <span className="cv-dist">{dist == null ? '—' : `${dist > 0 ? '+' : ''}${dist.toFixed(2)}%`}</span>
+        </div>
+        <div className="cv-tile">
+          <span className="cv-label">Cobertura</span>
+          <strong>{capital != null ? formatUsdCompact(capital) : '—'}</strong>
+          <span className="cv-dist">{levText}</span>
+        </div>
+        <div className="cv-tile">
+          <span className="cv-label">Wallet</span>
+          <strong className="cv-wallet" title={acc?.tradingAccountAddress ?? ''}>{walletLabel}</strong>
+        </div>
+      </div>
+
+      {hlBalance && (
+        <div className="cv-hl">
+          <div className="cv-hl-bal">
+            <span className="cv-label">Saldo HL</span>
+            <strong>{formatUsd2(hlBalance.spotUsdcFree)}</strong>
+            <span className="cv-sub">USDC spot libre{hlBalance.withdrawable > 0 ? ` · retirable ${formatUsd2(hlBalance.withdrawable)}` : ''}</span>
+          </div>
+          {pos && (
+            <div className="cv-hl-pos">
+              <div className="cv-hl-pnl">
+                <span className="cv-label">PNL ({pos.coin})</span>
+                <strong className={pos.unrealizedPnl >= 0 ? 'positive' : 'negative'}>
+                  {pos.unrealizedPnl >= 0 ? '+' : ''}{formatUsd2(pos.unrealizedPnl)}
+                </strong>
+                <span className="cv-sub">{(pos.roe * 100).toFixed(1)}% ROE</span>
+              </div>
+              <span className="cv-sub cv-hl-meta">
+                entry ${formatPrice(pair, pos.entryPx)} · {pos.leverage}x{pos.liquidationPx ? ` · liq $${formatPrice(pair, pos.liquidationPx)}` : ''}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {orders.length > 0 && (
+        <details className="cobertura-oids">
+          <summary>Órdenes en Hyperliquid ({orders.length})</summary>
+          <ul>
+            {orders.map((o) => (
+              <li key={o.cloid}>
+                <span className="cv-role">{o.role}{o.role === 'tp' && o.tpIndex != null ? ` ${o.tpIndex + 1}` : ''}</span>
+                <span className="cv-oid">{o.oid ? `oid ${o.oid}` : 'sin oid'}</span>
+                <span className={`pill ${o.observedStatus === 'open' ? 'green' : 'faint'}`}>{o.observedStatus}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
+      {error && <p style={{ color: 'var(--red)', fontSize: 12, marginTop: 6 }}>{error}</p>}
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+        {/* (Codex 4c r2 BAJO) Gate de cliente fiel al backend: armar exige canTradeLive + canManageBots
+            (armSpotDefenseBot); pausar exige solo canManageBots (requireBotManager). Así un usuario con
+            canManageBots pero sin canTradeLive SÍ puede pausar (reducir riesgo) aunque no pueda armar. El
+            backend sigue siendo la autoridad; esto solo evita ofrecer botones que fallarían. */}
+        {needsArm && canTradeLive && canManageBots && (
+          <button className="mini-btn active" onClick={handleRetryArm} disabled={busy}>
+            {busy ? '…' : 'Reintentar armado'}
+          </button>
+        )}
+        {bot.active && !bot.disarmPending && canManageBots && (
+          <button className="mini-btn" onClick={handlePause} disabled={busy}>
+            {busy ? '…' : 'Pausar defensa'}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // Modal "Configurar Trading" (bot breakout long/short).
 function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
   const save = useMutation(api.bots.getOrCreatePoolBot);
@@ -2756,6 +2926,222 @@ function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
           <button className="ghost-btn" onClick={onClose} disabled={saving} style={{ flex: 1 }}>Cancelar</button>
           <button className="primary-btn" onClick={handleSave} disabled={saving || !hlAccountId} style={{ flex: 1 }}>
             {saving ? 'Guardando…' : (bot ? 'Guardar cambios' : 'Activar Trading')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Modal "Defensa Spot" (JAV-107 Fase 4): protege un HOLDING spot con UN short (trigger SELL que dispara
+// al CAER el precio hasta el trigger). Clonado de ProtectionBotModal pero SIN pool/rango/reentrada; en su
+// lugar lleva un bloque Trigger (Manual / anclado al DCA). Persiste el bot (mutation) y luego ARRANCA el
+// armado inicial (action armSpotDefenseBot) — ningún cron arma un bot recién creado (Fase 4a).
+function SpotDefenseBotModal({ position, bot, canTradeLive, canManageBots, onClose, onSaved }) {
+  const persist = useMutation(api.spotDefenseBots.persistSpotDefenseBot);
+  const arm = useAction(api.spotDefenseEngine.armSpotDefenseBot);
+  const accounts = useQuery(api.hlCredentials.list) ?? [];
+
+  // Precarga desde el bot existente (reconfigurar) o defaults (crear).
+  const [hlAccountId, setHlAccountId] = React.useState(bot?.hlAccountId ?? null);
+  const [leverage, setLeverage] = React.useState(bot?.leverage ?? 20);
+  const [autoLeverage, setAutoLeverage] = React.useState(bot?.autoLeverage ?? false);
+  const [bufferPct, setBufferPct] = React.useState(bot?.bufferPct ?? 100);
+  const [stopLossPct, setStopLossPct] = React.useState(bot?.stopLossPct ?? 1);
+  const [breakevenPct, setBreakevenPct] = React.useState(bot?.breakevenPct ?? 0.5);
+  // Distinguir tps undefined (crear → defaults) de tps: [] intencional (reconfigurar → vacío).
+  const [tps, setTps] = React.useState(bot ? (bot.tps ?? []) : [{ gainPct: 0.5, closePct: 40 }, { gainPct: 1.5, closePct: 60 }]);
+  const [autoRearm, setAutoRearm] = React.useState(bot?.autoRearm ?? true);
+  // Trigger: "dca" ancla el precio al DCA del holding (no editable); "manual" lo deja libre.
+  const [triggerMode, setTriggerMode] = React.useState(bot?.triggerMode ?? 'dca');
+  const [manualTrigger, setManualTrigger] = React.useState(bot?.triggerMode === 'manual' ? (bot?.triggerPrice ?? 0) : (position.dca ?? 0));
+  // Cobertura mínima aceptable: el backend (reserveSpotDefenseArm) BLOQUEA si el efectivo cae por debajo.
+  const [minCoveragePct, setMinCoveragePct] = React.useState(bot?.minCoveragePct ?? 80);
+  const [acceptPartial, setAcceptPartial] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState('');
+
+  const asset = position.asset;
+  const selected = accounts.find((a) => a.id === hlAccountId) ?? null;
+  const { account: bal } = useHLAccountBalance(selected?.tradingAccountAddress ?? null);
+
+  // En modo DCA el trigger se ancla al DCA del holding; en manual es el valor editado.
+  const effTriggerPrice = triggerMode === 'dca' ? (position.dca ?? 0) : Number(manualTrigger);
+  // Nocional PEDIDO = holding × precio del trigger × (1 + buffer). El backend lo CAPA por margen real y
+  // por el tope del plan → el efectivo (verdad) lo fija reserveSpotDefenseArm y se ve en la tarjeta viva.
+  const requestedNotionalUsd = (position.amount ?? 0) * effTriggerPrice * (1 + bufferPct / 100);
+
+  // Estimación de cobertura (orientativa, cliente): colateral usable (withdrawable perp + USDC spot libre)
+  // × leverage. NO descuenta el margen comprometido por otros bots de la cuenta (eso lo hace el backend),
+  // así que es un TECHO; el bloqueo autoritativo por minCoveragePct vive en reserveSpotDefenseArm.
+  const usableEst = (bal?.withdrawable ?? 0) + (bal?.spotUsdcFree ?? 0);
+  const maxNotionalEst = usableEst * leverage;
+  const coverageEstPct = requestedNotionalUsd > 0 ? Math.min(100, (maxNotionalEst / requestedNotionalUsd) * 100) : 0;
+  const partialEst = !!selected && coverageEstPct < 99.5;          // < 100 (margen de redondeo)
+  const triggerAbovePrice = position.currentPrice != null && effTriggerPrice >= position.currentPrice;
+
+  async function handleSave() {
+    // Solo-real: crear/armar exige canTradeLive + canManageBots (igual que el backend: persist+arm).
+    if (!(canTradeLive && canManageBots)) { setError('Necesitas permisos de trading real y de gestión de bots para crear este bot. Pídeselos a un administrador.'); return; }
+    if (!hlAccountId) { setError('Selecciona la cuenta HL dedicada.'); return; }
+    if (!(effTriggerPrice > 0)) { setError('El precio del trigger debe ser > 0.'); return; }
+    // (CodeRabbit) El SL es obligatorio para el motor (protege el short); rechazar stopLossPct ≤ 0.
+    if (!(stopLossPct > 0)) { setError('El Stop Loss debe ser mayor que 0%.'); return; }
+    // Un SELL que dispara al BAJAR nacería disparado si el trigger ya está en/sobre el precio actual.
+    if (triggerAbovePrice) { setError('El trigger debe estar por DEBAJO del precio actual (un SELL de bajada nacería disparado).'); return; }
+    if (!(requestedNotionalUsd > 0)) { setError('Nocional inválido (revisa cantidad del holding / precio / buffer).'); return; }
+    if (partialEst && !acceptPartial) { setError('La cobertura estimada es parcial; marca la casilla para aceptarla.'); return; }
+    setError(''); setSaving(true);
+    try {
+      const { botId } = await persist(pruneUndefined({
+        spotPositionId: position.id,
+        hlAccountId,
+        leverage, autoLeverage, bufferPct, stopLossPct, breakevenPct,
+        tps: tps.filter((t) => t.gainPct > 0 && t.closePct > 0),
+        autoRearm,
+        triggerMode,
+        triggerPrice: effTriggerPrice,
+        requestedNotionalUsd,
+        minCoveragePct,
+        active: true,
+      }));
+      // Arrancar el armado inicial (money-path: confirmación LIVE no salteable + expectedNetwork). Si el
+      // arm falla (mark ≤ trigger transitorio, margen, etc.) el bot queda creado pero SIN armar: NO se
+      // cierra el modal y se muestra el motivo para reintentar con "Guardar cambios" (persist+arm idempotentes).
+      await arm({ botId, expectedNetwork: HL_NETWORK, confirm: true });
+      onSaved?.(); onClose();
+    } catch (e) {
+      setError(e?.message ?? 'No se pudo activar la defensa.');
+    } finally { setSaving(false); }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="section-head">
+          <h2>🛡 Defensa Spot</h2>
+          <button className="ghost-btn" style={{ padding: '3px 10px', fontSize: 12 }} onClick={onClose}>✕</button>
+        </div>
+        <p className="network" style={{ fontSize: 12, marginBottom: 10 }}>
+          {asset} · Holding {+(position.amount ?? 0).toFixed(8)} · DCA {formatPrice(`${asset}/USDC`, position.dca)}
+          {position.currentPrice != null && <> · Actual {formatPrice(`${asset}/USDC`, position.currentPrice)}</>}
+        </p>
+
+        <HLAccountSelect accounts={accounts} value={hlAccountId} onChange={setHlAccountId} />
+        <p className="network" style={{ fontSize: 11, marginTop: 4, opacity: 0.8 }}>
+          ℹ️ La defensa abre UN short que dispara al caer el precio al trigger. Usa una cuenta HL dedicada:
+          no puede compartirse con un Spot Grid ni con otra defensa del mismo activo.
+        </p>
+
+        <label className="config-field" style={{ marginTop: 8 }}>
+          <span>Perp (SHORT de cobertura)</span>
+          <input value={`${asset}-PERP`} readOnly />
+        </label>
+
+        <div className="config-field" style={{ padding: '8px 0' }}>
+          <span>Trigger del short</span>
+          <div className="segmented" style={{ flexWrap: 'wrap' }}>
+            <button aria-pressed={triggerMode === 'dca'} onClick={() => setTriggerMode('dca')}>Anclado al DCA</button>
+            <button aria-pressed={triggerMode === 'manual'} onClick={() => setTriggerMode('manual')}>Manual</button>
+          </div>
+          {triggerMode === 'dca' ? (
+            <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+              Dispara al caer a tu DCA <strong style={{ color: 'var(--text)' }}>{formatPrice(`${asset}/USDC`, position.dca)}</strong>
+            </span>
+          ) : (
+            <NumberInput step="0.01" min="0" value={manualTrigger} onChange={setManualTrigger} />
+          )}
+          {triggerAbovePrice && (
+            <span style={{ fontSize: 12, color: 'var(--red)' }}>
+              El trigger ({formatPrice(`${asset}/USDC`, effTriggerPrice)}) está en/sobre el precio actual: debe estar por debajo.
+            </span>
+          )}
+        </div>
+
+        <div className="config-field" style={{ padding: '8px 0' }}>
+          <span>Leverage (Isolated)</span>
+          <div className="range-control">
+            <input type="range" min="1" max="20" step="1" value={leverage}
+              onChange={(e) => setLeverage(Number(e.target.value))} />
+            <strong>{leverage}x</strong>
+          </div>
+          <label style={{ fontSize: 12, display: 'flex', gap: 6, alignItems: 'center', marginTop: 4 }}>
+            <input type="checkbox" checked={autoLeverage} onChange={(e) => setAutoLeverage(e.target.checked)} />
+            Permitir auto-ajuste de leverage si el balance es insuficiente
+          </label>
+        </div>
+
+        <div className="config-field" style={{ padding: '4px 0' }}>
+          <span>Buffer de Capital</span>
+          <div className="segmented" style={{ flexWrap: 'wrap' }}>
+            {BUFFER_OPTIONS.map((b) => (
+              <button key={b} aria-pressed={bufferPct === b} onClick={() => setBufferPct(b)}>
+                {b === 0 ? 'Sin' : `+${b}%`}
+              </button>
+            ))}
+          </div>
+          {requestedNotionalUsd > 0 && (
+            <span style={{ fontSize: 12, color: 'var(--amber)' }}>
+              Nocional pedido: {formatUsd(requestedNotionalUsd)} (holding × {formatPrice(`${asset}/USDC`, effTriggerPrice)} + {bufferPct}%)
+            </span>
+          )}
+        </div>
+
+        {selected && requestedNotionalUsd > 0 && (
+          <div className="futures-grid compact" style={{ marginBottom: 4 }}>
+            <Metric label="Colateral usable (est.)" value={formatUsd(usableEst)} />
+            <Metric label="Cobertura estimada" value={
+              <span className={partialEst ? 'negative' : 'positive'}>{coverageEstPct.toFixed(0)}%</span>
+            } />
+          </div>
+        )}
+
+        <label className="config-field" style={{ padding: '4px 0' }}>
+          <span>Stop Loss Fijo (%)</span>
+          <NumberInput step="0.1" min="0" value={stopLossPct} onChange={setStopLossPct} />
+        </label>
+
+        <div className="config-field" style={{ padding: '4px 0' }}>
+          <span>Breakeven (% ganancia para mover SL)</span>
+          <div className="range-control">
+            <input type="range" min="0.5" max="3" step="0.1" value={breakevenPct}
+              onChange={(e) => setBreakevenPct(Number(e.target.value))} />
+            <strong>{breakevenPct}%</strong>
+          </div>
+        </div>
+
+        <label className="config-field" style={{ padding: '4px 0' }}>
+          <span>Cobertura mínima aceptable (%)</span>
+          <NumberInput step="1" min="0" max="100" value={minCoveragePct} onChange={setMinCoveragePct} />
+        </label>
+
+        <div className="config-field" style={{ padding: '4px 0' }}>
+          <span>Take Profits (opcional)</span>
+          <TakeProfitRows tps={tps} setTps={setTps} />
+        </div>
+
+        <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center', margin: '10px 0' }}>
+          <input type="checkbox" checked={autoRearm} onChange={(e) => setAutoRearm(e.target.checked)} />
+          Auto-rearm — tras un stop loss, repone la cobertura automáticamente (espera ~5 min)
+        </label>
+
+        {partialEst && (
+          <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center', margin: '10px 0', color: 'var(--amber)' }}>
+            <input type="checkbox" checked={acceptPartial} onChange={(e) => setAcceptPartial(e.target.checked)} />
+            La cobertura estimada es <strong>parcial ({coverageEstPct.toFixed(0)}%)</strong>; acepto crear el bot.
+          </label>
+        )}
+
+        <RealModeNotice canTradeLive={canTradeLive} />
+
+        {error && <p style={{ color: 'var(--red)', fontSize: 12 }}>{error}</p>}
+
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <button className="ghost-btn" onClick={onClose} disabled={saving} style={{ flex: 1 }}>Cancelar</button>
+          <button className="primary-btn" onClick={handleSave}
+            disabled={saving || !hlAccountId || triggerAbovePrice || !(stopLossPct > 0) || !(requestedNotionalUsd > 0) || (partialEst && !acceptPartial)}
+            style={{ flex: 1 }}>
+            {saving ? 'Activando…' : (bot ? 'Guardar cambios' : 'Activar Defensa')}
           </button>
         </div>
       </div>
@@ -3173,167 +3559,7 @@ function HLAccountPanel({ walletAddress, userLoaded, prices, isAdmin }) {
   );
 }
 
-function SpotProtectorBot({ asset, protector, onChange, currentPrice, simulationMode, tradingEnabled, onFireSignal, isAdmin, userLoaded }) {
-  const hlWallet = protector.hlWallet ?? '';
-  const validWallet = EVM_RE_PROTECTOR.test(hlWallet);
-  const { account: hlAccount, loading: hlBalLoading, error: hlBalError } = useHLAccountBalance(validWallet ? hlWallet : null);
-  // La gestión de API wallets HL vive ahora en HLAccountsPanel (multi-cuenta, connectAccount).
 
-  function handleManual() {
-    if (!protector.active) return;
-    if (!protector.tradeAmount || protector.tradeAmount <= 0) return;
-    onFireSignal?.('manual', currentPrice ?? 0, protector.tradeAmount ?? 0);
-  }
-
-  return (
-    <div className="spot-protector">
-      <div className="spot-protector-head">
-        <span>Bot cobertura {asset}</span>
-        <span className={`pill ${protector.active ? 'green' : 'faint'}`}>{protector.active ? 'Activo' : 'Pausado'}</span>
-      </div>
-
-      {/* Wallet HL */}
-      <div className="config-field" style={{ padding: '10px 0 4px' }}>
-        <span>Wallet Hyperliquid</span>
-        <input
-          className="hl-search"
-          style={{ margin: 0 }}
-          placeholder="0x... wallet HL para cobertura"
-          value={hlWallet}
-          onChange={(e) => onChange({ hlWallet: e.target.value.trim() })}
-        />
-      </div>
-      {hlWallet && !validWallet && (
-        <span style={{ fontSize: 11, color: 'var(--red,#f44)' }}>Dirección EVM inválida</span>
-      )}
-      {validWallet && (
-        <div className="hl-account-scan">
-          <div className="network" style={{ fontSize: 12 }}>
-            Scanner HL:{' '}
-            {hlBalLoading ? 'Cargando...' :
-             hlBalError ? <span style={{ color: 'var(--red,#f44)' }}>{hlBalError}</span> :
-             hlAccount ? 'Cuenta conectada' : '—'}
-          </div>
-          {hlAccount && (
-            <>
-              <div className="futures-grid compact">
-                <Metric label="Account value" value={formatUsd(hlAccount.accountValue)} />
-                <Metric label="Withdrawable" value={formatUsd(hlAccount.withdrawable)} />
-                <Metric label="Notional" value={formatUsd(hlAccount.totalNtlPos)} />
-                <Metric label="Margin used" value={formatUsd(hlAccount.totalMarginUsed)} />
-              </div>
-              <div className="network" style={{ fontSize: 12, marginTop: 6 }}>
-                Posiciones abiertas: {hlAccount.openPositions.length}
-              </div>
-              {hlAccount.openPositions.length > 0 && (
-                <div className="hl-position-list">
-                  {hlAccount.openPositions.slice(0, 4).map((pos) => (
-                    <div className="hl-position-row" key={pos.coin}>
-                      <span>{pos.coin}</span>
-                      <span className="mono">{pos.size > 0 ? 'Long' : 'Short'} {Math.abs(pos.size).toLocaleString('en-US', { maximumFractionDigits: 4 })}</span>
-                      <span className="mono">@ ${pos.entryPx > 0 ? formatPrice(`${pos.coin}/USDC`, pos.entryPx) : '—'}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
-
-      {/* Leverage */}
-      <label className="config-field" style={{ padding: '4px 0' }}>
-        <span>Dirección cobertura</span>
-        <select value={protector.side ?? 'Short'} onChange={(e) => onChange({ side: e.target.value })}>
-          <option>Short</option>
-          <option>Long</option>
-        </select>
-      </label>
-
-      <div className="config-field" style={{ padding: '4px 0' }}>
-        <span>Leverage de cobertura</span>
-        <div className="range-control">
-          <input
-            type="range" min="0" max="25" step="1"
-            value={protector.leverage ?? 0}
-            onChange={(e) => onChange({ leverage: Number(e.target.value) })}
-          />
-          <strong>{protector.leverage ?? 0}x</strong>
-        </div>
-      </div>
-
-      {/* Monto de la operación */}
-      <div className="config-field" style={{ padding: '4px 0' }}>
-        <span>Monto a operar (USDC)</span>
-        <NumberInput
-          className="hl-search"
-          style={{ margin: 0 }}
-          min="0"
-          step="100"
-          placeholder="0"
-          value={protector.tradeAmount ?? 0}
-          onChange={(n) => onChange({ tradeAmount: n })}
-        />
-      </div>
-
-      {/* Stop Loss */}
-      <div className="config-field" style={{ padding: '4px 0' }}>
-        <span>Stop Loss</span>
-        <div className="range-control">
-          <input
-            type="range" min="0.1" max="5" step="0.1"
-            value={protector.stopLoss ?? 1}
-            onChange={(e) => onChange({ stopLoss: Number(e.target.value) })}
-          />
-          <strong>{(protector.stopLoss ?? 1).toFixed(1)}%</strong>
-        </div>
-      </div>
-
-      {/* Mover SL a Break Even */}
-      <div className="be-block">
-        <div className="be-head">
-          <span>Mover SL a Break Even</span>
-          <button
-            className={`mini-btn ${protector.moveSlToBE ? 'active' : ''}`}
-            onClick={() => onChange({ moveSlToBE: !protector.moveSlToBE })}
-          >
-            {protector.moveSlToBE ? 'ON' : 'OFF'}
-          </button>
-        </div>
-        {protector.moveSlToBE && (
-          <div className="config-field" style={{ marginTop: 6 }}>
-            <span>Mover BE cuando ganancia ≥</span>
-            <div className="range-control">
-              <input
-                type="range" min="0.1" max="20" step="0.1"
-                value={protector.moveSlToBEAt ?? 1}
-                onChange={(e) => onChange({ moveSlToBEAt: Number(e.target.value) })}
-              />
-              <strong>{(protector.moveSlToBEAt ?? 1).toFixed(1)}%</strong>
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div className="bot-state-actions">
-        <button className={`mini-btn ${!protector.active ? 'active' : ''}`} onClick={() => onChange({ active: false })} disabled={!isAdmin}>Pausar</button>
-        <button className={`mini-btn ${protector.active ? 'active' : ''}`} onClick={() => onChange({ active: true })} disabled={!isAdmin}>Activar</button>
-        <span className={`pill${tradingEnabled ? ' green' : ' amber'}`}>
-          {tradingEnabled ? 'LIVE HL' : 'Trading OFF'}
-        </span>
-        {userLoaded && !isAdmin && <span className="pill faint" title="Solo lectura">Lectura</span>}
-        {protector.active && isAdmin && (
-          <button className="mini-btn amber" onClick={handleManual}>Disparar manual</button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// Límites de ejecución (valores efectivos) — admin.
-// Concesión/revocación de permisos por usuario — admin (paginado). Dos permisos independientes:
-
-// Observabilidad de ejecuciones reales (status/error en vivo) — admin. El "dónde falla".
 // (panel-admin-dedup) Exportado: lo renderiza el tab Admin (AdminView), ya no el panel inline.
 export function ExecutionsObservabilityPanel() {
   const rows = useQuery(api.executions.listRecentExecutions, { limit: 50 });
@@ -3358,7 +3584,6 @@ export function ExecutionsObservabilityPanel() {
     </div>
   );
 }
-
 
 function Dashboard({ user, onLogout, userId }) {
   const [network, setNetwork] = React.useState('Todas');
@@ -3799,10 +4024,11 @@ function Dashboard({ user, onLogout, userId }) {
               prices={prices}
               connected={connected}
               userId={userId}
-              simulationMode={simulationMode}
               tradingEnabled={tradingEnabled}
               isAdmin={isAdmin}
               userLoaded={userLoaded}
+              canTradeLive={canTradeLive}
+              canManageBots={canManageBots}
             />
             <AuditLogPanel isAdmin={isAdmin} mySignals={signals} />
             <AlertsPanel

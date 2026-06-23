@@ -66,6 +66,11 @@ export const OPEN_MARGIN_STATES = new Set([
 export const ARM_OPEN_MARGIN_STATES = new Set([
   "arming", "submitting", "armed", "disarming", "filled", "protecting", "protected", "armed_lower_only", "unknown",
 ]);
+// (JAV-107) Estados del arm de defensa SPOT que mantienen margen comprometido (todos menos ARM_TERMINAL).
+// `manual_intervention` INCLUIDO (fail-closed: la posición puede seguir abierta hasta resolver el drift).
+export const SPOT_DEFENSE_OPEN_MARGIN_STATES = new Set([
+  "arming", "submitting", "armed", "disarming", "filled", "protecting", "protected", "unknown", "manual_intervention",
+]);
 
 // Margen comprometido en una cuenta HL sumando AMBOS motores (IOC manual + triggers automáticos),
 // para que ninguna reserva pueda gastar dos veces el mismo colateral. Helper plano reutilizado por
@@ -87,7 +92,17 @@ export async function committedMarginForAccount(
   const armMargin = arms
     .filter((a) => ARM_OPEN_MARGIN_STATES.has(a.status))
     .reduce((sum, a) => sum + (a.marginReserved ?? a.reservedNotional), 0);
-  return execMargin + armMargin;
+  // (JAV-107) Sumar también el margen comprometido por los arms de defensa spot en la MISMA cuenta:
+  // una cuenta de cobertura puede compartir margen cross entre pares distintos (pool + spot-defense),
+  // así que ninguna reserva debe gastar dos veces el mismo colateral.
+  const sdArms = await ctx.db
+    .query("spot_defense_arms")
+    .withIndex("by_account", (q) => q.eq("hlAccountId", hlAccountId))
+    .collect();
+  const sdMargin = sdArms
+    .filter((a) => SPOT_DEFENSE_OPEN_MARGIN_STATES.has(a.status))
+    .reduce((sum, a) => sum + (a.marginReserved ?? a.reservedNotional), 0);
+  return execMargin + armMargin + sdMargin;
 }
 
 // D (JAV-UI): ¿el bot tiene alguna ejecución JAV-37 (IOC manual) ABIERTA? Solo `closed` (SL

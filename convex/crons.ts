@@ -53,6 +53,20 @@ crons.interval(
 );
 
 // (OBS-3b) Poda de engine_events una vez al día (retención 30d, por lotes). Best-effort.
+// (JAV-107) Motor de defensa SPOT: reconcilia SL/cierre/drift de los arms vivos (money-path) bajo lease.
+crons.interval(
+  "reconcile spot defense",
+  { minutes: 1 },
+  internal.cronHealth.reconcileSpotDefenseWithHealth,
+);
+
+// (JAV-107 3c-3b) Auto-rearm del bot de defensa SPOT (reabre tras cierre por SL si autoRearm).
+crons.interval(
+  "process spot defense rearms",
+  { minutes: 1 },
+  internal.cronHealth.processSpotDefenseRearmsWithHealth,
+);
+
 crons.interval(
   "prune engine events",
   { hours: 24 },

@@ -47,3 +47,43 @@ export function spotGridCloidInput(
   const base = `${botId}:${generation}:${cycleId}:${level}:${side}:${tranche}`;
   return kind === "grid" ? base : `${kind}:${base}`;
 }
+
+// (JAV-107) ROL de la orden del bot de defensa SPOT. `entry` = la única orden trigger SELL que abre el
+// short de cobertura; `sl` = stop loss post-fill; `tp` = take-profits parciales (reduceOnly). Mismo
+// patrón que el motor de triggers de pool, pero con UNA sola entrada.
+export type SpotDefenseCloidKind = "entry" | "sl" | "tp";
+
+/**
+ * Cloid determinista de una orden del bot de defensa spot. El input incluye `generation` (sube por
+ * arranque/re-arm) para que un re-arm NUNCA colisione por `by_cloid` con órdenes del arm anterior.
+ * `tpIndex` solo aplica a `kind="tp"` (0..N-1) → unicidad por TP individual; `attempt` rota el cloid al
+ * recolocar SL/TP (confirmar-antes-de-rotar, anti-doble). Namespace prefijado por `kind` (disjunto del
+ * spot grid y del motor de pool).
+ *
+ * (Codex Fase 1 NO-GO) Endurecido para TPs: `kind="tp"` EXIGE `tpIndex` entero ≥ 0 — sin él dos TPs
+ * colisionarían por `by_cloid`; y `tpIndex` en un rol no-TP es un error (evita ignorarlo en silencio).
+ * `generation`/`attempt` deben ser enteros ≥ 0.
+ */
+export function spotDefenseCloidInput(
+  botId: string,
+  generation: number,
+  kind: SpotDefenseCloidKind,
+  attempt: number = 0,
+  tpIndex?: number,
+): string {
+  if (kind === "tp") {
+    if (tpIndex === undefined || !Number.isInteger(tpIndex) || tpIndex < 0) {
+      throw new Error(`spotDefenseCloidInput: role "tp" requiere tpIndex entero ≥ 0 (recibido ${tpIndex}).`);
+    }
+  } else if (tpIndex !== undefined) {
+    throw new Error(`spotDefenseCloidInput: tpIndex solo aplica a role "tp" (recibido para "${kind}").`);
+  }
+  if (!Number.isInteger(generation) || generation < 0) {
+    throw new Error(`spotDefenseCloidInput: generation debe ser entero ≥ 0 (recibido ${generation}).`);
+  }
+  if (!Number.isInteger(attempt) || attempt < 0) {
+    throw new Error(`spotDefenseCloidInput: attempt debe ser entero ≥ 0 (recibido ${attempt}).`);
+  }
+  const idx = kind === "tp" ? `:${tpIndex}` : "";
+  return `spot-defense:${botId}:${generation}:${kind}${idx}:${attempt}`;
+}

@@ -63,12 +63,34 @@ export const revokeById = mutation({
     if (liveGrid) {
       throw new Error("La cuenta tiene un Spot Grid activo; deténlo antes de revocar.");
     }
+    // (JAV-107) Tampoco revocar con un arm de defensa spot NO terminal: perderíamos la clave para
+    // cancelar/cerrar el short y su SL en HL (posición/orden resting viva → fondos atascados).
+    const liveDefenseArm = (await ctx.db
+      .query("spot_defense_arms")
+      .withIndex("by_account", (q) => q.eq("hlAccountId", id))
+      .collect())
+      .find((a) => !["disarmed", "closed", "failed"].includes(a.status));
+    if (liveDefenseArm) {
+      throw new Error("La cuenta tiene un bot de defensa spot activo; pausa/cierra el trigger antes de revocar.");
+    }
     const linked = await ctx.db
       .query("bots")
       .withIndex("by_user_account", (q) => q.eq("userId", user._id).eq("hlAccountId", id))
       .collect();
     for (const bot of linked) {
       await ctx.db.patch(bot._id, { active: false, hlAccountId: undefined });
+    }
+    // (JAV-107, Codex Fase 2 r2 #2) Detener los bots de defensa spot vinculados (sin arm vivo — los
+    // que lo tuvieran ya bloquearon la revocación arriba). hlAccountId es obligatorio en su schema, así
+    // que se marcan stopped+inactivos en vez de desvincular (no quedan operando contra una clave borrada).
+    const linkedDefense = await ctx.db
+      .query("spot_defense_bots")
+      .withIndex("by_account", (q) => q.eq("hlAccountId", id))
+      .collect();
+    for (const d of linkedDefense) {
+      if (d.status !== "stopped" || d.active) {
+        await ctx.db.patch(d._id, { active: false, status: "stopped", disarmPending: false, disarmRequestedAt: undefined, updatedAt: Date.now() });
+      }
     }
     await ctx.db.delete(id);
   },

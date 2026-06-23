@@ -129,6 +129,11 @@ async function assertCreateGuards(
     .withIndex("by_account", (q) => q.eq("hlAccountId", hlAccountId)).collect())
     .find((b) => b.status !== "stopped");
   if (otherGrid) throw new Error("Esta cuenta ya está vinculada a un Spot Grid. Para abrir otro grid, vinculá otra cuenta.");
+  // (JAV-107) Un bot de defensa spot vivo también ocupa la cuenta (perp neto) → el grid exige dedicación total.
+  const defenseBot = (await ctx.db.query("spot_defense_bots")
+    .withIndex("by_account", (q) => q.eq("hlAccountId", hlAccountId)).collect())
+    .find((b) => b.status !== "stopped");
+  if (defenseBot) throw new Error("Esta cuenta ya la usa un bot de defensa spot. El Spot Grid necesita una cuenta dedicada.");
   return { manager, cred };
 }
 

@@ -357,6 +357,18 @@ export const getOrCreatePoolBot = mutation({
       if (linkedGrid) {
         throw new Error("Esta cuenta está vinculada a un Spot Grid. Para una cobertura, usá una cuenta distinta.");
       }
+      // (JAV-107) Bot de defensa spot del MISMO baseAsset vivo en la cuenta → rechazo (misma coin = misma
+      // posición perp neta = interferencia). Distinto baseAsset sí puede compartir cuenta (como cobertura).
+      const linkedDefense = (await ctx.db
+        .query("spot_defense_bots")
+        .withIndex("by_user_account", (q) =>
+          q.eq("userId", user._id).eq("hlAccountId", resultingHlAccountId))
+        .collect())
+        .find((d) => d.baseAsset === baseAsset && d.status !== "stopped");
+      if (linkedDefense) {
+        throw new Error(
+          `Esta cuenta de Hyperliquid ya tiene un bot de defensa para ${baseAsset}/USDC. Usá otra cuenta para cubrir este par.`);
+      }
     }
     const willBeActive = active ?? existingBot?.active ?? false;
     if (willBeActive) await assertActivatablePoolBot(ctx, poolId, resultingHlAccountId, user._id);

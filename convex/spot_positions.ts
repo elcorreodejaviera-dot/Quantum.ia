@@ -96,6 +96,9 @@ export const listPurchaseHistory = query({
   },
 });
 
+// (JAV-107 4c, Codex ALTO) Estados terminales de un arm de defensa: sin arm vivo en ninguno de estos.
+const SD_ARM_TERMINAL = new Set(["disarmed", "closed", "failed"]);
+
 export const removePosition = mutation({
   args: { id: v.id("spot_positions") },
   handler: async (ctx, { id }) => {
@@ -104,6 +107,20 @@ export const removePosition = mutation({
     const pos = await ctx.db.get(id);
     if (!pos) throw new Error("Position not found");
     if (pos.userId !== identity.subject) throw new Error("Forbidden");
+    // (Codex 4c ALTO) NO borrar la posición si tiene una defensa spot viva: dejaría el bot/short/órdenes
+    // huérfanos (sin posición que matchee → sin tarjeta ni controles en la UI). Se exige pausar/detener
+    // la defensa primero (la pausa cancela/cierra en HL y deja el bot stopped + arm terminal). Se busca por
+    // spotPositionId (índice dedicado) porque spot_positions.userId=clerkId ≠ spot_defense_bots.userId.
+    const defenseBots = await ctx.db.query("spot_defense_bots")
+      .withIndex("by_position", (q) => q.eq("spotPositionId", id)).collect();
+    for (const bot of defenseBots) {
+      const liveArm = (await ctx.db.query("spot_defense_arms")
+        .withIndex("by_bot_generation", (q) => q.eq("botId", bot._id)).collect())
+        .find((a) => !SD_ARM_TERMINAL.has(a.status));
+      if (bot.active || bot.status !== "stopped" || bot.disarmPending || liveArm) {
+        throw new Error("Esta posición tiene una defensa spot activa. Pausa/detén la defensa antes de eliminar la posición.");
+      }
+    }
     await ctx.db.delete(id);
   },
 });

@@ -2388,7 +2388,7 @@ function NumberInput({ value, onChange, ...rest }) {
   return <input type="number" {...rest} value={text} onChange={handleChange} onBlur={handleBlur} />;
 }
 
-// Filas de take-profits (gainPct / closePct). Cantidad fija según el tipo de bot.
+// Filas de take-profits (gainPct / closePct). Añadir/quitar libremente; lista vacía = sin TPs.
 function TakeProfitRows({ tps, setTps }) {
   const update = (i, field, val) =>
     setTps(tps.map((t, idx) => (idx === i ? { ...t, [field]: Number(val) } : t)));
@@ -2921,7 +2921,7 @@ function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
         )}
 
         <div className="config-field" style={{ padding: '8px 0 4px' }}>
-          <span>Take Profits (3 niveles)</span>
+          <span>Take Profits (opcional)</span>
           <TakeProfitRows tps={tps} setTps={setTps} />
         </div>
 

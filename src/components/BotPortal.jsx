@@ -2480,6 +2480,10 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
   const poolCapital = pool.liquidity > 0 ? pool.liquidity : 0;
   const capitalIsReal = !!pool.liquidityReal;       // false = aún sin lectura on-chain (liquidez en 0)
   const effectiveCapital = poolCapital * (1 + bufferPct / 100);
+  // (JAV-110) Los TPs cierran SOLO la fracción del BÚFER (backend: tpSize = bufferSize × closePct/100,
+  // Σ closePct ≤ 100 = % del búfer), no la posición total. El nocional de los TPs = búfer = pool × buffer%.
+  // (El SL sí es full-size → usa effectiveCapital.)
+  const bufferNotional = poolCapital * (bufferPct / 100);
   const thisBotMargin = leverage > 0 ? effectiveCapital / leverage : 0;
   const marginUsed = bal?.totalMarginUsed ?? 0;     // margen usado en la cuenta (no "otros bots")
   // Conservador: el margen disponible firme es el del perp (withdrawable). El USDC spot es
@@ -2615,7 +2619,7 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
 
         <div className="config-field" style={{ padding: '4px 0' }}>
           <span>Take Profits (opcional)</span>
-          <TakeProfitRows tps={tps} setTps={setTps} notional={effectiveCapital} />
+          <TakeProfitRows tps={tps} setTps={setTps} notional={bufferNotional} />
         </div>
 
         <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center', margin: '10px 0' }}>
@@ -3020,6 +3024,9 @@ function SpotDefenseBotModal({ position, bot, canTradeLive, canManageBots, onClo
   // Nocional PEDIDO = holding × precio del trigger × (1 + buffer). El backend lo CAPA por margen real y
   // por el tope del plan → el efectivo (verdad) lo fija reserveSpotDefenseArm y se ve en la tarjeta viva.
   const requestedNotionalUsd = (position.amount ?? 0) * effTriggerPrice * (1 + bufferPct / 100);
+  // (JAV-110) Los TPs cierran SOLO la fracción del BÚFER (no el nocional total). Búfer = holding × trigger
+  // × buffer%. El SL es full-size → usa requestedNotionalUsd. (El efectivo real lo capa el backend.)
+  const bufferNotional = (position.amount ?? 0) * effTriggerPrice * (bufferPct / 100);
 
   // Estimación de cobertura (orientativa, cliente): colateral usable (withdrawable perp + USDC spot libre)
   // × leverage. NO descuenta el margen comprometido por otros bots de la cuenta (eso lo hace el backend),
@@ -3172,7 +3179,7 @@ function SpotDefenseBotModal({ position, bot, canTradeLive, canManageBots, onClo
 
         <div className="config-field" style={{ padding: '4px 0' }}>
           <span>Take Profits (opcional)</span>
-          <TakeProfitRows tps={tps} setTps={setTps} notional={requestedNotionalUsd} />
+          <TakeProfitRows tps={tps} setTps={setTps} notional={bufferNotional} />
         </div>
 
         <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center', margin: '10px 0' }}>

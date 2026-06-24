@@ -844,6 +844,46 @@ export const failArmPreOrder = internalMutation({
   },
 });
 
+// (Codex Alto-2) Terminalización INMEDIATA de un arm cuya entrada HL rechazó EXPLÍCITAMENTE (stE.error)
+// durante el envío. Un rechazo explícito en la respuesta síncrona NO es un timeout en vuelo: es prueba
+// dura de que ninguna orden quedó viva ni llenó, así que NO aplica la cuarentena N6 (que existe solo por
+// peticiones ambiguas que aún podrían aparecer). Libera el margen al instante. Guard estricto (fail-closed):
+// status submitting, sin fill, y TODA entrada sin oid/submittedAt con observedStatus rejected/pending y al
+// menos una rejected. Si algo salió vivo → ok:false y el caller cae a settleArm (sujeto a cuarentena).
+export const failArmEntryRejected = internalMutation({
+  args: { armId: v.id("trigger_arms"), token: v.string(), error: v.string() },
+  handler: async (ctx, { armId, token, error }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm) return { ok: false as const };
+    if (arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (arm.status !== "submitting") return { ok: false as const };
+    if (arm.filledSize != null || arm.entryPrice != null) return { ok: false as const };
+    let anyRejected = false;
+    for (const role of ["entry_lower", "entry_upper"] as const) {
+      const ord = await ctx.db.query("trigger_orders")
+        .withIndex("by_arm_role", (q) => q.eq("armId", armId).eq("role", role)).first();
+      if (!ord) continue;   // entry_upper puede no existir (entrada inmediata = una sola entrada)
+      if (ord.oid != null || ord.submittedAt != null) return { ok: false as const };   // algo salió vivo
+      if (ord.observedStatus !== "rejected" && ord.observedStatus !== "pending") return { ok: false as const };
+      if (ord.observedStatus === "rejected") anyRejected = true;
+    }
+    if (!anyRejected) return { ok: false as const };   // sin rechazo explícito → no aplica
+    const now = Date.now();
+    await ctx.db.patch(armId, { status: "failed", error: error.slice(0, 300), updatedAt: now });
+    elog("arm", "transition", { armId: String(armId), from: arm.status, to: "failed", closeReason: null });
+    const bot = await ctx.db.get(arm.botId);
+    if (bot?.disarmPending) {
+      await ctx.db.patch(arm.botId, { active: false, disarmPending: false, disarmRequestedAt: undefined });
+    }
+    // (JAV-53 paridad failArmPreOrder) Auto-rearm: reserveArm ya consumió el rearmToken → el cron no puede
+    // registrar el outcome; bookkeeping durable AQUÍ (bloqueo reevaluable, nunca bot active sin cobertura).
+    if (arm.fromRearm === true) {
+      await markRearmBlockedIfEligible(ctx, arm.botId, error.slice(0, 300), armErrorKind(error));
+    }
+    return { ok: true as const };
+  },
+});
+
 // --- Pausa segura (N2 + H1): si no hay arm vivo → desactivar YA; si lo hay → disarmPending + cron ---
 export const requestDisarmAndDeactivate = internalMutation({
   args: { botId: v.id("bots") },

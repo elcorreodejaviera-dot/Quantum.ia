@@ -2404,29 +2404,42 @@ function NumberInput({ value, onChange, ...rest }) {
 }
 
 // Filas de take-profits (gainPct / closePct). Añadir/quitar libremente; lista vacía = sin TPs.
-function TakeProfitRows({ tps, setTps }) {
+// `notional` (opcional): nocional estimado de UNA entrada (USD). Si se pasa y es > 0, cada TP muestra
+// la ganancia aproximada en $ = nocional × %ganancia × %cierre, actualizada en vivo al editar los campos.
+function TakeProfitRows({ tps, setTps, notional }) {
   const update = (i, field, val) =>
     setTps(tps.map((t, idx) => (idx === i ? { ...t, [field]: Number(val) } : t)));
   const removeRow = (i) => setTps(tps.filter((_, idx) => idx !== i));
   const addRow = () => setTps([...tps, { gainPct: 0.5, closePct: 50 }]);
+  const showUsd = Number.isFinite(notional) && notional > 0;
   return (
     <>
-      {tps.map((tp, i) => (
-        <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 8, marginTop: 6, alignItems: 'end' }}>
-          <label className="config-field" style={{ margin: 0 }}>
-            <span>TP{i + 1} — % ganancia</span>
-            <NumberInput step="0.1" min="0" value={tp.gainPct}
-              onChange={(n) => update(i, 'gainPct', n)} />
-          </label>
-          <label className="config-field" style={{ margin: 0 }}>
-            <span>TP{i + 1} — % cierre</span>
-            <NumberInput step="1" min="0" value={tp.closePct}
-              onChange={(n) => update(i, 'closePct', n)} />
-          </label>
-          <button type="button" className="ghost-btn" style={{ padding: '6px 10px', alignSelf: 'center' }}
-            onClick={() => removeRow(i)} aria-label={`Quitar TP${i + 1}`}>✕</button>
+      {tps.map((tp, i) => {
+        const gainUsd = showUsd ? notional * (tp.gainPct / 100) * (tp.closePct / 100) : null;
+        return (
+        <div key={i} style={{ marginTop: 6 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 8, alignItems: 'end' }}>
+            <label className="config-field" style={{ margin: 0 }}>
+              <span>TP{i + 1} — % ganancia</span>
+              <NumberInput step="0.1" min="0" value={tp.gainPct}
+                onChange={(n) => update(i, 'gainPct', n)} />
+            </label>
+            <label className="config-field" style={{ margin: 0 }}>
+              <span>TP{i + 1} — % cierre</span>
+              <NumberInput step="1" min="0" value={tp.closePct}
+                onChange={(n) => update(i, 'closePct', n)} />
+            </label>
+            <button type="button" className="ghost-btn" style={{ padding: '6px 10px', alignSelf: 'center' }}
+              onClick={() => removeRow(i)} aria-label={`Quitar TP${i + 1}`}>✕</button>
+          </div>
+          {gainUsd != null && gainUsd > 0 && (
+            <span style={{ display: 'block', fontSize: 11, color: 'var(--green)', marginTop: 2 }}>
+              ≈ +{formatUsd2(gainUsd)} al cerrar {tp.closePct}% en +{tp.gainPct}%
+            </span>
+          )}
         </div>
-      ))}
+        );
+      })}
       <button type="button" className="ghost-btn" style={{ marginTop: 8, fontSize: 12 }} onClick={addRow}>
         + Añadir Take Profit
       </button>
@@ -2584,6 +2597,11 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
         <label className="config-field" style={{ padding: '4px 0' }}>
           <span>Stop Loss Fijo (%)</span>
           <NumberInput step="0.1" min="0" value={stopLossPct} onChange={setStopLossPct} />
+          {effectiveCapital > 0 && stopLossPct > 0 && (
+            <span style={{ fontSize: 11, color: 'var(--red)', marginTop: 2 }}>
+              ≈ −{formatUsd2(effectiveCapital * stopLossPct / 100)} de pérdida si salta (por entrada)
+            </span>
+          )}
         </label>
 
         <div className="config-field" style={{ padding: '4px 0' }}>
@@ -2597,7 +2615,7 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
 
         <div className="config-field" style={{ padding: '4px 0' }}>
           <span>Take Profits (opcional)</span>
-          <TakeProfitRows tps={tps} setTps={setTps} />
+          <TakeProfitRows tps={tps} setTps={setTps} notional={effectiveCapital} />
         </div>
 
         <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center', margin: '10px 0' }}>
@@ -2915,6 +2933,11 @@ function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
         <label className="config-field" style={{ padding: '4px 0' }}>
           <span>Stop Loss Fijo (%)</span>
           <NumberInput step="0.1" min="0" value={stopLossPct} onChange={setStopLossPct} />
+          {opCapital > 0 && stopLossPct > 0 && (
+            <span style={{ fontSize: 11, color: 'var(--red)', marginTop: 2 }}>
+              ≈ −{formatUsd2(opCapital * stopLossPct / 100)} de pérdida si salta (por entrada)
+            </span>
+          )}
         </label>
 
         <div className="config-field" style={{ padding: '4px 0' }}>
@@ -2937,7 +2960,7 @@ function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
 
         <div className="config-field" style={{ padding: '8px 0 4px' }}>
           <span>Take Profits (opcional)</span>
-          <TakeProfitRows tps={tps} setTps={setTps} />
+          <TakeProfitRows tps={tps} setTps={setTps} notional={opCapital} />
         </div>
 
         <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center', margin: '10px 0' }}>
@@ -3126,6 +3149,11 @@ function SpotDefenseBotModal({ position, bot, canTradeLive, canManageBots, onClo
         <label className="config-field" style={{ padding: '4px 0' }}>
           <span>Stop Loss Fijo (%)</span>
           <NumberInput step="0.1" min="0" value={stopLossPct} onChange={setStopLossPct} />
+          {requestedNotionalUsd > 0 && stopLossPct > 0 && (
+            <span style={{ fontSize: 11, color: 'var(--red)', marginTop: 2 }}>
+              ≈ −{formatUsd2(requestedNotionalUsd * stopLossPct / 100)} de pérdida si salta (sobre el nocional pedido)
+            </span>
+          )}
         </label>
 
         <div className="config-field" style={{ padding: '4px 0' }}>
@@ -3144,7 +3172,7 @@ function SpotDefenseBotModal({ position, bot, canTradeLive, canManageBots, onClo
 
         <div className="config-field" style={{ padding: '4px 0' }}>
           <span>Take Profits (opcional)</span>
-          <TakeProfitRows tps={tps} setTps={setTps} />
+          <TakeProfitRows tps={tps} setTps={setTps} notional={requestedNotionalUsd} />
         </div>
 
         <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center', margin: '10px 0' }}>

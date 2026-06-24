@@ -350,19 +350,28 @@ export const armBotInternal = internalAction({
     // desde la lectura inicial incluye fetchNotional+reserveArm+updateLeverage (segundos); un rebote ahí
     // dejaría el SELL IOC llenando por ENCIMA de notionalCapPx (excede lo reservado). Acotamos el nocional
     // así: solo se entra a mercado si el precio SIGUE en/bajo el borde (freshMark ≤ triggerPxNorm <
-    // notionalCapPx ⇒ avgPx del IOC ≤ reservado, con la holgura del 2% de ENTRY_TRIGGER_SLIPPAGE). Si rebotó
-    // por encima del borde, NO se entra a mercado: el trigger en reposo vuelve a ser válido (mark > trigger).
-    // Si la lectura fresca falla, abortar limpio (release + reconcile) en vez de enviar con un mark rancio.
-    let entryImmediateAtSend = false;
+    // notionalCapPx ⇒ avgPx del IOC ≤ reservado, con la holgura del 2% de ENTRY_TRIGGER_SLIPPAGE).
+    // (CodeRabbit Major #1+#2) AQUÍ todavía NO se llamó a exchange.order. La topología (sin pata superior/
+    // OCO, factor=1) se fijó con el mark inicial y NO puede restaurarse en este arm. Por eso, si el mark
+    // fresco REBOTÓ sobre el borde (modo inmediato ya no aplica) o la lectura fresca FALLÓ, NO se coloca un
+    // trigger en reposo degradado: se ABORTA como pre-orden (sin petición HL en vuelo) con
+    // failArmPreOrder → libera el margen YA y reprograma el rearm, que reconstruye la topología COMPLETA
+    // con un mark fresco. Solo se procede al IOC si el precio sigue en/bajo el borde.
     let immediateMarkPx = markPx;
     if (entryLowerImmediate) {
-      try {
-        immediateMarkPx = (await getAssetMeta(info, asset)).markPx;
-      } catch {
-        await ctx.runMutation(internal.triggerArms.releaseArmReconcile, { armId, token });
-        return { ok: false, status: "gated", armId, reason: "fresh_mark_unavailable" };
+      let freshMarkPx: number | undefined;
+      try { freshMarkPx = (await getAssetMeta(info, asset)).markPx; } catch { /* RPC: abortar pre-orden */ }
+      if (freshMarkPx === undefined || freshMarkPx > triggerPxNorm) {
+        const pf = await ctx.runMutation(internal.triggerArms.failArmPreOrder, {
+          armId, token, reason: "immediate_recheck_failed",
+          error: freshMarkPx === undefined
+            ? "[transient] mark fresco no disponible al rearmar (reintento)"
+            : "[transient] precio rebotó sobre el borde antes del envío (reintento con topología completa)",
+        });
+        if (!pf.ok) await ctx.runMutation(internal.triggerArms.releaseArmReconcile, { armId, token });
+        return { ok: false, status: pf.ok ? "rejected" : "gated", armId, reason: "immediate_recheck" };
       }
-      entryImmediateAtSend = !(immediateMarkPx > triggerPxNorm);
+      immediateMarkPx = freshMarkPx;
     }
 
     // Colocar las entradas (SELL, reduceOnly:false). Banda agresiva floor (venta).
@@ -385,8 +394,8 @@ export const armBotInternal = internalAction({
     let immediatePartial = false; // (Codex Medio) IOC inmediato llenó < size esperado → sub-hedge
     for (const en of entries) {
       // (Benjamin) entry_lower inmediata: el precio ya perforó el borde → venta IOC a MERCADO (banda
-      // agresiva floor contra el mark FRESCO para garantizar fill), en lugar del trigger en reposo.
-      const immediate = entryImmediateAtSend && en.role === "entry_lower";
+      // agresiva floor contra el mark FRESCO ya revalidado arriba), en lugar del trigger en reposo.
+      const immediate = entryLowerImmediate && en.role === "entry_lower";
       const enLimitPx = immediate
         ? aggressiveHlPriceStr(immediateMarkPx * (1 - ENTRY_TRIGGER_SLIPPAGE), szDecimals, false)
         : aggressiveHlPriceStr(en.triggerPx * (1 - ENTRY_TRIGGER_SLIPPAGE), szDecimals, false);

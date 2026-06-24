@@ -179,6 +179,21 @@ describe("failArmEntryRejected — rechazo explícito de entrada (Codex Alto-2)"
     expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("submitting");
   });
 
+  // (CodeRabbit Major) failArmPreOrder admite "immediate_recheck_failed" (rebote/mark fresco no disponible
+  // ANTES del IOC, sin petición HL en vuelo) → terminaliza pre-orden con entrada aún pending.
+  it("failArmPreOrder immediate_recheck_failed: submitting + entrada pending → failed YA", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedArmWithEntry(ctx,
+      { status: "submitting", submittedAt: Date.now(), reconcileLeaseToken: "owner", reconcileLeaseUntil: Date.now() + 60_000 },
+      { observedStatus: "pending" }));
+    const r = await t.mutation(internal.triggerArms.failArmPreOrder, {
+      armId: id, token: "owner", reason: "immediate_recheck_failed",
+      error: "[transient] precio rebotó sobre el borde antes del envío (reintento con topología completa)",
+    });
+    expect(r.ok).toBe(true);
+    expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("failed");
+  });
+
   it("guard: sin rechazo explícito (entrada solo pending) → ok:false (deja la vía normal)", async () => {
     const t = makeConvexTest();
     const id = await t.run((ctx) => seedArmWithEntry(ctx,

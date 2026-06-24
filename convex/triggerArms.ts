@@ -808,8 +808,10 @@ export const failArmPreOrder = internalMutation({
   args: {
     armId: v.id("trigger_arms"),
     token: v.string(),
-    reason: v.literal("update_leverage_rejected"),   // motivo tipado: cierra el uso a este caso
-    error: v.string(),                                // ya prefijado [blocked_config]/[blocked_margin]
+    // motivo tipado: fallo DETERMINISTA pre-orden (sin petición HL en vuelo). "update_leverage_rejected"
+    // (JAV-53) o "immediate_recheck_failed" (CodeRabbit: rebote/mark fresco no disponible antes del IOC).
+    reason: v.union(v.literal("update_leverage_rejected"), v.literal("immediate_recheck_failed")),
+    error: v.string(),                                // ya prefijado [blocked_config]/[blocked_margin]/[transient]
   },
   handler: async (ctx, { armId, token, error }) => {
     const arm = await ctx.db.get(armId);

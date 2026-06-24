@@ -138,3 +138,79 @@ describe("settleArm — transiciones de arm", () => {
     expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("filled");
   });
 });
+
+// (Codex Alto-2) failArmEntryRejected: rechazo EXPLÍCITO del IOC inmediato terminaliza SIN cuarentena.
+describe("failArmEntryRejected — rechazo explícito de entrada (Codex Alto-2)", () => {
+  async function seedArmWithEntry(
+    ctx: Parameters<Parameters<ReturnType<typeof makeConvexTest>["run"]>[0]>[0],
+    armOver: Parameters<typeof seedTriggerArm>[2],
+    orderOver: Partial<{ observedStatus: "pending" | "open" | "rejected"; oid: string; submittedAt: number }>,
+  ) {
+    const b = await seedBase(ctx);
+    const armId = await seedTriggerArm(ctx, b, armOver);
+    const now = Date.now();
+    await ctx.db.insert("trigger_orders", {
+      armId, role: "entry_lower", cloid: "c-lower", triggerPx: 1, size: 1, reduceOnly: false,
+      observedStatus: orderOver.observedStatus ?? "rejected",
+      ...(orderOver.oid !== undefined ? { oid: orderOver.oid } : {}),
+      ...(orderOver.submittedAt !== undefined ? { submittedAt: orderOver.submittedAt } : {}),
+      createdAt: now, updatedAt: now,
+    });
+    return armId;
+  }
+
+  it("rechazo explícito (submitting + entrada rejected, sin oid) → failed YA, pese a submittedAt reciente", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedArmWithEntry(ctx,
+      { status: "submitting", submittedAt: Date.now(), reconcileLeaseToken: "owner", reconcileLeaseUntil: Date.now() + 60_000 },
+      { observedStatus: "rejected" }));
+    const r = await t.mutation(internal.triggerArms.failArmEntryRejected, { armId: id, token: "owner", error: "[blocked_config] sin liquidez" });
+    expect(r.ok).toBe(true);
+    expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("failed");
+  });
+
+  it("guard: entrada con oid (algo salió vivo) → ok:false y el arm sigue submitting", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedArmWithEntry(ctx,
+      { status: "submitting", submittedAt: Date.now(), reconcileLeaseToken: "owner", reconcileLeaseUntil: Date.now() + 60_000 },
+      { observedStatus: "open", oid: "999" }));
+    const r = await t.mutation(internal.triggerArms.failArmEntryRejected, { armId: id, token: "owner", error: "x" });
+    expect(r.ok).toBe(false);
+    expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("submitting");
+  });
+
+  // (CodeRabbit Major) failArmPreOrder admite "immediate_recheck_failed" (rebote/mark fresco no disponible
+  // ANTES del IOC, sin petición HL en vuelo) → terminaliza pre-orden con entrada aún pending.
+  it("failArmPreOrder immediate_recheck_failed: submitting + entrada pending → failed YA", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedArmWithEntry(ctx,
+      { status: "submitting", submittedAt: Date.now(), reconcileLeaseToken: "owner", reconcileLeaseUntil: Date.now() + 60_000 },
+      { observedStatus: "pending" }));
+    const r = await t.mutation(internal.triggerArms.failArmPreOrder, {
+      armId: id, token: "owner", reason: "immediate_recheck_failed",
+      error: "[transient] precio rebotó sobre el borde antes del envío (reintento con topología completa)",
+    });
+    expect(r.ok).toBe(true);
+    expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("failed");
+  });
+
+  it("guard: sin rechazo explícito (entrada solo pending) → ok:false (deja la vía normal)", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedArmWithEntry(ctx,
+      { status: "submitting", submittedAt: Date.now(), reconcileLeaseToken: "owner", reconcileLeaseUntil: Date.now() + 60_000 },
+      { observedStatus: "pending" }));
+    const r = await t.mutation(internal.triggerArms.failArmEntryRejected, { armId: id, token: "owner", error: "x" });
+    expect(r.ok).toBe(false);
+    expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("submitting");
+  });
+
+  it("fencing: token ajeno → no-op", async () => {
+    const t = makeConvexTest();
+    const id = await t.run((ctx) => seedArmWithEntry(ctx,
+      { status: "submitting", submittedAt: Date.now(), reconcileLeaseToken: "owner", reconcileLeaseUntil: Date.now() + 60_000 },
+      { observedStatus: "rejected" }));
+    const r = await t.mutation(internal.triggerArms.failArmEntryRejected, { armId: id, token: "intruso", error: "x" });
+    expect(r.ok).toBe(false);
+    expect((await t.run((ctx) => ctx.db.get(id)))?.status).toBe("submitting");
+  });
+});

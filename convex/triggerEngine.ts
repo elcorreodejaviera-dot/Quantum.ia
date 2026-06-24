@@ -190,12 +190,15 @@ export const armBotInternal = internalAction({
       throw new Error("[retry_incompatible] Hay órdenes abiertas en el activo: armado bloqueado (sin órdenes incompatibles).");
     }
 
-    // (R6) Trigger normalizado al tick (floor) y gate mark > triggerPxNormalized SOBRE el valor enviado.
-    // Sin prefijo → [transient]: el precio está en/bajo el rango; reintentar (se moverá fuera del borde).
+    // (R6) Trigger normalizado al tick (floor). El sizing SIEMPRE usa triggerPxNorm (no markPx).
     const triggerPxNorm = roundHlPrice(pool.minRange, szDecimals, "floor");
-    if (!(markPx > triggerPxNorm)) {
-      throw new Error(`[transient] mark (${markPx}) ≤ triggerPx normalizado (${triggerPxNorm}): no se arma (precio ya en/bajo el rango).`);
-    }
+    // (Benjamin) Si el precio YA está en/bajo el borde inferior (p.ej. un desplome que lo atravesó de
+    // un salto), el trigger de entrada dispararía solo: en vez de bloquear con [transient] y dejar la
+    // cobertura SIN armar justo en la caída, abrimos la entry_lower A MERCADO (IOC agresivo) de
+    // inmediato. El fill ocurre a markPx < triggerPxNorm → nocional REAL ≤ reservado (conservador
+    // respecto al margen; mismo espíritu que la nota JAV-43). En este modo NO se coloca entry_upper
+    // (por deducción el precio ya está abajo: una 2ª entrada de breakout arriba no aplica).
+    const entryLowerImmediate = !(markPx > triggerPxNorm);
 
     // (H12 + Fix #4) Sizing desde hedgeNotionalUsd. AVISO: para una VENTA NO existe cota dura del
     // nocional — el límite SELL es un SUELO (triggerPx*(1−slip)), no un techo, así que un fill por
@@ -248,7 +251,9 @@ export const armBotInternal = internalAction({
     //    entry_lower ni se reduce la reserva; tras el TP-final el arm pasa a `armed_lower_only`.
     //  - markPx == upperEdge exacto (borde): NO se coloca entry_upper (evita un trigger que dispara solo).
     const upperEdgeNorm = roundHlPrice(pool.maxRange, szDecimals, "ceil");
-    const upperValid = bot.allowReentryFromAbove === true && Number.isFinite(pool.maxRange) && pool.maxRange > 0;
+    // (Benjamin) En entrada inmediata a mercado NO hay 2ª entrada: el precio ya está abajo, así que un
+    // breakout/reentry superior no aplica (factor=1, sin OCO ni pata superior en reposo).
+    const upperValid = !entryLowerImmediate && bot.allowReentryFromAbove === true && Number.isFinite(pool.maxRange) && pool.maxRange > 0;
     const reentryFromAbove = upperValid && markPx > upperEdgeNorm;
     const breakoutUp = upperValid && markPx < upperEdgeNorm;
     const twoEntries = reentryFromAbove || breakoutUp;
@@ -341,6 +346,34 @@ export const armBotInternal = internalAction({
       return { ok: false, status: "gated", armId };
     }
 
+    // (Codex Alto-1) Entrada inmediata a mercado: releer el mark FRESCO justo antes de enviar. La ventana
+    // desde la lectura inicial incluye fetchNotional+reserveArm+updateLeverage (segundos); un rebote ahí
+    // dejaría el SELL IOC llenando por ENCIMA de notionalCapPx (excede lo reservado). Acotamos el nocional
+    // así: solo se entra a mercado si el precio SIGUE en/bajo el borde (freshMark ≤ triggerPxNorm <
+    // notionalCapPx ⇒ avgPx del IOC ≤ reservado, con la holgura del 2% de ENTRY_TRIGGER_SLIPPAGE).
+    // (CodeRabbit Major #1+#2) AQUÍ todavía NO se llamó a exchange.order. La topología (sin pata superior/
+    // OCO, factor=1) se fijó con el mark inicial y NO puede restaurarse en este arm. Por eso, si el mark
+    // fresco REBOTÓ sobre el borde (modo inmediato ya no aplica) o la lectura fresca FALLÓ, NO se coloca un
+    // trigger en reposo degradado: se ABORTA como pre-orden (sin petición HL en vuelo) con
+    // failArmPreOrder → libera el margen YA y reprograma el rearm, que reconstruye la topología COMPLETA
+    // con un mark fresco. Solo se procede al IOC si el precio sigue en/bajo el borde.
+    let immediateMarkPx = markPx;
+    if (entryLowerImmediate) {
+      let freshMarkPx: number | undefined;
+      try { freshMarkPx = (await getAssetMeta(info, asset)).markPx; } catch { /* RPC: abortar pre-orden */ }
+      if (freshMarkPx === undefined || freshMarkPx > triggerPxNorm) {
+        const pf = await ctx.runMutation(internal.triggerArms.failArmPreOrder, {
+          armId, token, reason: "immediate_recheck_failed",
+          error: freshMarkPx === undefined
+            ? "[transient] mark fresco no disponible al rearmar (reintento)"
+            : "[transient] precio rebotó sobre el borde antes del envío (reintento con topología completa)",
+        });
+        if (!pf.ok) await ctx.runMutation(internal.triggerArms.releaseArmReconcile, { armId, token });
+        return { ok: false, status: pf.ok ? "rejected" : "gated", armId, reason: "immediate_recheck" };
+      }
+      immediateMarkPx = freshMarkPx;
+    }
+
     // Colocar las entradas (SELL, reduceOnly:false). Banda agresiva floor (venta).
     // entry_lower: SELL trigger que dispara al BAJAR (tpsl:"sl"); en reentry_coexist su triggerPx es la
     //   PERFORACIÓN (bajo lowerEdge), en OCO es el borde inferior (triggerPxNorm).
@@ -357,13 +390,23 @@ export const armBotInternal = internalAction({
     let anyFilled = false, anyPlaced = false, filledSize = 0, entryPrice = 0;
     let filledRole: "entry_lower" | "entry_upper" | undefined;   // (JAV-61) qué entrada llenó (para tp_final)
     let hardError: string | undefined, transportUncertain = false;
+    let explicitReject = false;   // (Codex Alto-2) HL devolvió stE.error → prueba dura de "sin orden viva"
+    let immediatePartial = false; // (Codex Medio) IOC inmediato llenó < size esperado → sub-hedge
     for (const en of entries) {
-      const enLimitPx = aggressiveHlPriceStr(en.triggerPx * (1 - ENTRY_TRIGGER_SLIPPAGE), szDecimals, false);
+      // (Benjamin) entry_lower inmediata: el precio ya perforó el borde → venta IOC a MERCADO (banda
+      // agresiva floor contra el mark FRESCO ya revalidado arriba), en lugar del trigger en reposo.
+      const immediate = entryLowerImmediate && en.role === "entry_lower";
+      const enLimitPx = immediate
+        ? aggressiveHlPriceStr(immediateMarkPx * (1 - ENTRY_TRIGGER_SLIPPAGE), szDecimals, false)
+        : aggressiveHlPriceStr(en.triggerPx * (1 - ENTRY_TRIGGER_SLIPPAGE), szDecimals, false);
+      const enTSpec = immediate
+        ? { limit: { tif: "Ioc" as const } }
+        : { trigger: { isMarket: true, triggerPx: formatHlPrice(en.triggerPx, szDecimals), tpsl: en.tpsl } };
       const acE = abortAfter(HL_ORDER_TIMEOUT_MS);
       try {
         const respE: any = await exchange.order({
           orders: [{ a: assetId, b: false, p: enLimitPx, s: String(size), r: false,
-            t: { trigger: { isMarket: true, triggerPx: formatHlPrice(en.triggerPx, szDecimals), tpsl: en.tpsl } },
+            t: enTSpec,
             c: en.cloid as `0x${string}` }],
           grouping: "na",
         }, { signal: acE.signal, expiresAfter: Date.now() + HL_ORDER_TIMEOUT_MS });
@@ -376,11 +419,22 @@ export const armBotInternal = internalAction({
           const fS = Number(stE.filled.totalSz), fP = Number(stE.filled.avgPx);
           // (JAV-61) Preferir entry_upper como filledRole (gobierna el tp_final) si ambas llenaran.
           if (fS > 0 && fP > 0) { anyFilled = true; filledSize = fS; entryPrice = fP; if (en.role === "entry_upper" || filledRole === undefined) filledRole = en.role; }
+          // (Codex Medio) IOC inmediato que llena solo una fracción del size (liquidez fina en la caída):
+          // el reconcile protege con SL sobre el szi REAL, pero la cobertura queda materialmente sub-hedged
+          // frente al LP → registrar para alerta/seguimiento (no se reintenta el remanente en este ciclo).
+          if (immediate && fS > 0 && fS < size * 0.99) immediatePartial = true;
+          // (Codex R2, condición residual) Telemetría post-fill: el cap se acota antes de enviar (solo se
+          // entra con freshMark ≤ triggerPxNorm < notionalCapPx), pero confirmamos el avgPx REAL: si por un
+          // salto sub-segundo superó notionalCapPx, el nocional excedió lo reservado → alertar.
+          if (immediate && fP > notionalCapPx) {
+            elog("arm", "immediate_avgpx_over_cap", { armId: String(armId), avgPx: fP, notionalCapPx });
+          }
         } else if (stE === "waitingForTrigger") {
           anyPlaced = true;   // observed sigue pending; reconcile lo confirma por CLOID
         } else if (stE?.error) {
           await ctx.runMutation(internal.triggerArms.setArmOrderObserved, { armId, token, role: en.role, observedStatus: "rejected" });
           hardError = String(stE.error);
+          explicitReject = true;
         } else { anyPlaced = true; }   // ambiguo → reconcile
       } catch (e) {
         if (e instanceof TransportError) { transportUncertain = true; }   // incierto, pudo enviarse
@@ -395,6 +449,10 @@ export const armBotInternal = internalAction({
       armId: String(armId), anyFilled, anyPlaced, transportUncertain,
       hadError: !!hardError, filledSize: anyFilled ? filledSize : 0,
     });
+    // (Codex Medio) Alerta de sub-hedge: el IOC inmediato llenó menos del size reservado (liquidez fina).
+    if (immediatePartial) {
+      elog("arm", "immediate_partial_fill", { armId: String(armId), filledSize, expectedSize: size });
+    }
     // Resolver el estado del arm. Prioridad: fill > colocado/incierto > error.
     if (anyFilled) {
       await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "filled", filledSize, entryPrice });
@@ -406,6 +464,17 @@ export const armBotInternal = internalAction({
       // confirma por CLOID y, si una entrada falló definitivamente, la reintenta o reduce a 1×.
       await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: transportUncertain && !anyPlaced ? "unknown" : "armed", error: hardError });
     } else if (hardError) {
+      // (Codex Alto-2) Rechazo EXPLÍCITO de HL (stE.error) = prueba dura de que ninguna entrada quedó viva
+      // ni llenó (no es un timeout en vuelo). Terminalizar SIN esperar la cuarentena N6 (que solo cubre
+      // peticiones en vuelo ambiguas): libera el margen YA y reprograma el rearm reevaluable. Si el guard
+      // no se cumple (algo salió vivo) cae a la vía estándar (settleArm, sujeto a cuarentena).
+      if (explicitReject) {
+        const immFail = await ctx.runMutation(internal.triggerArms.failArmEntryRejected, { armId, token, error: hardError });
+        if (immFail.ok) {
+          await ctx.runMutation(internal.triggerArms.releaseArmReconcile, { armId, token });
+          return { ok: false, status: "rejected", armId };
+        }
+      }
       await ctx.runMutation(internal.triggerArms.settleArm, { armId, token, status: "failed", error: hardError });
       await ctx.runMutation(internal.triggerArms.releaseArmReconcile, { armId, token });
       return { ok: false, status: "rejected", armId };

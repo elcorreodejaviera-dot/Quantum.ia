@@ -2404,29 +2404,43 @@ function NumberInput({ value, onChange, ...rest }) {
 }
 
 // Filas de take-profits (gainPct / closePct). Añadir/quitar libremente; lista vacía = sin TPs.
-function TakeProfitRows({ tps, setTps }) {
+// `notional` (opcional, USD): nocional SOBRE EL QUE CIERRAN LOS TPs — depende del modal y del motor:
+// búfer en IL (los TPs cierran fracción del búfer), posición completa en Trading/Defensa Spot. Si se pasa
+// y es > 0, cada TP muestra la ganancia aprox. = notional × %ganancia × %cierre, en vivo al editar.
+function TakeProfitRows({ tps, setTps, notional }) {
   const update = (i, field, val) =>
     setTps(tps.map((t, idx) => (idx === i ? { ...t, [field]: Number(val) } : t)));
   const removeRow = (i) => setTps(tps.filter((_, idx) => idx !== i));
   const addRow = () => setTps([...tps, { gainPct: 0.5, closePct: 50 }]);
+  const showUsd = Number.isFinite(notional) && notional > 0;
   return (
     <>
-      {tps.map((tp, i) => (
-        <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 8, marginTop: 6, alignItems: 'end' }}>
-          <label className="config-field" style={{ margin: 0 }}>
-            <span>TP{i + 1} — % ganancia</span>
-            <NumberInput step="0.1" min="0" value={tp.gainPct}
-              onChange={(n) => update(i, 'gainPct', n)} />
-          </label>
-          <label className="config-field" style={{ margin: 0 }}>
-            <span>TP{i + 1} — % cierre</span>
-            <NumberInput step="1" min="0" value={tp.closePct}
-              onChange={(n) => update(i, 'closePct', n)} />
-          </label>
-          <button type="button" className="ghost-btn" style={{ padding: '6px 10px', alignSelf: 'center' }}
-            onClick={() => removeRow(i)} aria-label={`Quitar TP${i + 1}`}>✕</button>
+      {tps.map((tp, i) => {
+        const gainUsd = showUsd ? notional * (tp.gainPct / 100) * (tp.closePct / 100) : null;
+        return (
+        <div key={i} style={{ marginTop: 6 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 8, alignItems: 'end' }}>
+            <label className="config-field" style={{ margin: 0 }}>
+              <span>TP{i + 1} — % ganancia</span>
+              <NumberInput step="0.1" min="0" value={tp.gainPct}
+                onChange={(n) => update(i, 'gainPct', n)} />
+            </label>
+            <label className="config-field" style={{ margin: 0 }}>
+              <span>TP{i + 1} — % cierre</span>
+              <NumberInput step="1" min="0" value={tp.closePct}
+                onChange={(n) => update(i, 'closePct', n)} />
+            </label>
+            <button type="button" className="ghost-btn" style={{ padding: '6px 10px', alignSelf: 'center' }}
+              onClick={() => removeRow(i)} aria-label={`Quitar TP${i + 1}`}>✕</button>
+          </div>
+          {gainUsd != null && gainUsd > 0 && (
+            <span style={{ display: 'block', fontSize: 11, color: 'var(--green)', marginTop: 2 }}>
+              ≈ +{formatUsd2(gainUsd)} al cerrar {tp.closePct}% en +{tp.gainPct}%
+            </span>
+          )}
         </div>
-      ))}
+        );
+      })}
       <button type="button" className="ghost-btn" style={{ marginTop: 8, fontSize: 12 }} onClick={addRow}>
         + Añadir Take Profit
       </button>
@@ -2467,6 +2481,10 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
   const poolCapital = pool.liquidity > 0 ? pool.liquidity : 0;
   const capitalIsReal = !!pool.liquidityReal;       // false = aún sin lectura on-chain (liquidez en 0)
   const effectiveCapital = poolCapital * (1 + bufferPct / 100);
+  // (JAV-110) Los TPs cierran SOLO la fracción del BÚFER (backend: tpSize = bufferSize × closePct/100,
+  // Σ closePct ≤ 100 = % del búfer), no la posición total. El nocional de los TPs = búfer = pool × buffer%.
+  // (El SL sí es full-size → usa effectiveCapital.)
+  const bufferNotional = poolCapital * (bufferPct / 100);
   const thisBotMargin = leverage > 0 ? effectiveCapital / leverage : 0;
   const marginUsed = bal?.totalMarginUsed ?? 0;     // margen usado en la cuenta (no "otros bots")
   // Conservador: el margen disponible firme es el del perp (withdrawable). El USDC spot es
@@ -2584,6 +2602,11 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
         <label className="config-field" style={{ padding: '4px 0' }}>
           <span>Stop Loss Fijo (%)</span>
           <NumberInput step="0.1" min="0" value={stopLossPct} onChange={setStopLossPct} />
+          {effectiveCapital > 0 && stopLossPct > 0 && (
+            <span style={{ fontSize: 11, color: 'var(--red)', marginTop: 2 }}>
+              ≈ −{formatUsd2(effectiveCapital * stopLossPct / 100)} de pérdida si salta (por entrada)
+            </span>
+          )}
         </label>
 
         <div className="config-field" style={{ padding: '4px 0' }}>
@@ -2597,7 +2620,7 @@ function ProtectionBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
 
         <div className="config-field" style={{ padding: '4px 0' }}>
           <span>Take Profits (opcional)</span>
-          <TakeProfitRows tps={tps} setTps={setTps} />
+          <TakeProfitRows tps={tps} setTps={setTps} notional={bufferNotional} />
         </div>
 
         <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center', margin: '10px 0' }}>
@@ -2915,6 +2938,11 @@ function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
         <label className="config-field" style={{ padding: '4px 0' }}>
           <span>Stop Loss Fijo (%)</span>
           <NumberInput step="0.1" min="0" value={stopLossPct} onChange={setStopLossPct} />
+          {opCapital > 0 && stopLossPct > 0 && (
+            <span style={{ fontSize: 11, color: 'var(--red)', marginTop: 2 }}>
+              ≈ −{formatUsd2(opCapital * stopLossPct / 100)} de pérdida si salta (por entrada)
+            </span>
+          )}
         </label>
 
         <div className="config-field" style={{ padding: '4px 0' }}>
@@ -2937,7 +2965,7 @@ function TradingBotModal({ pool, bot, canTradeLive, onClose, onSaved }) {
 
         <div className="config-field" style={{ padding: '8px 0 4px' }}>
           <span>Take Profits (opcional)</span>
-          <TakeProfitRows tps={tps} setTps={setTps} />
+          <TakeProfitRows tps={tps} setTps={setTps} notional={opCapital} />
         </div>
 
         <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center', margin: '10px 0' }}>
@@ -2997,6 +3025,9 @@ function SpotDefenseBotModal({ position, bot, canTradeLive, canManageBots, onClo
   // Nocional PEDIDO = holding × precio del trigger × (1 + buffer). El backend lo CAPA por margen real y
   // por el tope del plan → el efectivo (verdad) lo fija reserveSpotDefenseArm y se ve en la tarjeta viva.
   const requestedNotionalUsd = (position.amount ?? 0) * effTriggerPrice * (1 + bufferPct / 100);
+  // (JAV-110) Defensa Spot usa OTRO motor (spotDefenseEngine): SL y TPs son full-size sobre arm.size
+  // (tpSize = arm.size × closePct/100, NO fracción del búfer como IL). Por eso TPs y SL usan el nocional
+  // completo (requestedNotionalUsd); el efectivo real lo capa el backend ("sobre el nocional pedido").
 
   // Estimación de cobertura (orientativa, cliente): colateral usable (withdrawable perp + USDC spot libre)
   // × leverage. NO descuenta el margen comprometido por otros bots de la cuenta (eso lo hace el backend),
@@ -3126,6 +3157,11 @@ function SpotDefenseBotModal({ position, bot, canTradeLive, canManageBots, onClo
         <label className="config-field" style={{ padding: '4px 0' }}>
           <span>Stop Loss Fijo (%)</span>
           <NumberInput step="0.1" min="0" value={stopLossPct} onChange={setStopLossPct} />
+          {requestedNotionalUsd > 0 && stopLossPct > 0 && (
+            <span style={{ fontSize: 11, color: 'var(--red)', marginTop: 2 }}>
+              ≈ −{formatUsd2(requestedNotionalUsd * stopLossPct / 100)} de pérdida si salta (sobre el nocional pedido)
+            </span>
+          )}
         </label>
 
         <div className="config-field" style={{ padding: '4px 0' }}>
@@ -3144,7 +3180,7 @@ function SpotDefenseBotModal({ position, bot, canTradeLive, canManageBots, onClo
 
         <div className="config-field" style={{ padding: '4px 0' }}>
           <span>Take Profits (opcional)</span>
-          <TakeProfitRows tps={tps} setTps={setTps} />
+          <TakeProfitRows tps={tps} setTps={setTps} notional={requestedNotionalUsd} />
         </div>
 
         <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center', margin: '10px 0' }}>

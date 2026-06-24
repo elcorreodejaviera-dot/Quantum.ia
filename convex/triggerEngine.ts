@@ -190,12 +190,15 @@ export const armBotInternal = internalAction({
       throw new Error("[retry_incompatible] Hay órdenes abiertas en el activo: armado bloqueado (sin órdenes incompatibles).");
     }
 
-    // (R6) Trigger normalizado al tick (floor) y gate mark > triggerPxNormalized SOBRE el valor enviado.
-    // Sin prefijo → [transient]: el precio está en/bajo el rango; reintentar (se moverá fuera del borde).
+    // (R6) Trigger normalizado al tick (floor). El sizing SIEMPRE usa triggerPxNorm (no markPx).
     const triggerPxNorm = roundHlPrice(pool.minRange, szDecimals, "floor");
-    if (!(markPx > triggerPxNorm)) {
-      throw new Error(`[transient] mark (${markPx}) ≤ triggerPx normalizado (${triggerPxNorm}): no se arma (precio ya en/bajo el rango).`);
-    }
+    // (Benjamin) Si el precio YA está en/bajo el borde inferior (p.ej. un desplome que lo atravesó de
+    // un salto), el trigger de entrada dispararía solo: en vez de bloquear con [transient] y dejar la
+    // cobertura SIN armar justo en la caída, abrimos la entry_lower A MERCADO (IOC agresivo) de
+    // inmediato. El fill ocurre a markPx < triggerPxNorm → nocional REAL ≤ reservado (conservador
+    // respecto al margen; mismo espíritu que la nota JAV-43). En este modo NO se coloca entry_upper
+    // (por deducción el precio ya está abajo: una 2ª entrada de breakout arriba no aplica).
+    const entryLowerImmediate = !(markPx > triggerPxNorm);
 
     // (H12 + Fix #4) Sizing desde hedgeNotionalUsd. AVISO: para una VENTA NO existe cota dura del
     // nocional — el límite SELL es un SUELO (triggerPx*(1−slip)), no un techo, así que un fill por
@@ -248,7 +251,9 @@ export const armBotInternal = internalAction({
     //    entry_lower ni se reduce la reserva; tras el TP-final el arm pasa a `armed_lower_only`.
     //  - markPx == upperEdge exacto (borde): NO se coloca entry_upper (evita un trigger que dispara solo).
     const upperEdgeNorm = roundHlPrice(pool.maxRange, szDecimals, "ceil");
-    const upperValid = bot.allowReentryFromAbove === true && Number.isFinite(pool.maxRange) && pool.maxRange > 0;
+    // (Benjamin) En entrada inmediata a mercado NO hay 2ª entrada: el precio ya está abajo, así que un
+    // breakout/reentry superior no aplica (factor=1, sin OCO ni pata superior en reposo).
+    const upperValid = !entryLowerImmediate && bot.allowReentryFromAbove === true && Number.isFinite(pool.maxRange) && pool.maxRange > 0;
     const reentryFromAbove = upperValid && markPx > upperEdgeNorm;
     const breakoutUp = upperValid && markPx < upperEdgeNorm;
     const twoEntries = reentryFromAbove || breakoutUp;
@@ -358,12 +363,20 @@ export const armBotInternal = internalAction({
     let filledRole: "entry_lower" | "entry_upper" | undefined;   // (JAV-61) qué entrada llenó (para tp_final)
     let hardError: string | undefined, transportUncertain = false;
     for (const en of entries) {
-      const enLimitPx = aggressiveHlPriceStr(en.triggerPx * (1 - ENTRY_TRIGGER_SLIPPAGE), szDecimals, false);
+      // (Benjamin) entry_lower inmediata: el precio ya perforó el borde → venta IOC a MERCADO (banda
+      // agresiva floor contra el markPx actual para garantizar fill), en lugar del trigger en reposo.
+      const immediate = entryLowerImmediate && en.role === "entry_lower";
+      const enLimitPx = immediate
+        ? aggressiveHlPriceStr(markPx * (1 - ENTRY_TRIGGER_SLIPPAGE), szDecimals, false)
+        : aggressiveHlPriceStr(en.triggerPx * (1 - ENTRY_TRIGGER_SLIPPAGE), szDecimals, false);
+      const enTSpec = immediate
+        ? { limit: { tif: "Ioc" as const } }
+        : { trigger: { isMarket: true, triggerPx: formatHlPrice(en.triggerPx, szDecimals), tpsl: en.tpsl } };
       const acE = abortAfter(HL_ORDER_TIMEOUT_MS);
       try {
         const respE: any = await exchange.order({
           orders: [{ a: assetId, b: false, p: enLimitPx, s: String(size), r: false,
-            t: { trigger: { isMarket: true, triggerPx: formatHlPrice(en.triggerPx, szDecimals), tpsl: en.tpsl } },
+            t: enTSpec,
             c: en.cloid as `0x${string}` }],
           grouping: "na",
         }, { signal: acE.signal, expiresAfter: Date.now() + HL_ORDER_TIMEOUT_MS });

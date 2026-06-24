@@ -2404,8 +2404,9 @@ function NumberInput({ value, onChange, ...rest }) {
 }
 
 // Filas de take-profits (gainPct / closePct). Añadir/quitar libremente; lista vacía = sin TPs.
-// `notional` (opcional): nocional estimado de UNA entrada (USD). Si se pasa y es > 0, cada TP muestra
-// la ganancia aproximada en $ = nocional × %ganancia × %cierre, actualizada en vivo al editar los campos.
+// `notional` (opcional, USD): nocional SOBRE EL QUE CIERRAN LOS TPs — depende del modal y del motor:
+// búfer en IL (los TPs cierran fracción del búfer), posición completa en Trading/Defensa Spot. Si se pasa
+// y es > 0, cada TP muestra la ganancia aprox. = notional × %ganancia × %cierre, en vivo al editar.
 function TakeProfitRows({ tps, setTps, notional }) {
   const update = (i, field, val) =>
     setTps(tps.map((t, idx) => (idx === i ? { ...t, [field]: Number(val) } : t)));
@@ -3024,9 +3025,9 @@ function SpotDefenseBotModal({ position, bot, canTradeLive, canManageBots, onClo
   // Nocional PEDIDO = holding × precio del trigger × (1 + buffer). El backend lo CAPA por margen real y
   // por el tope del plan → el efectivo (verdad) lo fija reserveSpotDefenseArm y se ve en la tarjeta viva.
   const requestedNotionalUsd = (position.amount ?? 0) * effTriggerPrice * (1 + bufferPct / 100);
-  // (JAV-110) Los TPs cierran SOLO la fracción del BÚFER (no el nocional total). Búfer = holding × trigger
-  // × buffer%. El SL es full-size → usa requestedNotionalUsd. (El efectivo real lo capa el backend.)
-  const bufferNotional = (position.amount ?? 0) * effTriggerPrice * (bufferPct / 100);
+  // (JAV-110) Defensa Spot usa OTRO motor (spotDefenseEngine): SL y TPs son full-size sobre arm.size
+  // (tpSize = arm.size × closePct/100, NO fracción del búfer como IL). Por eso TPs y SL usan el nocional
+  // completo (requestedNotionalUsd); el efectivo real lo capa el backend ("sobre el nocional pedido").
 
   // Estimación de cobertura (orientativa, cliente): colateral usable (withdrawable perp + USDC spot libre)
   // × leverage. NO descuenta el margen comprometido por otros bots de la cuenta (eso lo hace el backend),
@@ -3179,7 +3180,7 @@ function SpotDefenseBotModal({ position, bot, canTradeLive, canManageBots, onClo
 
         <div className="config-field" style={{ padding: '4px 0' }}>
           <span>Take Profits (opcional)</span>
-          <TakeProfitRows tps={tps} setTps={setTps} notional={bufferNotional} />
+          <TakeProfitRows tps={tps} setTps={setTps} notional={requestedNotionalUsd} />
         </div>
 
         <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center', margin: '10px 0' }}>

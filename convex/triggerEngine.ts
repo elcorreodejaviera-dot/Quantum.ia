@@ -414,6 +414,12 @@ export const armBotInternal = internalAction({
           // el reconcile protege con SL sobre el szi REAL, pero la cobertura queda materialmente sub-hedged
           // frente al LP → registrar para alerta/seguimiento (no se reintenta el remanente en este ciclo).
           if (immediate && fS > 0 && fS < size * 0.99) immediatePartial = true;
+          // (Codex R2, condición residual) Telemetría post-fill: el cap se acota antes de enviar (solo se
+          // entra con freshMark ≤ triggerPxNorm < notionalCapPx), pero confirmamos el avgPx REAL: si por un
+          // salto sub-segundo superó notionalCapPx, el nocional excedió lo reservado → alertar.
+          if (immediate && fP > notionalCapPx) {
+            elog("arm", "immediate_avgpx_over_cap", { armId: String(armId), avgPx: fP, notionalCapPx });
+          }
         } else if (stE === "waitingForTrigger") {
           anyPlaced = true;   // observed sigue pending; reconcile lo confirma por CLOID
         } else if (stE?.error) {

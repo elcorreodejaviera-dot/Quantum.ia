@@ -100,7 +100,7 @@ function CronHealthPanel({ rows }) {
   );
 }
 
-function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive, hlPosition, hlUnavailable }) {
+function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive, hlPosition, hlUnavailable, hlShared }) {
   const p = pos.pool;
   const lev = pos.kind === 'il' ? `IL short ${pos.leverage ?? '?'}×` : `${pos.direction ?? ''} ${pos.leverage ?? '?'}×`;
   const ft = feeTierPct(p?.feeTier);
@@ -171,17 +171,19 @@ function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive, hl
       </div>
       {hlPosition ? (
         <div className="av-pos-foot">
-          <span className="av-tag">Posición HL: <b>{hlPosition.szi > 0 ? '+' : '−'}{Math.abs(hlPosition.szi).toLocaleString('en-US', { maximumFractionDigits: 4 })} {sym}</b>
+          <span className="av-tag">{hlShared ? 'Posición HL (cuenta compartida)' : 'Posición HL'}: <b>{hlPosition.szi > 0 ? '+' : '−'}{Math.abs(hlPosition.szi).toLocaleString('en-US', { maximumFractionDigits: 4 })} {sym}</b>
             {hlPosition.entryPx != null && <> @ {fmtPrice(hlPosition.entryPx)}</>}
             {hlPosition.liqPx != null && <> · liq {fmtPrice(hlPosition.liqPx)}</>}
             {hlPosition.leverage != null && <> · {hlPosition.leverage}×</>}</span>
-          {covRatio != null && (
+          {hlShared ? (
+            <span className="av-tag faint" title="El hedge es agregado por cuenta+activo (varios bots) — no atribuible a este bot; ver auditoría.">hedge agregado (cuenta+activo)</span>
+          ) : covRatio != null && (
             <span className="av-tag">Hedge {usd(hedgeNotional)} vs Exposición LP {usd(lpExposure)} = <b className={covCls}>{covRatio.toFixed(2)}×</b></span>
           )}
         </div>
       ) : hlUnavailable ? (
         <div className="av-pos-foot"><span className="av-tag faint">HL no disponible (lectura parcial)</span></div>
-      ) : (live && !liveLoading) ? (
+      ) : (hlAccount && live && !liveLoading) ? (
         <div className="av-pos-foot"><span className="av-tag faint">Sin posición HL abierta para {sym || 'el activo'}</span></div>
       ) : null}
     </div>
@@ -251,6 +253,13 @@ function UserRow({ u }) {
           {detail === undefined && <div className="faint" style={{ padding: 8 }}>Cargando…</div>}
           {detail && detail.positions.length === 0 && <div className="faint" style={{ padding: 8 }}>Sin bots activos.</div>}
           {detail && detail.positions.map((pos) => {
+            // (JAV-114 / Codex Major) La posición HL se netea por cuenta+coin. Si dos bots comparten
+            // (hlAccountId, coin) (p.ej. ETH/USDC y ETH/USDT → coin "ETH"), el hedge es AGREGADO y no
+            // atribuible a un bot: ratio per-bot engañoso. Misma ambigüedad que poolAudit.hedge_vs_exposure.
+            const acctCoinKey = (a, b) => (a && b ? `${a}|${b}` : null);
+            const hlShared = ((k) => k && detail.positions.filter(
+              (q) => acctCoinKey(q.hlAccountId, hlCoin(q.baseAsset)) === k).length > 1
+            )(acctCoinKey(pos.hlAccountId, hlCoin(pos.baseAsset)));
             const lp = live?.positions?.[pos.botId] ?? null;
             const acctPnl = (live && pos.hlAccountId && live.pnlByAccountCoin)
               ? live.pnlByAccountCoin[pos.hlAccountId] : null;
@@ -271,7 +280,7 @@ function UserRow({ u }) {
               ? live.positionByAccountCoin[pos.hlAccountId] : undefined;
             const hlPosition = (acctPos && coin && acctPos[coin] != null) ? acctPos[coin] : null;
             const hlUnavailable = !!(live && pos.hlAccountId && live.positionByAccountCoin && acctPos === undefined);
-            return <PositionCard key={pos.botId} pos={pos} live={lp} liveLoading={liveLoading} pnl={pnl} hlAccount={hlAccount} coverageLive={coverageLive} hlPosition={hlPosition} hlUnavailable={hlUnavailable} />;
+            return <PositionCard key={pos.botId} pos={pos} live={lp} liveLoading={liveLoading} pnl={pnl} hlAccount={hlAccount} coverageLive={coverageLive} hlPosition={hlPosition} hlUnavailable={hlUnavailable} hlShared={hlShared} />;
           })}
           <PoolAuditPanel audit={audit} live={live} />
         </div>

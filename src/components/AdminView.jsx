@@ -100,7 +100,7 @@ function CronHealthPanel({ rows }) {
   );
 }
 
-function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive }) {
+function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive, hlPosition, hlUnavailable, hlShared }) {
   const p = pos.pool;
   const lev = pos.kind === 'il' ? `IL short ${pos.leverage ?? '?'}×` : `${pos.direction ?? ''} ${pos.leverage ?? '?'}×`;
   const ft = feeTierPct(p?.feeTier);
@@ -139,6 +139,12 @@ function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive }) 
   } else {
     revertTag = <span className="av-tag norevert">Revert: {liveLoading ? '…' : '—'}</span>;
   }
+  // (JAV-114) Posición HL real + cobertura vs exposición del LP (misma base que el audit hedge_vs_exposure).
+  const hedgeNotional = hlPosition?.notional ?? coverageLive;
+  const lpExposure = live?.liquidityUsd ?? null;
+  const covRatio = (hedgeNotional != null && lpExposure != null && lpExposure > 0) ? hedgeNotional / lpExposure : null;
+  const covCls = covRatio == null ? '' : Math.abs(covRatio - 1) <= 0.25 ? 'av-pos-pnl' : 'av-amber';
+  const sym = pos.baseAsset ?? '';
   return (
     <div className="av-pos">
       <div className="av-pos-top">
@@ -163,6 +169,23 @@ function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive }) 
         {hlAccount && <span className="av-tag">Cuenta HL {hlAccount.addressMasked} · colateral {usd(hlAccount.collateralUsd)}</span>}
         {pnl != null && <span className="av-pnl" style={{ marginLeft: 'auto' }}>PnL hedge <b className={pnl >= 0 ? 'av-pos-pnl' : 'av-neg-pnl'}>{pnl >= 0 ? '+' : ''}{usd(pnl)}</b></span>}
       </div>
+      {hlPosition ? (
+        <div className="av-pos-foot">
+          <span className="av-tag">{hlShared ? 'Posición HL (cuenta compartida)' : 'Posición HL'}: <b>{hlPosition.szi > 0 ? '+' : '−'}{Math.abs(hlPosition.szi).toLocaleString('en-US', { maximumFractionDigits: 4 })} {sym}</b>
+            {hlPosition.entryPx != null && <> @ {fmtPrice(hlPosition.entryPx)}</>}
+            {hlPosition.liqPx != null && <> · liq {fmtPrice(hlPosition.liqPx)}</>}
+            {hlPosition.leverage != null && <> · {hlPosition.leverage}×</>}</span>
+          {hlShared ? (
+            <span className="av-tag faint" title="El hedge es agregado por cuenta+activo (varios bots) — no atribuible a este bot; ver auditoría.">hedge agregado (cuenta+activo)</span>
+          ) : covRatio != null && (
+            <span className="av-tag">Hedge {usd(hedgeNotional)} vs Exposición LP {usd(lpExposure)} = <b className={covCls}>{covRatio.toFixed(2)}×</b></span>
+          )}
+        </div>
+      ) : hlUnavailable ? (
+        <div className="av-pos-foot"><span className="av-tag faint">HL no disponible (lectura parcial)</span></div>
+      ) : (hlAccount && live && !liveLoading) ? (
+        <div className="av-pos-foot"><span className="av-tag faint">Sin posición HL abierta para {sym || 'el activo'}</span></div>
+      ) : null}
     </div>
   );
 }
@@ -230,6 +253,13 @@ function UserRow({ u }) {
           {detail === undefined && <div className="faint" style={{ padding: 8 }}>Cargando…</div>}
           {detail && detail.positions.length === 0 && <div className="faint" style={{ padding: 8 }}>Sin bots activos.</div>}
           {detail && detail.positions.map((pos) => {
+            // (JAV-114 / Codex Major) La posición HL se netea por cuenta+coin. Si dos bots comparten
+            // (hlAccountId, coin) (p.ej. ETH/USDC y ETH/USDT → coin "ETH"), el hedge es AGREGADO y no
+            // atribuible a un bot: ratio per-bot engañoso. Misma ambigüedad que poolAudit.hedge_vs_exposure.
+            const acctCoinKey = (a, b) => (a && b ? `${a}|${b}` : null);
+            const hlShared = ((k) => k && detail.positions.filter(
+              (q) => acctCoinKey(q.hlAccountId, hlCoin(q.baseAsset)) === k).length > 1
+            )(acctCoinKey(pos.hlAccountId, hlCoin(pos.baseAsset)));
             const lp = live?.positions?.[pos.botId] ?? null;
             const acctPnl = (live && pos.hlAccountId && live.pnlByAccountCoin)
               ? live.pnlByAccountCoin[pos.hlAccountId] : null;
@@ -242,7 +272,15 @@ function UserRow({ u }) {
               ? acctCov[coin] : null;
             const hlAccount = (live && pos.hlAccountId && live.hlAccounts)
               ? (live.hlAccounts.find((a) => a.id === pos.hlAccountId) ?? null) : null;
-            return <PositionCard key={pos.botId} pos={pos} live={lp} liveLoading={liveLoading} pnl={pnl} hlAccount={hlAccount} coverageLive={coverageLive} />;
+            // (JAV-114) Detalle de la posición HL real (tamaño/entry/liq/lev) para verla en la tarjeta.
+            // El backend setea positionByAccountCoin[acctId] (aunque sea {}) SOLO en lecturas HL exitosas;
+            // en una lectura parcial/fallida lo OMITE → acctPos ausente. Distinguir "sin posición" de "HL
+            // no disponible" (Codex medio): acctPos === undefined ⟺ la cuenta no se pudo leer.
+            const acctPos = (live && pos.hlAccountId && live.positionByAccountCoin)
+              ? live.positionByAccountCoin[pos.hlAccountId] : undefined;
+            const hlPosition = (acctPos && coin && acctPos[coin] != null) ? acctPos[coin] : null;
+            const hlUnavailable = !!(live && pos.hlAccountId && live.positionByAccountCoin && acctPos === undefined);
+            return <PositionCard key={pos.botId} pos={pos} live={lp} liveLoading={liveLoading} pnl={pnl} hlAccount={hlAccount} coverageLive={coverageLive} hlPosition={hlPosition} hlUnavailable={hlUnavailable} hlShared={hlShared} />;
           })}
           <PoolAuditPanel audit={audit} live={live} />
         </div>

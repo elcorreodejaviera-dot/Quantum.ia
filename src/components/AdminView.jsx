@@ -100,7 +100,7 @@ function CronHealthPanel({ rows }) {
   );
 }
 
-function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive, hlPosition }) {
+function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive, hlPosition, hlUnavailable }) {
   const p = pos.pool;
   const lev = pos.kind === 'il' ? `IL short ${pos.leverage ?? '?'}×` : `${pos.direction ?? ''} ${pos.leverage ?? '?'}×`;
   const ft = feeTierPct(p?.feeTier);
@@ -179,9 +179,11 @@ function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive, hl
             <span className="av-tag">Hedge {usd(hedgeNotional)} vs Exposición LP {usd(lpExposure)} = <b className={covCls}>{covRatio.toFixed(2)}×</b></span>
           )}
         </div>
-      ) : (live && !liveLoading && (
+      ) : hlUnavailable ? (
+        <div className="av-pos-foot"><span className="av-tag faint">HL no disponible (lectura parcial)</span></div>
+      ) : (live && !liveLoading) ? (
         <div className="av-pos-foot"><span className="av-tag faint">Sin posición HL abierta para {sym || 'el activo'}</span></div>
-      ))}
+      ) : null}
     </div>
   );
 }
@@ -262,10 +264,14 @@ function UserRow({ u }) {
             const hlAccount = (live && pos.hlAccountId && live.hlAccounts)
               ? (live.hlAccounts.find((a) => a.id === pos.hlAccountId) ?? null) : null;
             // (JAV-114) Detalle de la posición HL real (tamaño/entry/liq/lev) para verla en la tarjeta.
+            // El backend setea positionByAccountCoin[acctId] (aunque sea {}) SOLO en lecturas HL exitosas;
+            // en una lectura parcial/fallida lo OMITE → acctPos ausente. Distinguir "sin posición" de "HL
+            // no disponible" (Codex medio): acctPos === undefined ⟺ la cuenta no se pudo leer.
             const acctPos = (live && pos.hlAccountId && live.positionByAccountCoin)
-              ? live.positionByAccountCoin[pos.hlAccountId] : null;
+              ? live.positionByAccountCoin[pos.hlAccountId] : undefined;
             const hlPosition = (acctPos && coin && acctPos[coin] != null) ? acctPos[coin] : null;
-            return <PositionCard key={pos.botId} pos={pos} live={lp} liveLoading={liveLoading} pnl={pnl} hlAccount={hlAccount} coverageLive={coverageLive} hlPosition={hlPosition} />;
+            const hlUnavailable = !!(live && pos.hlAccountId && live.positionByAccountCoin && acctPos === undefined);
+            return <PositionCard key={pos.botId} pos={pos} live={lp} liveLoading={liveLoading} pnl={pnl} hlAccount={hlAccount} coverageLive={coverageLive} hlPosition={hlPosition} hlUnavailable={hlUnavailable} />;
           })}
           <PoolAuditPanel audit={audit} live={live} />
         </div>

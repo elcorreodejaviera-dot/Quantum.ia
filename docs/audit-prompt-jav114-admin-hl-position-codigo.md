@@ -41,3 +41,11 @@ pool.
 
 Checks: `npx tsc -p convex/tsconfig.json --noEmit` (OK) + `npx vite build` (OK) + ruta de datos validada
 contra la cuenta real (szi −2.6715, entry 1569.3, liq 1614.87, lev 20). NO `npm run build`.
+
+## Addendum (post-GO): medio resuelto
+
+Codex GO dejó 1 medio: ante una lectura HL parcial/fallida de una cuenta, la UI mostraba "Sin posición HL
+abierta" (engañoso). Resuelto: el backend setea `positionByAccountCoin[acctId]` (aunque sea `{}`) SOLO en
+lecturas exitosas y lo OMITE al fallar (`continue`), así que `acctPos === undefined` ⟺ la cuenta no se
+pudo leer. El front ahora distingue: `hlUnavailable` → "HL no disponible (lectura parcial)"; cuenta leída
+sin posición del coin → "Sin posición HL abierta". `tsc` + `vite build` OK.

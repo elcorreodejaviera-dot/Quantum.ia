@@ -14,14 +14,15 @@ import { hlInfoUrl, hlNetwork } from "./hlNetwork";
 
 const HL_TIMEOUT_MS = 10_000;
 
-async function fetchClearinghouse(address: string): Promise<any | null> {
+// POST genérico al endpoint Info de HL (público). Devuelve el JSON parseado o null ante error/timeout.
+async function hlInfoPost(type: string, address: string): Promise<any | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HL_TIMEOUT_MS);
   try {
     const res = await fetch(hlInfoUrl(), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "clearinghouseState", user: address }),
+      body: JSON.stringify({ type, user: address }),
       signal: controller.signal,
     });
     if (!res.ok) return null;
@@ -33,8 +34,24 @@ async function fetchClearinghouse(address: string): Promise<any | null> {
   }
 }
 
+async function fetchClearinghouse(address: string): Promise<any | null> {
+  return hlInfoPost("clearinghouseState", address);
+}
+
 function maskAddr(a: string): string {
   return a && a.length >= 8 ? `${a.slice(0, 4)}..${a.slice(-2)}` : a;
+}
+
+// (JAV-115) USDC libre en spot (modo unified): cuenta como colateral igual que en el portal (JAV-58),
+// donde se expone POR SEPARADO del perp (no se suman: el backend valida haircuts al operar). free =
+// total − hold de los balances USDC del spot. null si la lectura HL falla.
+async function fetchSpotUsdcFree(address: string): Promise<number | null> {
+  const d: any = await hlInfoPost("spotClearinghouseState", address);
+  if (!d) return null;
+  const free = (d?.balances ?? [])
+    .filter((b: any) => b?.coin === "USDC")
+    .reduce((s: number, b: any) => s + (parseFloat(b?.total ?? "0") - parseFloat(b?.hold ?? "0")), 0);
+  return Number.isFinite(free) ? free : null;
 }
 
 export const getUserAdminLiveSnapshot = action({
@@ -99,10 +116,15 @@ export const getUserAdminLiveSnapshot = action({
     const positionByAccountCoin: Record<string, Record<string, any>> = {};
     let hlPartial = false;
     for (const acct of targets.hlAccounts) {
-      const ch = await fetchClearinghouse(acct.tradingAccountAddress);
+      // (JAV-115) perp + spot en paralelo (lecturas independientes) → menos latencia por cuenta.
+      // El USDC de spot (modo unified) también respalda el hedge.
+      const [ch, spotUsdcFree] = await Promise.all([
+        fetchClearinghouse(acct.tradingAccountAddress),
+        fetchSpotUsdcFree(acct.tradingAccountAddress),
+      ]);
       if (!ch) {
         hlPartial = true;
-        hlAccounts.push({ id: acct.id, addressMasked: maskAddr(acct.tradingAccountAddress), collateralUsd: null });
+        hlAccounts.push({ id: acct.id, addressMasked: maskAddr(acct.tradingAccountAddress), collateralUsd: null, spotUsdcFree });
         continue;
       }
       const accountValue = Number(ch?.marginSummary?.accountValue);
@@ -110,6 +132,7 @@ export const getUserAdminLiveSnapshot = action({
         id: acct.id,
         addressMasked: maskAddr(acct.tradingAccountAddress),
         collateralUsd: Number.isFinite(accountValue) ? accountValue : null,
+        spotUsdcFree,
       });
       const perCoin: Record<string, number> = {};
       const covCoin: Record<string, number> = {};

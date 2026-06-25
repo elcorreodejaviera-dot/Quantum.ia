@@ -7,7 +7,7 @@ import { decryptPrivateKey } from "./hlCredentialActions";
 import { hlNetwork, hlIsTestnet, assertExpectedNetwork } from "./hlNetwork";
 import {
   makeClients, getAssetMeta, ceilHlPrice, roundHlPrice, aggressiveHlPriceStr,
-  floorToDecimals, formatHlPrice, fillsByCloid, abortAfter, placeStopLoss,
+  floorToDecimals, formatHlPrice, fillsByCloid, abortAfter, placeStopLoss, isFlatOrDust,
 } from "./hyperliquid";
 import { armCloid } from "./triggerArms";
 import { armErrorKind, REARM_COOLDOWN_MS, REARM_RETRY_MS, REARM_BLOCKED_RECHECK_MS, STOP_ALERT_THRESHOLD } from "./triggerRearm";
@@ -180,7 +180,7 @@ export const armBotInternal = internalAction({
     // reintentar + alertar (Codex #5) — puede ser una posición que se cerrará o un residuo a limpiar.
     const chState = await info.clearinghouseState({ user: tradingAccount });
     const pos = (chState.assetPositions ?? []).find((p: any) => p.position?.coin === asset);
-    if (pos && Math.abs(Number(pos.position?.szi ?? 0)) > 0) {
+    if (pos && !isFlatOrDust(Number(pos.position?.szi ?? 0), markPx)) {
       throw new Error("[retry_incompatible] Ya existe posición abierta en el activo: armado bloqueado (precondición flat).");
     }
     // (Fix #7 / H4) Sin órdenes abiertas incompatibles en el activo (un trigger/orden previo dejaría
@@ -581,10 +581,12 @@ export const reconcileArm = internalAction({
         const ch: any = await info.clearinghouseState({ user });
         const p = (ch.assetPositions ?? []).find((x: any) => x.position?.coin === arm.asset.toUpperCase());
         const szi = p ? Number(p.position?.szi ?? 0) : 0;
-        const flat = Math.abs(szi) === 0;
+        // (JAV-113) flat incluye el "dust" intradeable (< mínimo de orden de HL): un remanente de
+        // redondeo no se puede cerrar con orden → tratarlo como cerrado (cierra arm + libera margen).
+        const flat = isFlatOrDust(szi, assetMeta.markPx);
         // (OCO doble-fill) El SL/TPs usan el tamaño REAL de la posición (szi) y su entryPx medio, no
         // arm.filledSize: si ambas entradas llenaron (2x), el SL full-size cubre el tamaño real.
-        const realSize = Math.abs(szi) > 0 ? Math.abs(szi) : filledSize;
+        const realSize = !flat ? Math.abs(szi) : filledSize;
         const posEntryPx = (p && Number(p.position?.entryPx) > 0) ? Number(p.position.entryPx) : entryPrice;
 
         // (JAV-66) Trigger DESEADO del SL (Short): si el BE ya se activó (latch beMoved) → entrada
@@ -604,7 +606,7 @@ export const reconcileArm = internalAction({
         // (entry_lower sigue armada para la perforación). El margen 2× se mantiene a propósito.
         if (arm.armMode !== "reentry_coexist" && arm.allowReentryFromAbove && !arm.reservationReduced) {
           const entryCloidsP = allOrders.filter((o) => o.role === "entry_lower" || o.role === "entry_upper").map((o) => o.cloid);
-          if (Math.abs(szi) > 0 && Math.abs(szi) <= arm.size * 1.5 && (await ensureOrdersDead(info, exchange, user, assetId, entryCloidsP))) {
+          if (!flat && Math.abs(szi) <= arm.size * 1.5 && (await ensureOrdersDead(info, exchange, user, assetId, entryCloidsP))) {
             await ctx.runMutation(internal.triggerArms.reduceArmReservation, { armId, token, reservedNotional: arm.reservedNotional / 2, marginReserved: arm.marginReserved / 2 });
           }
         }
@@ -1036,7 +1038,7 @@ export const reconcileArm = internalAction({
       if (arm.status === "armed_lower_only") {
         const chN: any = await info.clearinghouseState({ user });
         const pN = (chN.assetPositions ?? []).find((x: any) => x.position?.coin === arm.asset.toUpperCase());
-        if (pN && Math.abs(Number(pN.position?.szi ?? 0)) > 0) {
+        if (pN && !isFlatOrDust(Number(pN.position?.szi ?? 0), assetMeta.markPx)) {
           return { skipped: "armed_lower_only_position_live" };   // hay posición → el fill se detectará; no cerrar
         }
         if (arm.closeConfirmSince == null) {

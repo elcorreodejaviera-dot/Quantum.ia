@@ -5,7 +5,7 @@ import { internal } from "./_generated/api";
 import { v } from "convex/values";
 import { decryptPrivateKey } from "./hlCredentialActions";
 import { hlNetwork, hlIsTestnet, assertExpectedNetwork } from "./hlNetwork";
-import { makeClients, getAssetMeta, roundHlPrice, aggressiveHlPriceStr, formatHlPrice, abortAfter, placeStopLoss, fillsByCloid, floorToDecimals } from "./hyperliquid";
+import { makeClients, getAssetMeta, roundHlPrice, aggressiveHlPriceStr, formatHlPrice, abortAfter, placeStopLoss, fillsByCloid, floorToDecimals, isFlatOrDust } from "./hyperliquid";
 import { spotDefenseCloidInput, toHlCloid } from "./cloids";
 import { TransportError } from "@nktkas/hyperliquid";
 import { elog } from "./log";
@@ -95,7 +95,7 @@ export const armSpotDefenseInternal = internalAction({
     // (Codex r1 #2) Precondición FLAT: posición neta cero del activo (la posición perp es neta por coin).
     const chState = await info.clearinghouseState({ user: tradingAccount });
     const pos = (chState.assetPositions ?? []).find((p: any) => p.position?.coin === asset);
-    if (pos && Math.abs(Number(pos.position?.szi ?? 0)) > 0) {
+    if (pos && !isFlatOrDust(Number(pos.position?.szi ?? 0), markPx)) {
       throw new Error("[retry_incompatible] Ya hay posición abierta en el activo: armado bloqueado (flat).");
     }
     // (Codex r1 #2) Sin órdenes abiertas del coin (un trigger/orden previo dejaría estado ambiguo).
@@ -302,8 +302,9 @@ export const reconcileSpotDefenseArm = internalAction({
         const ch: any = await info.clearinghouseState({ user });
         const p = (ch.assetPositions ?? []).find((x: any) => x.position?.coin === arm.asset.toUpperCase());
         const szi = p ? Number(p.position?.szi ?? 0) : 0;
-        const flat = Math.abs(szi) === 0;
-        const realSize = Math.abs(szi) > 0 ? Math.abs(szi) : arm.filledSize;
+        // (JAV-113) flat incluye el "dust" intradeable (< mínimo de orden de HL): tratarlo como cerrado.
+        const flat = isFlatOrDust(szi, markPx);
+        const realSize = !flat ? Math.abs(szi) : arm.filledSize;
         const posEntryPx = (p && Number(p.position?.entryPx) > 0) ? Number(p.position.entryPx) : arm.entryPrice;
         const slOrder = orders.find((o: any) => o.role === "sl");
 
@@ -423,7 +424,7 @@ export const reconcileSpotDefenseArm = internalAction({
           // próximo ciclo cierra con closeReason "disarm"). Si sigue abierta, el SL se mantiene → no desnuda.
           const ch2: any = await info.clearinghouseState({ user });
           const p2 = (ch2.assetPositions ?? []).find((x: any) => x.position?.coin === arm.asset.toUpperCase());
-          const flatNow = Math.abs(p2 ? Number(p2.position?.szi ?? 0) : 0) === 0;
+          const flatNow = isFlatOrDust(p2 ? Number(p2.position?.szi ?? 0) : 0, markPx);
           if (flatNow) {
             await ensureSpotDefenseOrdersDead(info, exchange, user, assetId, ownCloids);
             return { result: "closed_flat_pending_confirm" };

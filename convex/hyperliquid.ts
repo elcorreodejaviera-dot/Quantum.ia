@@ -50,6 +50,18 @@ export function floorToDecimals(value: number, decimals: number): number {
   return Math.floor(value * f) / f;
 }
 
+// (JAV-113) Umbral de "dust": un residuo de posición cuyo nocional cae por debajo del mínimo de orden
+// de HL (~$10) es INTRADEABLE — no se puede cerrar con una orden reduce-only. Los motores (IL y Defensa
+// Spot) deben tratarlo como posición PLANA (cerrada): si no, un remanente de redondeo (p.ej. 0.0001 ETH
+// ≈ $0.16 que HL deja tras cerrar) mantiene el arm "abierto" para siempre — nunca cierra, nunca libera
+// el margen reservado, nunca reprograma el rearm, y bloquea la precondición flat del armado siguiente.
+// markPx inválido → solo szi===0 cuenta como flat (estricto, no falsea posiciones reales).
+export const DUST_NOTIONAL_USD = 10;
+export function isFlatOrDust(szi: number, markPx: number): boolean {
+  return Math.abs(szi) === 0 ||
+    (Number.isFinite(markPx) && markPx > 0 && Math.abs(szi) * markPx < DUST_NOTIONAL_USD);
+}
+
 // Precisión de precio de perps en HL: ≤5 cifras significativas y ≤ (6 − szDecimals) decimales.
 export function formatHlPrice(price: number, szDecimals: number): string {
   const maxDecimals = Math.max(0, 6 - szDecimals);
@@ -305,7 +317,7 @@ export const closePositionEmergency = internalAction({
 
     // 2) Aplanar PRIMERO (reduceOnly IOC market agresivo) — nunca deja la posición sin SL antes de cerrar.
     let closeResult: any = "no_position";
-    if (Math.abs(szi) > 0) {
+    if (!isFlatOrDust(szi, markPx)) {   // (JAV-113) dust intradeable: no intentar cerrarlo (HL lo rechaza)
       const isBuy = szi < 0;                            // short → BUY para cerrar
       const size = floorToDecimals(Math.abs(szi), szDecimals);
       const limitPx = isBuy ? markPx * (1 + ENTRY_IOC_SLIPPAGE) : markPx * (1 - ENTRY_IOC_SLIPPAGE);
@@ -324,9 +336,12 @@ export const closePositionEmergency = internalAction({
     const after = await info.clearinghouseState({ user: tradingAccount });
     const posAfter = (after.assetPositions ?? []).find((p: any) => p.position?.coin === a);
     const sziAfter = posAfter ? Number(posAfter.position?.szi ?? 0) : 0;
+    // (JAV-113) flat incluye el "dust" intradeable (< mínimo de orden de HL): un remanente de redondeo
+    // no se puede cerrar con orden → tratarlo como flat, o el llamador (closeBotPosition) nunca desbloquea.
+    const flat = isFlatOrDust(sziAfter, markPx);
     // (OBS-3) Cierre de emergencia (aplana capital real). coin + tamaños de posición (no sensibles);
     // NADA de cuenta/clave ni la respuesta cruda del SDK. flat=true si quedó sin posición residual.
-    elog("hl", "emergency_close", { coin: a, sziBefore: szi, sziAfter, flat: sziAfter === 0 });
+    elog("hl", "emergency_close", { coin: a, sziBefore: szi, sziAfter, flat });
 
     // 4) SOLO si está flat: cancelar las órdenes vivas del activo (SL ya inútiles). Si NO está flat,
     // se dejan los SL intactos (protección) y se devuelve sziAfter != 0 → el llamador NO borra/desarma.
@@ -335,7 +350,7 @@ export const closePositionEmergency = internalAction({
     // El llamador solo cierra/desarma/borra si sziAfter===0 Y ordersRemaining===0 (sin SL huérfano).
     const canceled: string[] = [];
     let ordersRemaining: number | null = null;
-    if (sziAfter === 0) {
+    if (flat) {
       const open: any[] = await info.frontendOpenOrders({ user: tradingAccount });
       const assetOrders = open.filter((o: any) => o?.coin === a);
       for (const o of assetOrders) {
@@ -355,12 +370,12 @@ export const closePositionEmergency = internalAction({
     try {
       await ctx.runMutation(internal.engineEvents.record, {
         scope: "hl", event: "emergency_close", userId: credential.userId,
-        reason: `${a}:${sziAfter === 0 ? "flat" : "residual"}:orders=${ordersRemaining ?? "na"}`,
+        reason: `${a}:${flat ? "flat" : "residual"}:orders=${ordersRemaining ?? "na"}`,
       });
     } catch (e) {
       console.warn("[engine_events] emergency_close record failed:", String(e).slice(0, 160));
     }
-    return { sziBefore: szi, closeResult, canceledOrders: canceled, sziAfter, ordersRemaining };
+    return { sziBefore: szi, closeResult, canceledOrders: canceled, sziAfter, flat, ordersRemaining };
   },
 });
 
@@ -390,7 +405,7 @@ export const closeBotPosition = action({
     // Solo si HL confirma flat Y sin órdenes vivas del activo (sin SL huérfano): cerrar en DB las
     // ejecuciones JAV-37 abiertas y desarmar arms JAV-44. Si no, NO se toca nada → el bot queda
     // intacto y protegido para reintentar (Codex: fail-closed, nunca borrar dejando un SL vivo).
-    if (closeRes?.sziAfter === 0 && closeRes?.ordersRemaining === 0) {
+    if (closeRes?.flat && closeRes?.ordersRemaining === 0) {
       await ctx.runMutation(internal.executions.closeOpenExecutionsForBotInternal, { botId });
       await ctx.runMutation(internal.triggerArms.requestDisarmAndDeactivate, { botId });
     }

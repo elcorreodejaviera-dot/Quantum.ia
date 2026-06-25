@@ -55,3 +55,13 @@ inválido, signo del szi).
    algo que no debía en otros arms vivos?
 
 Checks: `npx tsc -p convex/tsconfig.json --noEmit` (OK) + `npx vitest run` (265 OK). NO `npm run build`.
+
+## Addendum (post-GO): medio residual resuelto
+
+Codex GO dejó 1 medio: la ruta manual legacy `closePositionEmergency` / `closeBotPosition`
+(`convex/hyperliquid.ts`) seguía usando `sziAfter === 0`, así que podía colgarse con dust al desbloquear
+ejecuciones legacy/JAV-37. Resuelto: `closePositionEmergency` ahora computa `const flat =
+isFlatOrDust(sziAfter, markPx)`, lo usa en el gate de cancelación de órdenes, el log y el `reason`, y lo
+**devuelve**; `closeBotPosition` chequea `closeRes.flat` en vez de `sziAfter === 0`. Además el aplanado
+inicial (`if (!isFlatOrDust(szi, markPx))`) ya no intenta cerrar dust (HL lo rechazaría). Mismo patrón ya
+auditado; `tsc` + 265 tests siguen verdes.

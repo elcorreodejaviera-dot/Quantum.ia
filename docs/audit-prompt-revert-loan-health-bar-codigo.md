@@ -23,8 +23,8 @@ CSS (`src/styles/bot-portal.css`):
 - Se eliminan los tints `.borrow-health-featured.green/.amber/.red`.
 - `.borrow-track` pasa a `display:flex; gap:5px; background:none` (ya no gradiente ni `::after`/`::before`).
 - Segmentos: `seg-red` flex 14, `seg-yellow` flex 14, `seg-green` flex 52, `seg-mint` flex 13
-  (menta = `color-mix(in srgb, var(--green) 50%, #fff)`). Marcador `▲` con `border-bottom:7px solid #fff`,
-  posicionado con `left: var(--hp)`.
+  (menta = `color-mix(in srgb, var(--green) 50%, #fff)`). Marcador `▲` con `border-bottom:7px solid var(--text)`
+  (blanco en tema oscuro, oscuro en claro), posicionado con `left: var(--hp)`.
 
 ## Verifica GO/NO-GO
 

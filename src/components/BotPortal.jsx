@@ -212,6 +212,11 @@ function CoberturaViva({ bot, arm, pool, accountById, hlBalance }) {
   // orden ABIERTA real (nunca inferido desde entryPrice); BE = 'be'|'be_pending'|null. Misma lógica.
   const slOrder = slOrderOpen(arm);
   const be = beStateOf(arm, slOrder);
+  // (JAV-116) ¿Hay realmente un trigger de 2ª entrada por arriba? arm.allowReentryFromAbove se setea SOLO
+  // con 2 entradas reales (triggerArms: twoEntries) → cubre el caso de la entrada inmediata a mercado, donde
+  // no hay pata superior aunque el bot la tenga configurada. Sin arm, cae a la intención (config del bot).
+  // Si no hay trigger arriba, el tile muestra el borde superior del RANGO, no un trigger → se relabela.
+  const hasUpperTrigger = arm ? arm.allowReentryFromAbove === true : bot?.allowReentryFromAbove === true;
   // (Fase 6-D) Explicación en lenguaje simple, derivada del mismo estado (helpers compartidos).
   const explain = explainBot(bot, arm, pool, hlBalance);
 
@@ -247,7 +252,7 @@ function CoberturaViva({ bot, arm, pool, accountById, hlBalance }) {
           <span className="cv-dist">{fmtDist(dist(pool?.min))}</span>
         </div>
         <div className="cv-tile">
-          <span className="cv-label">Trigger arriba</span>
+          <span className="cv-label">{hasUpperTrigger ? 'Trigger arriba' : 'Borde superior'}</span>
           <strong>${pool?.max != null ? formatPrice(pool.pair, pool.max) : '—'}</strong>
           <span className="cv-dist">{fmtDist(dist(pool?.max))}</span>
         </div>

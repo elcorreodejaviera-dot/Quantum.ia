@@ -50,6 +50,18 @@ export function floorToDecimals(value: number, decimals: number): number {
   return Math.floor(value * f) / f;
 }
 
+// (JAV-113) Umbral de "dust": un residuo de posición cuyo nocional cae por debajo del mínimo de orden
+// de HL (~$10) es INTRADEABLE — no se puede cerrar con una orden reduce-only. Los motores (IL y Defensa
+// Spot) deben tratarlo como posición PLANA (cerrada): si no, un remanente de redondeo (p.ej. 0.0001 ETH
+// ≈ $0.16 que HL deja tras cerrar) mantiene el arm "abierto" para siempre — nunca cierra, nunca libera
+// el margen reservado, nunca reprograma el rearm, y bloquea la precondición flat del armado siguiente.
+// markPx inválido → solo szi===0 cuenta como flat (estricto, no falsea posiciones reales).
+export const DUST_NOTIONAL_USD = 10;
+export function isFlatOrDust(szi: number, markPx: number): boolean {
+  return Math.abs(szi) === 0 ||
+    (Number.isFinite(markPx) && markPx > 0 && Math.abs(szi) * markPx < DUST_NOTIONAL_USD);
+}
+
 // Precisión de precio de perps en HL: ≤5 cifras significativas y ≤ (6 − szDecimals) decimales.
 export function formatHlPrice(price: number, szDecimals: number): string {
   const maxDecimals = Math.max(0, 6 - szDecimals);

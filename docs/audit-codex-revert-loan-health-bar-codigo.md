@@ -27,21 +27,20 @@ No se encontraron hallazgos medios.
 
 ## Bajo
 
-### B1 - El marcador blanco puede perder contraste en tema claro
+### B1 - El marcador podia perder contraste en tema claro (RESUELTO)
 
-Evidencia:
+Evidencia (al momento de la auditoria):
 
 - `src/styles/bot-portal.css:22-35` define tema claro con fondo/panel blanco.
-- `src/styles/bot-portal.css:866-876` fija el marcador con `border-bottom: 7px solid #fff`.
-- En tema oscuro el marcador blanco replica bien la referencia Revert. En tema claro, el marcador depende casi por completo del `drop-shadow` para verse contra una superficie blanca.
+- El marcador fijaba `border-bottom: 7px solid #fff`, por lo que en tema claro dependia casi por completo del `drop-shadow` para verse contra una superficie blanca. En tema oscuro replicaba bien la referencia Revert.
 
 Impacto:
 
-- Riesgo visual acotado: el valor numerico `healthFactor` sigue visible en `src/components/BotPortal.jsx:487`, pero el punto exacto del marcador puede ser menos evidente para usuarios en modo claro.
+- Riesgo visual acotado: el valor numerico `healthFactor` sigue visible en `src/components/BotPortal.jsx:487`, pero el punto exacto del marcador podia ser menos evidente en modo claro.
 
-Recomendacion:
+Resolucion (aplicada en este PR):
 
-- Si se quiere cerrar el riesgo, usar un token dependiente de tema, por ejemplo `border-bottom-color: var(--text)`, o definir un color especifico para `[data-theme="light"] .borrow-marker`.
+- El marcador pasa a `border-bottom: 7px solid var(--text)` (blanco en tema oscuro, oscuro en claro), cerrando el riesgo de contraste en ambos temas. Verificado con preview en oscuro y claro.
 
 ### B2 - Los colores segmentados pueden leerse como umbrales exactos aunque son decorativos
 

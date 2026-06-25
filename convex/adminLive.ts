@@ -94,6 +94,9 @@ export const getUserAdminLiveSnapshot = action({
     // (Fix Cobertura) Nocional REAL de la posición HL por cuenta+coin = cobertura activa. bot.hedgeNotionalUsd
     // es null por diseño (el motor dimensiona on-chain), así que la "Cobertura (cap)" se lee de aquí.
     const coverageByAccountCoin: Record<string, Record<string, number>> = {};
+    // (JAV-114) Detalle de la posición HL por cuenta+coin para el panel admin: tamaño (szi), entry,
+    // precio de liquidación y leverage → permite VER la posición y compararla con la exposición del LP.
+    const positionByAccountCoin: Record<string, Record<string, any>> = {};
     let hlPartial = false;
     for (const acct of targets.hlAccounts) {
       const ch = await fetchClearinghouse(acct.tradingAccountAddress);
@@ -110,6 +113,7 @@ export const getUserAdminLiveSnapshot = action({
       });
       const perCoin: Record<string, number> = {};
       const covCoin: Record<string, number> = {};
+      const posCoin: Record<string, any> = {};
       for (const ap of ch?.assetPositions ?? []) {
         const coin = ap?.position?.coin;
         const upnl = Number(ap?.position?.unrealizedPnl);
@@ -120,11 +124,27 @@ export const getUserAdminLiveSnapshot = action({
         if (typeof coin === "string" && Number.isFinite(posValue) && posValue > 0) {
           covCoin[coin] = (covCoin[coin] ?? 0) + posValue;
         }
+        // (JAV-114) Detalle de la posición real (HL netea por coin → 1 posición por coin/cuenta).
+        const szi = Number(ap?.position?.szi);
+        if (typeof coin === "string" && Number.isFinite(szi) && szi !== 0) {
+          const entryPx = Number(ap?.position?.entryPx);
+          const liqPx = Number(ap?.position?.liquidationPx);
+          const lev = Number(ap?.position?.leverage?.value);
+          posCoin[coin] = {
+            szi,
+            notional: Number.isFinite(posValue) ? posValue : null,
+            entryPx: Number.isFinite(entryPx) ? entryPx : null,
+            liqPx: Number.isFinite(liqPx) ? liqPx : null,
+            leverage: Number.isFinite(lev) ? lev : null,
+            upnl: Number.isFinite(upnl) ? upnl : null,
+          };
+        }
       }
       pnlByAccountCoin[String(acct.id)] = perCoin;
       coverageByAccountCoin[String(acct.id)] = covCoin;
+      positionByAccountCoin[String(acct.id)] = posCoin;
     }
 
-    return { network, positions, hlAccounts, pnlByAccountCoin, coverageByAccountCoin, partial: { positions: positionsPartial, hl: hlPartial } };
+    return { network, positions, hlAccounts, pnlByAccountCoin, coverageByAccountCoin, positionByAccountCoin, partial: { positions: positionsPartial, hl: hlPartial } };
   },
 });

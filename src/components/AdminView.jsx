@@ -100,7 +100,7 @@ function CronHealthPanel({ rows }) {
   );
 }
 
-function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive }) {
+function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive, hlPosition }) {
   const p = pos.pool;
   const lev = pos.kind === 'il' ? `IL short ${pos.leverage ?? '?'}×` : `${pos.direction ?? ''} ${pos.leverage ?? '?'}×`;
   const ft = feeTierPct(p?.feeTier);
@@ -139,6 +139,12 @@ function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive }) 
   } else {
     revertTag = <span className="av-tag norevert">Revert: {liveLoading ? '…' : '—'}</span>;
   }
+  // (JAV-114) Posición HL real + cobertura vs exposición del LP (misma base que el audit hedge_vs_exposure).
+  const hedgeNotional = hlPosition?.notional ?? coverageLive;
+  const lpExposure = live?.liquidityUsd ?? null;
+  const covRatio = (hedgeNotional != null && lpExposure != null && lpExposure > 0) ? hedgeNotional / lpExposure : null;
+  const covCls = covRatio == null ? '' : Math.abs(covRatio - 1) <= 0.25 ? 'av-pos-pnl' : 'av-amber';
+  const sym = pos.baseAsset ?? '';
   return (
     <div className="av-pos">
       <div className="av-pos-top">
@@ -163,6 +169,19 @@ function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive }) 
         {hlAccount && <span className="av-tag">Cuenta HL {hlAccount.addressMasked} · colateral {usd(hlAccount.collateralUsd)}</span>}
         {pnl != null && <span className="av-pnl" style={{ marginLeft: 'auto' }}>PnL hedge <b className={pnl >= 0 ? 'av-pos-pnl' : 'av-neg-pnl'}>{pnl >= 0 ? '+' : ''}{usd(pnl)}</b></span>}
       </div>
+      {hlPosition ? (
+        <div className="av-pos-foot">
+          <span className="av-tag">Posición HL: <b>{hlPosition.szi > 0 ? '+' : '−'}{Math.abs(hlPosition.szi).toLocaleString('en-US', { maximumFractionDigits: 4 })} {sym}</b>
+            {hlPosition.entryPx != null && <> @ {fmtPrice(hlPosition.entryPx)}</>}
+            {hlPosition.liqPx != null && <> · liq {fmtPrice(hlPosition.liqPx)}</>}
+            {hlPosition.leverage != null && <> · {hlPosition.leverage}×</>}</span>
+          {covRatio != null && (
+            <span className="av-tag">Hedge {usd(hedgeNotional)} vs Exposición LP {usd(lpExposure)} = <b className={covCls}>{covRatio.toFixed(2)}×</b></span>
+          )}
+        </div>
+      ) : (live && !liveLoading && (
+        <div className="av-pos-foot"><span className="av-tag faint">Sin posición HL abierta para {sym || 'el activo'}</span></div>
+      ))}
     </div>
   );
 }
@@ -242,7 +261,11 @@ function UserRow({ u }) {
               ? acctCov[coin] : null;
             const hlAccount = (live && pos.hlAccountId && live.hlAccounts)
               ? (live.hlAccounts.find((a) => a.id === pos.hlAccountId) ?? null) : null;
-            return <PositionCard key={pos.botId} pos={pos} live={lp} liveLoading={liveLoading} pnl={pnl} hlAccount={hlAccount} coverageLive={coverageLive} />;
+            // (JAV-114) Detalle de la posición HL real (tamaño/entry/liq/lev) para verla en la tarjeta.
+            const acctPos = (live && pos.hlAccountId && live.positionByAccountCoin)
+              ? live.positionByAccountCoin[pos.hlAccountId] : null;
+            const hlPosition = (acctPos && coin && acctPos[coin] != null) ? acctPos[coin] : null;
+            return <PositionCard key={pos.botId} pos={pos} live={lp} liveLoading={liveLoading} pnl={pnl} hlAccount={hlAccount} coverageLive={coverageLive} hlPosition={hlPosition} />;
           })}
           <PoolAuditPanel audit={audit} live={live} />
         </div>

@@ -760,18 +760,6 @@ button {
   border-color: var(--line-strong);
 }
 
-.borrow-health-featured.green {
-  background: rgba(0, 200, 5, 0.08);
-}
-
-.borrow-health-featured.amber {
-  background: rgba(255, 220, 0, 0.08);
-}
-
-.borrow-health-featured.red {
-  background: rgba(255, 80, 0, 0.08);
-}
-
 .borrow-health-featured.inactive {
   opacity: 0.4;
   filter: grayscale(1);
@@ -848,51 +836,47 @@ button {
   font-size: 20px;
 }
 
+/* Barra estilo Revert Lend: 4 segmentos redondeados (píldoras) con huecos.
+   El track es estático; sólo el marcador triangular ▲ se mueve según el HF. */
 .borrow-track {
-  height: 10px;
-  border-radius: 999px;
+  height: 12px;
   position: relative;
-  /* sin overflow:hidden para que el marcador pueda sobresalir */
-  /* usa los colores del propio portal */
-  /* breakpoints alineados con los umbrales de borrowTone (50 / 70) */
-  background: linear-gradient(to right,
-    var(--red)   0%,  var(--red)   50%,
-    var(--amber) 50%, var(--amber) 70%,
-    var(--green) 70%, var(--green) 100%
-  );
+  display: flex;
+  align-items: stretch;
+  gap: 5px;
+  margin: 6px 0;
+  background: none;
+  /* el marcador (▲) sobresale por debajo: dejamos espacio */
+  padding-bottom: 9px;
 }
 
-/* Máscara oscura que tapa la parte no alcanzada */
-.borrow-track::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: var(--hp, 0%);
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.72);
-  border-radius: 0 999px 999px 0;
-  transition: left 0.6s ease;
-}
-
-/* Marcador vertical blanco — punto exacto donde está el préstamo */
-.borrow-track::before {
-  content: '';
-  position: absolute;
-  top: -4px;
-  bottom: -4px;
-  left: var(--hp, 0%);
-  width: 4px;
-  transform: translateX(-50%);
-  background: #fff;
+.borrow-seg {
+  height: 12px;
   border-radius: 999px;
-  box-shadow: 0 0 5px rgba(0, 0, 0, 0.55);
+}
+
+/* proporciones tomadas del render real de Revert: verde domina, rojo mínimo.
+   colores de NUESTRA paleta; la "menta" se deriva del propio --green */
+.borrow-seg.seg-red    { flex: 14; background: var(--red); }
+.borrow-seg.seg-yellow { flex: 14; background: var(--amber); }
+.borrow-seg.seg-green  { flex: 52; background: var(--green); }
+.borrow-seg.seg-mint   { flex: 13; background: color-mix(in srgb, var(--green) 50%, #fff); }
+
+/* Marcador triangular ▲ debajo de la barra — punto exacto del préstamo */
+.borrow-marker {
+  position: absolute;
+  top: 14px;
+  left: var(--hp, 0%);
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-bottom: 7px solid var(--text);
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.55));
   z-index: 2;
   transition: left 0.6s ease;
 }
-
-/* Eliminar estilos heredados del fill — ya no se usa */
-.borrow-fill { display: none; }
 
 /* Aviso de posición cerrada on-chain (JAV-36) */
 .pool-closed-banner {

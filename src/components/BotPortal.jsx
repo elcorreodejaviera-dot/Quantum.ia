@@ -386,8 +386,6 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
     : 0;
   const tone = pool.status === 'Fuera de rango' ? 'red' : pool.status === 'Cerca del borde' ? 'amber' : 'green';
   const hasBorrowData = pool.borrowHealth > 0;
-  const borrowTone = !hasBorrowData ? 'faint' : pool.borrowHealth < 50 ? 'red' : pool.borrowHealth < 70 ? 'amber' : 'green';
-  const borrowLabel = !hasBorrowData ? 'Sin datos' : pool.borrowHealth < 50 ? 'Riesgo alto' : pool.borrowHealth < 70 ? 'Vigilar' : 'Saludable';
 
   const feeTierLabel = pool.feeTier != null ? `${(pool.feeTier / 10000).toFixed(2)}%` : null;
   const explorerBase = EXPLORER_URLS[pool.network] ?? null;
@@ -479,10 +477,9 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
         </div>
       )}
 
-      <div className={`borrow-health borrow-health-featured ${hasBorrowData ? borrowTone : 'inactive'}`}>
+      <div className={`borrow-health borrow-health-featured ${hasBorrowData ? '' : 'inactive'}`}>
         <div className="borrow-head">
           <span>Revert Lend {hasBorrowData ? '· Activo' : '· Sin apalancamiento'}</span>
-          {hasBorrowData && <strong>{borrowLabel}</strong>}
         </div>
         {hasBorrowData ? (
           <>
@@ -492,9 +489,15 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
             </div>
             <div
               className="borrow-track"
-              style={{ '--hp': `${pool.borrowHealth}%` }}
-              aria-label={`Loan health ${pool.borrowHealth}%`}
-            />
+              style={{ '--hp': `${Math.max(0, Math.min(100, (pool.healthFactor - 1) / 2 * 100))}%` }}
+              aria-label={`Loan health ${pool.healthFactor.toFixed(2)}`}
+            >
+              <div className="borrow-seg seg-red" />
+              <div className="borrow-seg seg-yellow" />
+              <div className="borrow-seg seg-green" />
+              <div className="borrow-seg seg-mint" />
+              <span className="borrow-marker" />
+            </div>
             <div className="borrow-foot">
               <span>Loan health</span>
               <span>Loan-to-value</span>

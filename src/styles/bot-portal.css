@@ -2547,8 +2547,11 @@ details[open] > .pool-pnl-toggle::before {
   grid-template-columns: repeat(4, 1fr);
   gap: 8px;
 }
+/* (JAV-116) sin entrada por arriba: se oculta el tile del borde superior → 3 columnas, sin celda vacía */
+.cobertura-tiles.tiles-3 { grid-template-columns: repeat(3, 1fr); }
 @media (max-width: 560px) {
-  .cobertura-tiles { grid-template-columns: repeat(2, 1fr); }
+  .cobertura-tiles,
+  .cobertura-tiles.tiles-3 { grid-template-columns: repeat(2, 1fr); }
 }
 .cv-tile {
   display: flex;

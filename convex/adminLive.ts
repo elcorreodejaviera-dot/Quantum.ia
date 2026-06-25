@@ -37,6 +37,32 @@ function maskAddr(a: string): string {
   return a && a.length >= 8 ? `${a.slice(0, 4)}..${a.slice(-2)}` : a;
 }
 
+// (JAV-115) USDC libre en spot (modo unified): cuenta como colateral igual que en el portal (JAV-58),
+// donde se expone POR SEPARADO del perp (no se suman: el backend valida haircuts al operar). free =
+// total − hold de los balances USDC del spot. null si la lectura HL falla.
+async function fetchSpotUsdcFree(address: string): Promise<number | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HL_TIMEOUT_MS);
+  try {
+    const res = await fetch(hlInfoUrl(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "spotClearinghouseState", user: address }),
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    const d: any = await res.json();
+    const free = (d?.balances ?? [])
+      .filter((b: any) => b?.coin === "USDC")
+      .reduce((s: number, b: any) => s + (parseFloat(b?.total ?? "0") - parseFloat(b?.hold ?? "0")), 0);
+    return Number.isFinite(free) ? free : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export const getUserAdminLiveSnapshot = action({
   args: { userId: v.id("users") },
   handler: async (ctx, { userId }): Promise<any> => {
@@ -100,9 +126,11 @@ export const getUserAdminLiveSnapshot = action({
     let hlPartial = false;
     for (const acct of targets.hlAccounts) {
       const ch = await fetchClearinghouse(acct.tradingAccountAddress);
+      // (JAV-115) Colateral de spot (modo unified) — el USDC de spot también respalda el hedge.
+      const spotUsdcFree = await fetchSpotUsdcFree(acct.tradingAccountAddress);
       if (!ch) {
         hlPartial = true;
-        hlAccounts.push({ id: acct.id, addressMasked: maskAddr(acct.tradingAccountAddress), collateralUsd: null });
+        hlAccounts.push({ id: acct.id, addressMasked: maskAddr(acct.tradingAccountAddress), collateralUsd: null, spotUsdcFree });
         continue;
       }
       const accountValue = Number(ch?.marginSummary?.accountValue);
@@ -110,6 +138,7 @@ export const getUserAdminLiveSnapshot = action({
         id: acct.id,
         addressMasked: maskAddr(acct.tradingAccountAddress),
         collateralUsd: Number.isFinite(accountValue) ? accountValue : null,
+        spotUsdcFree,
       });
       const perCoin: Record<string, number> = {};
       const covCoin: Record<string, number> = {};

@@ -166,7 +166,8 @@ function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive, hl
         {revertTag}
         <span className="av-tag il">Cobertura HL: {lev}</span>
         {pos.armStatus && <span className="av-tag ok">{pos.armStatus}</span>}
-        {hlAccount && <span className="av-tag">Cuenta HL {hlAccount.addressMasked} · colateral {usd(hlAccount.collateralUsd)}</span>}
+        {hlAccount && <span className="av-tag">Cuenta HL {hlAccount.addressMasked} · colateral {usd(hlAccount.collateralUsd)} perp
+          {hlAccount.spotUsdcFree != null && hlAccount.spotUsdcFree > 0 && <> · <b className="av-pos-pnl">{usd(hlAccount.spotUsdcFree)}</b> spot</>}</span>}
         {pnl != null && <span className="av-pnl" style={{ marginLeft: 'auto' }}>PnL hedge <b className={pnl >= 0 ? 'av-pos-pnl' : 'av-neg-pnl'}>{pnl >= 0 ? '+' : ''}{usd(pnl)}</b></span>}
       </div>
       {hlPosition ? (

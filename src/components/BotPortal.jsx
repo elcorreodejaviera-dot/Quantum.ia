@@ -385,9 +385,10 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
     : Number.isFinite(pool.apy) ? pool.apy
     : 0;
   const tone = pool.status === 'Fuera de rango' ? 'red' : pool.status === 'Cerca del borde' ? 'amber' : 'green';
-  const hasBorrowData = pool.borrowHealth > 0;
-  const borrowTone = !hasBorrowData ? 'faint' : pool.borrowHealth < 50 ? 'red' : pool.borrowHealth < 70 ? 'amber' : 'green';
-  const borrowLabel = !hasBorrowData ? 'Sin datos' : pool.borrowHealth < 50 ? 'Riesgo alto' : pool.borrowHealth < 70 ? 'Vigilar' : 'Saludable';
+  // Señal de préstamo activo: deuda real (amountToRepay), NO borrowHealth — éste se redondea
+  // desde healthFactor (round((hf-1)×100)) y un préstamo con HF≈1.0 (cerca de liquidación) cae a 0,
+  // ocultando la barra justo cuando más importa (JAV-112).
+  const hasBorrowData = pool.amountToRepay > 0;
 
   const feeTierLabel = pool.feeTier != null ? `${(pool.feeTier / 10000).toFixed(2)}%` : null;
   const explorerBase = EXPLORER_URLS[pool.network] ?? null;
@@ -479,10 +480,9 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
         </div>
       )}
 
-      <div className={`borrow-health borrow-health-featured ${hasBorrowData ? borrowTone : 'inactive'}`}>
+      <div className={`borrow-health borrow-health-featured ${hasBorrowData ? '' : 'inactive'}`}>
         <div className="borrow-head">
           <span>Revert Lend {hasBorrowData ? '· Activo' : '· Sin apalancamiento'}</span>
-          {hasBorrowData && <strong>{borrowLabel}</strong>}
         </div>
         {hasBorrowData ? (
           <>
@@ -492,9 +492,15 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
             </div>
             <div
               className="borrow-track"
-              style={{ '--hp': `${pool.borrowHealth}%` }}
-              aria-label={`Loan health ${pool.borrowHealth}%`}
-            />
+              style={{ '--hp': `${Math.max(0, Math.min(100, (pool.healthFactor - 1) / 2 * 100))}%` }}
+              aria-label={`Loan health ${pool.healthFactor.toFixed(2)}`}
+            >
+              <div className="borrow-seg seg-red" />
+              <div className="borrow-seg seg-yellow" />
+              <div className="borrow-seg seg-green" />
+              <div className="borrow-seg seg-mint" />
+              <span className="borrow-marker" />
+            </div>
             <div className="borrow-foot">
               <span>Loan health</span>
               <span>Loan-to-value</span>
@@ -3774,7 +3780,6 @@ function Dashboard({ user, onLogout, userId }) {
         liquidity: 0,
         apr: 0,
         exposure: 0,
-        borrowHealth: 0,
         leverageRevert: 0,
         healthFactor: 0,
         amountToRepay: 0,
@@ -3797,8 +3802,7 @@ function Dashboard({ user, onLogout, userId }) {
           valueAtEntryUsd: pd.valueAtEntryUsd ?? null,         // (JAV-58 Fase D) para el PNL
           feeShareRatio: pd.feeShareRatio ?? null,             // (Fee APR concentrado) L_pos / L_activa
           feeShareStatus: pd.feeShareStatus ?? null,           // (Codex) ok|out_of_range|inconsistent|unavailable
-          ...(pd.borrowHealth > 0 ? {
-            borrowHealth: pd.borrowHealth,
+          ...(pd.amountToRepay > 0 ? {
             leverageRevert: pd.leverageRevert ?? 0,
             healthFactor: pd.healthFactor ?? 0,
             amountToRepay: pd.amountToRepay ?? 0,

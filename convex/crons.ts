@@ -75,6 +75,14 @@ crons.interval(
   internal.cronHealth.refreshPoolLifetimesWithHealth,
 );
 
+// (JAV-120) Snapshot horario de fees por posición → "Fees 24h" REAL = Δ(feesAccum) entre snapshots.
+// NO money-path; independiente del de lifetime (lee cobrable live por RPC público, sin Alchemy).
+crons.interval(
+  "snapshot pool fees",
+  { hours: 1 },
+  internal.cronHealth.snapshotPoolFeesWithHealth,
+);
+
 crons.interval(
   "prune engine events",
   { hours: 24 },

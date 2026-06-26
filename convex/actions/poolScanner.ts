@@ -155,12 +155,13 @@ async function rpcGetLogs(url: string, address: string, tokenIdTopic: string, fr
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body), signal: controller.signal,
     });
-    if (!res.ok) throw new Error(`getLogs ${url} respondió ${res.status} ${res.statusText}`);
+    // (CodeRabbit seguridad) NUNCA incluir `url` en errores/logs: contiene ALCHEMY_API_KEY.
+    if (!res.ok) throw new Error(`getLogs respondió ${res.status} ${res.statusText}`);
     const json = await res.json() as { result?: RpcLog[]; error?: { message?: string; code?: number } };
     if (json.error) throw new Error(`eth_getLogs error (${json.error.code ?? "?"}): ${json.error.message ?? ""}`);
     return json.result ?? [];
   } catch (e: unknown) {
-    if (e instanceof Error && e.name === "AbortError") throw new Error(`getLogs timeout (${RPC_TIMEOUT_MS}ms): ${url}`);
+    if (e instanceof Error && e.name === "AbortError") throw new Error(`getLogs timeout (${RPC_TIMEOUT_MS}ms)`);
     throw e;
   } finally {
     clearTimeout(timer);
@@ -612,14 +613,19 @@ export const fetchPositionLiquidity = action({
     // (JAV-117) Total generado = Σ fees cobrados (cache) + sin cobrar live, descontando el principal
     // pendiente del live (tokensOwed live incluye principal liberado por Decrease aún no cobrado).
     let feesLifetimeUsd: number | null = null;
-    if (owedRaw && (feesCollectedRaw0 != null || feesCollectedRaw1 != null || principalDebt0 != null || principalDebt1 != null)) {
+    // (CodeRabbit) Exigir los CUATRO agregados cacheados: con parciales (default "0") se subcontaría
+    // el total. Sin los cuatro → null (la UI muestra "—").
+    const hasLifetimeAggregates =
+      feesCollectedRaw0 != null && feesCollectedRaw1 != null &&
+      principalDebt0 != null && principalDebt1 != null;
+    if (owedRaw && hasLifetimeAggregates) {
       try {
-        const debt0 = BigInt(principalDebt0 ?? "0");
-        const debt1 = BigInt(principalDebt1 ?? "0");
+        const debt0 = BigInt(principalDebt0);
+        const debt1 = BigInt(principalDebt1);
         const unc0 = owedRaw.amount0Raw > debt0 ? owedRaw.amount0Raw - debt0 : 0n;
         const unc1 = owedRaw.amount1Raw > debt1 ? owedRaw.amount1Raw - debt1 : 0n;
-        const life0 = BigInt(feesCollectedRaw0 ?? "0") + unc0;
-        const life1 = BigInt(feesCollectedRaw1 ?? "0") + unc1;
+        const life0 = BigInt(feesCollectedRaw0) + unc0;
+        const life1 = BigInt(feesCollectedRaw1) + unc1;
         feesLifetimeUsd = valueFeesUsd(life0, life1, t0, t1, priceUsd);
       } catch { feesLifetimeUsd = null; }
     }

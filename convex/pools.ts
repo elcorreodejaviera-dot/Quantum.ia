@@ -252,7 +252,11 @@ function computeLifetimeAggregates(
   let debt0 = 0n, debt1 = 0n, fee0 = 0n, fee1 = 0n;
   for (const e of sorted) {
     let a0: bigint, a1: bigint;
-    try { a0 = BigInt(e.amount0Raw); a1 = BigInt(e.amount1Raw); } catch { continue; }
+    // (CodeRabbit) NO silenciar filas corruptas: un raw no parseable subcontaría los agregados sin
+    // señal. pool_fee_events es la fuente de verdad → abortar el recompute conserva el cache previo
+    // (la mutation es transaccional) en vez de persistir un total incorrecto.
+    try { a0 = BigInt(e.amount0Raw); a1 = BigInt(e.amount1Raw); }
+    catch { throw new Error(`pool_fee_events raw inválido en ${e.blockNumber}:${e.logIndex}`); }
     if (e.eventType === "decrease") {
       debt0 += a0; debt1 += a1;
     } else if (e.eventType === "collect") {
@@ -351,7 +355,10 @@ export const patchPoolLifetimeMeta = internalMutation({
     backfilledAt: v.optional(v.number()),
   },
   handler: async (ctx, { poolId, cursorBlock, status, snapshotKey, backfilledAt }) => {
-    const patch: Record<string, unknown> = { feesLifetimeCalcAt: Date.now() };
+    // (CodeRabbit) NO tocar feesLifetimeCalcAt aquí: este camino no recomputa agregados (solo avanza
+    // cursor / degrada estado) → marcar el timestamp volvería engañoso el "actualizado hace X".
+    // feesLifetimeCalcAt se setea SOLO en applyPoolFeeEventsWindow (donde sí hay recompute).
+    const patch: Record<string, unknown> = {};
     if (cursorBlock !== undefined) patch.feesLifetimeCursorBlock = cursorBlock;
     if (status !== undefined) patch.feesLifetimeStatus = status;
     if (snapshotKey !== undefined) patch.lifetimeSnapshotKey = snapshotKey;

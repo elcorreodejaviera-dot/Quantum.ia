@@ -169,11 +169,14 @@ function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive, hl
   const lifeDateStr = fmtDateShort(lifeSinceAt);
   const lifetimeUsd = live?.feesLifetimeUsd != null ? live.feesLifetimeUsd : null;
   const lifetimeStatus = live?.feesLifetimeStatus ?? p?.feesLifetimeStatus ?? null;
-  // (MEDIO-1) no_key/error → "—" (no presentar cache no refrescable como número utilizable).
-  const lifetimeUsable = lifetimeStatus !== 'no_key' && lifetimeStatus !== 'error';
-  const lifetimeVal = (lifetimeUsable && lifetimeUsd != null)
-    ? `${usd(lifetimeUsd)}${lifetimeStatus === 'stale' ? ' *' : ''}`
-    : (liveLoading ? '…' : '—');
+  // (MEDIO-1 + CodeRabbit) no_key/error → SIEMPRE "—" (estado definitivo no utilizable), incluso durante
+  // la carga: el loading no debe tapar un estado que ya sabemos no refrescable.
+  const lifetimeBlocked = lifetimeStatus === 'no_key' || lifetimeStatus === 'error';
+  const lifetimeVal = lifetimeBlocked
+    ? '—'
+    : (lifetimeUsd != null)
+      ? `${usd(lifetimeUsd)}${lifetimeStatus === 'stale' ? ' *' : ''}`
+      : (liveLoading ? '…' : '—');
   return (
     <div className="av-pos">
       <div className="av-pos-top">

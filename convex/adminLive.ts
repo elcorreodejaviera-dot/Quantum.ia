@@ -104,7 +104,13 @@ export const getUserAdminLiveSnapshot = action({
         };
       } catch {
         positionsPartial = true;
-        positions[t.botId] = { liquidityUsd: null, feesUncollectedUsd: null, feesLifetimeUsd: null, currentPrice: null, inRange: null };
+        // (CodeRabbit) Preservar el feesLifetimeStatus fresco de `t` también en el fallback, para que
+        // AdminView degrade correctamente y no caiga a un p?.feesLifetimeStatus desactualizado.
+        positions[t.botId] = {
+          liquidityUsd: null, feesUncollectedUsd: null, feesLifetimeUsd: null,
+          feesLifetimeStatus: t.feesLifetimeStatus ?? null,
+          currentPrice: null, inRange: null,
+        };
       }
     }
 

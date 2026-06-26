@@ -67,6 +67,14 @@ crons.interval(
   internal.cronHealth.processSpotDefenseRearmsWithHealth,
 );
 
+// (JAV-117) Refresco lifetime de fees por eventos on-chain (Alchemy Free + incremental). NO money-path:
+// la mayoría de las corridas no piden logs (solo avanzan cursor si la señal estructural no cambió).
+crons.interval(
+  "refresh pool lifetimes",
+  { hours: 1 },
+  internal.cronHealth.refreshPoolLifetimesWithHealth,
+);
+
 crons.interval(
   "prune engine events",
   { hours: 24 },

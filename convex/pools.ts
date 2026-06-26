@@ -237,6 +237,142 @@ export const touchPoolChecked = internalMutation({
   },
 });
 
+// =====================================================================================
+// (JAV-117) Lifetime fees — eventos on-chain como fuente de verdad + agregados cacheados.
+// =====================================================================================
+
+// Recompone los agregados raw aplicando la contabilidad principal/fee en orden cronológico.
+// Decrease suma deuda de principal; Collect paga primero esa deuda y SOLO el excedente es fee cobrada;
+// Increase no afecta (su principal sigue activo, no es cobrable). Determinista y recomputable: SIEMPRE
+// se calcula desde la tabla completa, nunca sumando sobre el agregado previo (evita doble conteo).
+function computeLifetimeAggregates(
+  events: Array<{ blockNumber: number; logIndex: number; eventType: string; amount0Raw: string; amount1Raw: string }>,
+): { feesCollectedRaw0: string; feesCollectedRaw1: string; principalDebt0: string; principalDebt1: string } {
+  const sorted = [...events].sort((a, b) => a.blockNumber - b.blockNumber || a.logIndex - b.logIndex);
+  let debt0 = 0n, debt1 = 0n, fee0 = 0n, fee1 = 0n;
+  for (const e of sorted) {
+    let a0: bigint, a1: bigint;
+    try { a0 = BigInt(e.amount0Raw); a1 = BigInt(e.amount1Raw); } catch { continue; }
+    if (e.eventType === "decrease") {
+      debt0 += a0; debt1 += a1;
+    } else if (e.eventType === "collect") {
+      const pay0 = a0 < debt0 ? a0 : debt0; debt0 -= pay0; fee0 += a0 - pay0;
+      const pay1 = a1 < debt1 ? a1 : debt1; debt1 -= pay1; fee1 += a1 - pay1;
+    }
+    // "increase": no afecta deuda ni fee cobrada.
+  }
+  return {
+    feesCollectedRaw0: fee0.toString(), feesCollectedRaw1: fee1.toString(),
+    principalDebt0: debt0.toString(), principalDebt1: debt1.toString(),
+  };
+}
+
+export const getPoolLifetimeStateInternal = internalQuery({
+  args: { id: v.id("pools") },
+  handler: async (ctx, { id }) => {
+    const pool = await ctx.db.get(id);
+    if (!pool) return null;
+    return {
+      tokenId: pool.tokenId ?? null,
+      network: pool.network,
+      poolAddress: pool.poolAddress ?? null,
+      closed: pool.closed ?? false,
+      cursorBlock: pool.feesLifetimeCursorBlock ?? null,
+      snapshotKey: pool.lifetimeSnapshotKey ?? null,
+      initialLiquidityAt: pool.initialLiquidityAt ?? null,
+    };
+  },
+});
+
+// Upsert idempotente de eventos (Convex no tiene índices únicos reales → unicidad por mutation).
+// Dedupe por lote en memoria + búsqueda por (poolId, txHash, logIndex) antes de insertar.
+export const upsertPoolFeeEvents = internalMutation({
+  args: {
+    poolId: v.id("pools"),
+    events: v.array(v.object({
+      txHash: v.string(),
+      logIndex: v.number(),
+      blockNumber: v.number(),
+      blockHash: v.string(),
+      eventType: v.union(v.literal("increase"), v.literal("decrease"), v.literal("collect")),
+      amount0Raw: v.string(),
+      amount1Raw: v.string(),
+    })),
+  },
+  handler: async (ctx, { poolId, events }) => {
+    const seen = new Set<string>();
+    let inserted = 0;
+    for (const e of events) {
+      const key = `${e.txHash}:${e.logIndex}`;
+      if (seen.has(key)) continue;   // dedupe por lote
+      seen.add(key);
+      const existing = await ctx.db
+        .query("pool_fee_events")
+        .withIndex("by_pool_log", q => q.eq("poolId", poolId).eq("txHash", e.txHash).eq("logIndex", e.logIndex))
+        .first();
+      if (existing) continue;        // idempotente: ya aplicado
+      await ctx.db.insert("pool_fee_events", { poolId, ...e });
+      inserted++;
+    }
+    return { inserted };
+  },
+});
+
+// Limpieza anti-reorg: borra los eventos del pool con blockNumber >= fromBlock antes de reinsertar la
+// rama canónica. Evita logs huérfanos de una rama reorganizada (no basta con > latest−confirmations).
+export const deletePoolFeeEventsFromBlock = internalMutation({
+  args: { poolId: v.id("pools"), fromBlock: v.number() },
+  handler: async (ctx, { poolId, fromBlock }) => {
+    const stale = await ctx.db
+      .query("pool_fee_events")
+      .withIndex("by_pool_block", q => q.eq("poolId", poolId).gte("blockNumber", fromBlock))
+      .collect();
+    for (const ev of stale) await ctx.db.delete(ev._id);
+    return { deleted: stale.length };
+  },
+});
+
+// Recomputa los agregados raw DESDE LA TABLA (fuente de verdad) y persiste cursor/estado. Se llama tras
+// upsert de eventos. snapshotKey/status opcionales se patchean si vienen.
+export const recomputePoolLifetimeAggregates = internalMutation({
+  args: {
+    poolId: v.id("pools"),
+    cursorBlock: v.optional(v.number()),
+    status: v.optional(v.union(v.literal("ok"), v.literal("stale"), v.literal("no_key"), v.literal("error"))),
+    snapshotKey: v.optional(v.string()),
+  },
+  handler: async (ctx, { poolId, cursorBlock, status, snapshotKey }) => {
+    const events = await ctx.db
+      .query("pool_fee_events")
+      .withIndex("by_pool_block", q => q.eq("poolId", poolId))
+      .collect();
+    const agg = computeLifetimeAggregates(events);
+    const patch: Record<string, unknown> = { ...agg, feesLifetimeCalcAt: Date.now() };
+    if (cursorBlock !== undefined) patch.feesLifetimeCursorBlock = cursorBlock;
+    if (status !== undefined) patch.feesLifetimeStatus = status;
+    if (snapshotKey !== undefined) patch.lifetimeSnapshotKey = snapshotKey;
+    await ctx.db.patch(poolId, patch);
+    return { events: events.length, ...agg };
+  },
+});
+
+// Camino "sin getLogs" (sin cambio estructural): solo avanza cursor + snapshot + estado, sin tocar agregados.
+export const patchPoolLifetimeMeta = internalMutation({
+  args: {
+    poolId: v.id("pools"),
+    cursorBlock: v.optional(v.number()),
+    status: v.optional(v.union(v.literal("ok"), v.literal("stale"), v.literal("no_key"), v.literal("error"))),
+    snapshotKey: v.optional(v.string()),
+  },
+  handler: async (ctx, { poolId, cursorBlock, status, snapshotKey }) => {
+    const patch: Record<string, unknown> = { feesLifetimeCalcAt: Date.now() };
+    if (cursorBlock !== undefined) patch.feesLifetimeCursorBlock = cursorBlock;
+    if (status !== undefined) patch.feesLifetimeStatus = status;
+    if (snapshotKey !== undefined) patch.lifetimeSnapshotKey = snapshotKey;
+    await ctx.db.patch(poolId, patch);
+  },
+});
+
 export const updatePool = mutation({
   args: {
     id: v.id("pools"),

@@ -100,6 +100,23 @@ function CronHealthPanel({ rows }) {
   );
 }
 
+// (JAV-117) Duración compacta de la vida del pool ("12d", "3d 4h", "5h", "<1h") + fecha corta.
+function fmtLifetime(sinceMs) {
+  if (!Number.isFinite(sinceMs) || sinceMs <= 0) return null;
+  const diff = Date.now() - sinceMs;
+  if (!(diff > 0)) return '<1h';
+  const h = Math.floor(diff / 3_600_000);
+  const d = Math.floor(h / 24);
+  if (d >= 1) { const rh = h - d * 24; return rh > 0 && d < 10 ? `${d}d ${rh}h` : `${d}d`; }
+  if (h >= 1) return `${h}h`;
+  return '<1h';
+}
+function fmtDateShort(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  try { return new Date(ms).toLocaleDateString('es-ES', { day: 'numeric', month: 'short' }); }
+  catch { return null; }
+}
+
 function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive, hlPosition, hlUnavailable, hlShared }) {
   const p = pos.pool;
   const lev = pos.kind === 'il' ? `IL short ${pos.leverage ?? '?'}×` : `${pos.direction ?? ''} ${pos.leverage ?? '?'}×`;
@@ -145,6 +162,16 @@ function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive, hl
   const covRatio = (hedgeNotional != null && lpExposure != null && lpExposure > 0) ? hedgeNotional / lpExposure : null;
   const covCls = covRatio == null ? '' : Math.abs(covRatio - 1) <= 0.25 ? 'av-pos-pnl' : 'av-amber';
   const sym = pos.baseAsset ?? '';
+  // (JAV-117) Tiempo de vida (vida total) + total generado en fees. lifeSinceAt viene de getUserDetail
+  // (initialLiquidityAt ?? _creationTime); el USD lifetime del snapshot live (adminLive).
+  const lifeSinceAt = p?.lifeSinceAt ?? null;
+  const lifetimeStr = fmtLifetime(lifeSinceAt);
+  const lifeDateStr = fmtDateShort(lifeSinceAt);
+  const lifetimeUsd = live?.feesLifetimeUsd != null ? live.feesLifetimeUsd : null;
+  const lifetimeStatus = live?.feesLifetimeStatus ?? p?.feesLifetimeStatus ?? null;
+  const lifetimeVal = lifetimeUsd != null
+    ? `${usd(lifetimeUsd)}${lifetimeStatus === 'stale' ? ' *' : ''}`
+    : (liveLoading ? '…' : '—');
   return (
     <div className="av-pos">
       <div className="av-pos-top">
@@ -161,6 +188,13 @@ function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive, hl
         <div className="av-cell"><div className="k">Rango</div><div className="vv">{p ? `${fmtPrice(p.minRange)} – ${fmtPrice(p.maxRange)}` : '—'}</div></div>
         <div className="av-cell"><div className="k">{feesLabel}</div><div className="vv">{feesVal}</div></div>
         <div className="av-cell"><div className="k">Cobertura (cap)</div><div className="vv">{coverageVal}</div></div>
+        <div className="av-cell" title={lifeDateStr ? `Vida total desde ${lifeDateStr}` : 'Vida total de la posición'}>
+          <div className="k">Tiempo de vida</div>
+          <div className="vv">{lifetimeStr ? `${lifetimeStr}${lifeDateStr ? ` · ${lifeDateStr}` : ''}` : '—'}</div>
+        </div>
+        <div className="av-cell" title="Fees generados en toda la vida del pool (cobrados + sin cobrar). * = histórico actualizándose.">
+          <div className="k">Total generado</div><div className="vv">{lifetimeVal}</div>
+        </div>
       </div>
       <div className="av-pos-foot">
         {revertTag}

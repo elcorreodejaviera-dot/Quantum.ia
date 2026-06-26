@@ -142,6 +142,14 @@ export const processSpotDefenseRearmsWithHealth = internalAction({
     () => ctx.runAction(internal.spotDefenseEngine.processSpotDefenseRearms, {})),
 });
 
+// (JAV-117) Refresco lifetime de fees (best-effort): mantiene el "total generado" al día por eventos
+// on-chain. NO es money-path; su fallo no afecta cobertura ni órdenes.
+export const refreshPoolLifetimesWithHealth = internalAction({
+  args: {},
+  handler: async (ctx): Promise<any> => withCronHealth(ctx, "refresh pool lifetimes",
+    () => ctx.runAction(internal.actions.poolScanner.refreshAllPoolLifetimes, {})),
+});
+
 // (OBS-3b) Poda diaria de engine_events (best-effort vía withCronHealth, no afecta money-path).
 export const pruneEngineEventsWithHealth = internalAction({
   args: {},

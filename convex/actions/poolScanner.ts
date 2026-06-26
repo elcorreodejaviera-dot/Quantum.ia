@@ -32,6 +32,40 @@ const RPC: Record<string, string[]> = {
   Base:     ["https://base-rpc.publicnode.com", "https://base.drpc.org", "https://mainnet.base.org"],
 };
 
+// (JAV-117) Alchemy SOLO para eth_getLogs (histórico de eventos). El eth_call en tiempo real sigue en
+// los RPC públicos de arriba. Subdominio por red; la MISMA API key (ALCHEMY_API_KEY) sirve para todas.
+const ALCHEMY_SUBDOMAIN: Record<string, string> = {
+  Ethereum: "eth-mainnet",
+  Arbitrum: "arb-mainnet",
+  Optimism: "opt-mainnet",
+  Base:     "base-mainnet",
+};
+
+// topic0 de los eventos del NonfungiblePositionManager (tokenId es indexed = topic1 en los tres).
+// En los tres, data = [ (liquidity|recipient), amount0, amount1 ] → amount0 en word 1, amount1 en word 2.
+const TOPIC_INCREASE = "0x3067048beee31b25b2f1681f88dac838c8bba36af25bfb2b7cf7473a5847e35f"; // IncreaseLiquidity(uint256,uint128,uint256,uint256)
+const TOPIC_DECREASE = "0x26f6a048ee9138f2c0ce266f322cb99228e8d619ae2bff30c67f8dcf9d2377b4"; // DecreaseLiquidity(uint256,uint128,uint256,uint256)
+const TOPIC_COLLECT  = "0x40d0efd1a53d60ecbf40971b9daf7dc90178c3aadc7aab1765632738fa8b8f01"; // Collect(uint256,address,uint256,uint256)
+const TOPIC_TO_TYPE: Record<string, "increase" | "decrease" | "collect"> = {
+  [TOPIC_INCREASE]: "increase",
+  [TOPIC_DECREASE]: "decrease",
+  [TOPIC_COLLECT]:  "collect",
+};
+
+// Margen anti-reorg por red: bloques desde el head que NO consideramos finalizados. L2s reorganizan;
+// se re-escanea una ventana y se borran/recalculan los logs >= fromBlock antes de reinsertar.
+const CONFIRMATIONS: Record<string, number> = {
+  Ethereum: 12,
+  Arbitrum: 20,
+  Optimism: 20,
+  Base:     20,
+};
+
+// Alchemy Free limita eth_getLogs a rangos de 10 bloques. Chunking + presupuesto duro por corrida; lo
+// no alcanzado queda `stale` y continúa el próximo ciclo (decisión C). PAYG admite rangos mayores.
+const ALCHEMY_GETLOGS_MAX_RANGE = 10;
+const GETLOGS_MAX_CHUNKS_PER_RUN = 40;   // presupuesto: ≤40 requests/posición/corrida (≈400 bloques)
+
 const STABLES = new Set(["USDC", "USDT", "DAI", "BUSD", "FRAX", "LUSD", "USDC.e", "USDbC"]);
 const NORMALIZE: Record<string, string> = { WETH: "ETH", WBTC: "BTC" };
 function norm(sym: string): string { return NORMALIZE[sym] ?? sym; }
@@ -88,6 +122,88 @@ async function rpcCallWithFallback(urls: string[], to: string, data: string, fro
     }
   }
   throw revertErr ?? lastErr;
+}
+
+// (JAV-117) URL de Alchemy por red desde ALCHEMY_API_KEY. null si falta la key o la red no está mapeada
+// (la feature degrada a estado `no_key`, sin romper el scanner). SOLO para eth_getLogs.
+function alchemyUrl(network: string): string | null {
+  const key = process.env.ALCHEMY_API_KEY;
+  const sub = ALCHEMY_SUBDOMAIN[network];
+  if (!key || !sub) return null;
+  return `https://${sub}.g.alchemy.com/v2/${key}`;
+}
+
+type RpcLog = { transactionHash: string; logIndex: string; blockNumber: string; blockHash: string; topics: string[]; data: string };
+
+// eth_getLogs vía Alchemy. fromBlock/toBlock en número decimal (se convierten a hex). Filtra por
+// address (NFT manager) + topic0 (los 3 eventos como OR) + topic1 (tokenId indexed) → trae solo los
+// eventos de esa posición. Lanza en fallo de transporte; el caller decide stale/error.
+async function rpcGetLogs(url: string, address: string, tokenIdTopic: string, fromBlock: number, toBlock: number): Promise<RpcLog[]> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
+  try {
+    const body = {
+      jsonrpc: "2.0", method: "eth_getLogs", id: 1,
+      params: [{
+        address,
+        fromBlock: "0x" + fromBlock.toString(16),
+        toBlock: "0x" + toBlock.toString(16),
+        topics: [[TOPIC_INCREASE, TOPIC_DECREASE, TOPIC_COLLECT], tokenIdTopic],
+      }],
+    };
+    const res = await fetch(url, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body), signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`getLogs ${url} respondió ${res.status} ${res.statusText}`);
+    const json = await res.json() as { result?: RpcLog[]; error?: { message?: string; code?: number } };
+    if (json.error) throw new Error(`eth_getLogs error (${json.error.code ?? "?"}): ${json.error.message ?? ""}`);
+    return json.result ?? [];
+  } catch (e: unknown) {
+    if (e instanceof Error && e.name === "AbortError") throw new Error(`getLogs timeout (${RPC_TIMEOUT_MS}ms): ${url}`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Bloque actual de la cadena (eth_blockNumber) vía RPC público (no consume Alchemy).
+async function getLatestBlock(rpcs: string[]): Promise<number | null> {
+  for (const url of rpcs) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
+      try {
+        const res = await fetch(url, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", method: "eth_blockNumber", id: 1 }), signal: controller.signal,
+        });
+        if (!res.ok) continue;
+        const json = await res.json() as { result?: string };
+        if (json.result) { const n = Number(BigInt(json.result)); if (Number.isFinite(n) && n > 0) return n; }
+      } finally { clearTimeout(timer); }
+    } catch { /* siguiente RPC */ }
+  }
+  return null;
+}
+
+// (JAV-117) Snapshot estructural de positions(): liquidity + feeGrowthInside0/1Last + tokensOwed0/1
+// ALMACENADOS (slots 7..11). Estos solo cambian al modificar la posición (Increase/Decrease/Collect),
+// NO con la acumulación pasiva de fees → key igual ⟺ no hubo evento desde el último ciclo.
+async function readPositionSnapshotKey(rpcs: string[], nft: string, tokenId: number): Promise<string | null> {
+  let posRaw: string;
+  try {
+    posRaw = (await rpcCallWithFallback(rpcs, nft, "0x99fbab88" + pad(BigInt(tokenId)))).slice(2);
+  } catch { return null; }
+  if (posRaw.length < 64 * 12) return null;
+  try {
+    const liquidity = uintAt(posRaw, 7);
+    const fg0 = uintAt(posRaw, 8);
+    const fg1 = uintAt(posRaw, 9);
+    const owed0 = uintAt(posRaw, 10);
+    const owed1 = uintAt(posRaw, 11);
+    return `${liquidity}|${fg0}|${fg1}|${owed0}|${owed1}`;
+  } catch { return null; }
 }
 
 // Estado on-chain de una posición LP, discriminado para el cron de cierre.
@@ -269,35 +385,42 @@ export const scanPoolByTokenId = action({
 // --- F1: fees acumulados SIN COBRAR de la posición (real-time) ---
 const MAX_U128 = (1n << 128n) - 1n;
 
-// Bloque INDEPENDIENTE (Codex): no depende del flujo/early-returns de la liquidez. Vía PRIMARIA =
-// collect() simulado por eth_call. collect() con liquidez hace pool.burn(...,0) interno (poke),
-// relee feeGrowthInside y suma el incremento → devuelve el cobrable ACTUAL (no un checkpoint viejo).
-// Simulación sin persistencia (eth_call con from=owner para el guard isAuthorizedForToken).
-// Devuelve USD o null (null = no leído con fiabilidad; NUNCA un número inventado).
-async function fetchUncollectedFeesUsd(
-  rpcs: string[], nft: string, tokenId: number,
+// (JAV-117 MED #1) Valuación USD de un par de cantidades raw de fees (uint128) con la MISMA lógica
+// invert que liquidityUsd (token0 estable → base = token1). Compartida por uncollected y lifetime.
+// Devuelve USD o null (metadata dudosa / invert ambiguo / no finito → null, nunca inventa).
+function valueFeesUsd(
+  amount0Raw: bigint, amount1Raw: bigint,
   t0: { symbol: string; decimals: number; ok: boolean },
   t1: { symbol: string; decimals: number; ok: boolean },
   priceUsd: number,
-): Promise<number | null> {
-  try {
-    if (!Number.isFinite(priceUsd) || priceUsd <= 0) return null;
-    // Metadata sin defaults silenciosos: decimals/símbolo deben ser fiables o no convertimos.
-    if (!t0.ok || !t1.ok) return null;
-    // invert ESTRICTO: exactamente UNO de los dos debe ser stablecoin conocido (si no, no se puede
-    // saber cuál es el activo base que cotiza priceUsd → null).
-    const stable0 = STABLES.has(t0.symbol);
-    const stable1 = STABLES.has(t1.symbol);
-    if (stable0 === stable1) return null;
-    const invert = stable0;
+): number | null {
+  if (!Number.isFinite(priceUsd) || priceUsd <= 0) return null;
+  if (!t0.ok || !t1.ok) return null;
+  const stable0 = STABLES.has(t0.symbol);
+  const stable1 = STABLES.has(t1.symbol);
+  if (stable0 === stable1) return null;   // exactamente UNO debe ser stable
+  const invert = stable0;
+  const fees0 = Number(amount0Raw) / Math.pow(10, t0.decimals);
+  const fees1 = Number(amount1Raw) / Math.pow(10, t1.decimals);
+  if (!Number.isFinite(fees0) || !Number.isFinite(fees1)) return null;
+  const feesUsd = invert ? fees0 + fees1 * priceUsd : fees0 * priceUsd + fees1;
+  if (!Number.isFinite(feesUsd) || feesUsd < 0) return null;
+  return Math.round(feesUsd * 100) / 100;
+}
 
-    // owner (ownerOf) para el guard de collect; la simulación no transfiere nada.
+// (JAV-117 MED #1) Cantidades RAW (uint128) de fees cobrables AHORA (tokensOwed live) vía collect()
+// simulado. collect() con liquidez hace pool.burn(...,0) (poke) → relee feeGrowthInside → devuelve el
+// cobrable ACTUAL, no un checkpoint viejo. Simulación sin persistencia (from=owner para el guard).
+// Devuelve {amount0Raw, amount1Raw} o null (fallo RPC/decodificación/corrupto → null, nunca 0 inventado).
+async function fetchUncollectedFeesRaw(
+  rpcs: string[], nft: string, tokenId: number,
+): Promise<{ amount0Raw: bigint; amount1Raw: bigint } | null> {
+  try {
     const ownerRaw = (await rpcCallWithFallback(rpcs, nft, "0x6352211e" + pad(BigInt(tokenId)))).slice(2);
     if (ownerRaw.length < 64) return null;
     const owner = "0x" + ownerRaw.slice(24);
 
-    // collect((uint256 tokenId, address recipient, uint128 amount0Max, uint128 amount1Max)).
-    // Struct de campos estáticos → ABI inline. selector collect(...) = 0xfc6f7865.
+    // collect((uint256 tokenId, address recipient, uint128 amount0Max, uint128 amount1Max)) = 0xfc6f7865.
     const data = "0xfc6f7865"
       + pad(BigInt(tokenId))
       + owner.slice(2).padStart(64, "0")
@@ -305,21 +428,26 @@ async function fetchUncollectedFeesUsd(
       + pad(MAX_U128);
     const res = (await rpcCallWithFallback(rpcs, nft, data, owner)).slice(2);
     if (res.length < 128) return null;
-    const amount0 = uintAt(res, 0);
-    const amount1 = uintAt(res, 1);
-    // Cota natural: los fees cobrables caben en uint128. Fuera de [0, 2^128) = dato corrupto.
-    if (amount0 > MAX_U128 || amount1 > MAX_U128) return null;
-
-    const fees0 = Number(amount0) / Math.pow(10, t0.decimals);
-    const fees1 = Number(amount1) / Math.pow(10, t1.decimals);
-    if (!Number.isFinite(fees0) || !Number.isFinite(fees1)) return null;
-    // USD con la MISMA lógica invert que liquidityUsd (token0 estable → base = token1).
-    const feesUsd = invert ? fees0 + fees1 * priceUsd : fees0 * priceUsd + fees1;
-    if (!Number.isFinite(feesUsd) || feesUsd < 0) return null;
-    return Math.round(feesUsd * 100) / 100;
+    const amount0Raw = uintAt(res, 0);
+    const amount1Raw = uintAt(res, 1);
+    // Cota natural: caben en uint128. Fuera de [0, 2^128) = dato corrupto.
+    if (amount0Raw > MAX_U128 || amount1Raw > MAX_U128) return null;
+    return { amount0Raw, amount1Raw };
   } catch {
     return null; // cualquier fallo de RPC/decodificación → sin dato (no 0)
   }
+}
+
+// Wrapper de compatibilidad: USD de fees sin cobrar (consumidores existentes intactos).
+async function fetchUncollectedFeesUsd(
+  rpcs: string[], nft: string, tokenId: number,
+  t0: { symbol: string; decimals: number; ok: boolean },
+  t1: { symbol: string; decimals: number; ok: boolean },
+  priceUsd: number,
+): Promise<number | null> {
+  const raw = await fetchUncollectedFeesRaw(rpcs, nft, tokenId);
+  if (!raw) return null;
+  return valueFeesUsd(raw.amount0Raw, raw.amount1Raw, t0, t1, priceUsd);
 }
 
 // --- G3 (sizing de CAPITAL REAL): metadata ESTRICTA y lectura que FALLA CERRADO ---
@@ -436,8 +564,16 @@ export const fetchPositionNotionalStrict = internalAction({
 export const fetchPositionLiquidity = action({
   // (JAV-58 Fase D) entryPriceUsd opcional: con la MISMA lectura de L/rango se hace una 2ª valuación
   // al precio de entrada para el PNL. Read-only; no toca ejecución/margen.
-  args: { tokenId: v.number(), network: v.string(), priceUsd: v.number(), poolAddress: v.optional(v.string()), entryPriceUsd: v.optional(v.number()) },
-  handler: async (ctx, { tokenId, network, priceUsd, poolAddress: knownPoolAddress, entryPriceUsd }) => {
+  // (JAV-117) Agregados lifetime cacheados (raw) opcionales: si vienen, se devuelve feesLifetimeUsd =
+  // valuar(feesCollectedRaw + max(0, tokensOwedLive − principalDebt)) a precio spot. Solo display.
+  args: {
+    tokenId: v.number(), network: v.string(), priceUsd: v.number(),
+    poolAddress: v.optional(v.string()), entryPriceUsd: v.optional(v.number()),
+    feesCollectedRaw0: v.optional(v.string()), feesCollectedRaw1: v.optional(v.string()),
+    principalDebt0: v.optional(v.string()), principalDebt1: v.optional(v.string()),
+  },
+  handler: async (ctx, { tokenId, network, priceUsd, poolAddress: knownPoolAddress, entryPriceUsd,
+    feesCollectedRaw0, feesCollectedRaw1, principalDebt0, principalDebt1 }) => {
     await requireAuth(ctx);   // (JAV-38 #8) no consumir RPC/cuota sin auth
     const rpcs = RPC[network];
     const nft  = NFT_MANAGER[network];
@@ -469,9 +605,26 @@ export const fetchPositionLiquidity = action({
 
     // Bloque INDEPENDIENTE de fees: no depende del flujo/early-returns de la liquidez ni del
     // orden de su cálculo. Su propio try/catch interno → null si algo falla (no degrada liquidez).
-    const feesUncollectedUsd = await fetchUncollectedFeesUsd(rpcs, nft, tokenId, t0, t1, priceUsd);
+    // (JAV-117) Una sola lectura raw del cobrable live sirve para uncollected USD y lifetime USD.
+    const owedRaw = await fetchUncollectedFeesRaw(rpcs, nft, tokenId);
+    const feesUncollectedUsd = owedRaw ? valueFeesUsd(owedRaw.amount0Raw, owedRaw.amount1Raw, t0, t1, priceUsd) : null;
 
-    if (liqRaw === 0n) return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd };
+    // (JAV-117) Total generado = Σ fees cobrados (cache) + sin cobrar live, descontando el principal
+    // pendiente del live (tokensOwed live incluye principal liberado por Decrease aún no cobrado).
+    let feesLifetimeUsd: number | null = null;
+    if (owedRaw && (feesCollectedRaw0 != null || feesCollectedRaw1 != null || principalDebt0 != null || principalDebt1 != null)) {
+      try {
+        const debt0 = BigInt(principalDebt0 ?? "0");
+        const debt1 = BigInt(principalDebt1 ?? "0");
+        const unc0 = owedRaw.amount0Raw > debt0 ? owedRaw.amount0Raw - debt0 : 0n;
+        const unc1 = owedRaw.amount1Raw > debt1 ? owedRaw.amount1Raw - debt1 : 0n;
+        const life0 = BigInt(feesCollectedRaw0 ?? "0") + unc0;
+        const life1 = BigInt(feesCollectedRaw1 ?? "0") + unc1;
+        feesLifetimeUsd = valueFeesUsd(life0, life1, t0, t1, priceUsd);
+      } catch { feesLifetimeUsd = null; }
+    }
+
+    if (liqRaw === 0n) return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd, feesLifetimeUsd };
 
     // Usar poolAddress ya conocido para evitar la llamada al factory (ahorra 1 RPC)
     let sp: number;
@@ -486,7 +639,7 @@ export const fetchPositionLiquidity = action({
         const poolRaw = (await rpcCallWithFallback(rpcs, factory, getPoolData)).slice(2);
         poolAddr = ("0x" + poolRaw.slice(24)).toLowerCase();
       }
-      if (poolAddr === "0x0000000000000000000000000000000000000000") return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd };
+      if (poolAddr === "0x0000000000000000000000000000000000000000") return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd, feesLifetimeUsd };
       const s0 = (await rpcCallWithFallback(rpcs, poolAddr, "0x3850c7bd")).slice(2);
       sp = Number(uintAt(s0, 0)) / 2 ** 96;
       // (Fee APR concentrado) liquidity() = 0x1a686502 → liquidez activa en-rango. OPCIONAL: si falla
@@ -495,14 +648,14 @@ export const fetchPositionLiquidity = action({
         const liqActiveRaw = (await rpcCallWithFallback(rpcs, poolAddr, "0x1a686502")).slice(2);
         poolActiveLiq = Number(uintAt(liqActiveRaw, 0));
       } catch { /* sin liquidez activa → fee APR pool-wide */ }
-    } catch { return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd }; }
+    } catch { return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd, feesLifetimeUsd }; }
 
-    if (!Number.isFinite(sp) || sp <= 0) return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd };
+    if (!Number.isFinite(sp) || sp <= 0) return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd, feesLifetimeUsd };
 
     // Sqrt prices at tick bounds (raw, not decimal-adjusted — same units as sp)
     const sa = Math.sqrt(Math.pow(1.0001, tickLower));
     const sb = Math.sqrt(Math.pow(1.0001, tickUpper));
-    if (sa >= sb) return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd };
+    if (sa >= sb) return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd, feesLifetimeUsd };
 
     const L = Number(liqRaw);
     // (Fee APR concentrado) Fracción de la liquidez ACTIVA del pool que es de esta posición → el front
@@ -548,7 +701,7 @@ export const fetchPositionLiquidity = action({
       ? amount0 + amount1 * priceUsd
       : amount0 * priceUsd + amount1;
 
-    if (!Number.isFinite(liquidityUsd) || liquidityUsd <= 0) return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd };
+    if (!Number.isFinite(liquidityUsd) || liquidityUsd <= 0) return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd, feesLifetimeUsd };
 
     const baseValue = invert ? amount1 * priceUsd : amount0 * priceUsd;
     const exposure = Math.min(1, Math.max(0, baseValue / liquidityUsd));
@@ -633,6 +786,7 @@ export const fetchPositionLiquidity = action({
       liquidityUsd: Math.round(liquidityUsd * 100) / 100,
       exposure: Math.round(exposure * 1000) / 1000,
       feesUncollectedUsd,
+      feesLifetimeUsd,   // (JAV-117) total generado (cobrado + sin cobrar) o null si faltan agregados
       valueAtEntryUsd,   // (JAV-58 Fase D) para el PNL; null si no aplica
       feeShareRatio,     // (Fee APR concentrado) L_posición / L_activa del pool; solo si feeShareStatus==="ok"
       feeShareStatus,    // (Codex) "ok" | "out_of_range" | "inconsistent" | "unavailable"
@@ -732,6 +886,209 @@ export const checkAllPoolClosures = internalAction({
     }
 
     return { total: pools.length, ...counts };
+  },
+});
+
+// =====================================================================================
+// (JAV-117) Cron de refresco LIFETIME de fees — incremental con Alchemy Free + presupuesto + stale.
+// =====================================================================================
+
+// Decodifica un log de evento del NFT manager → fila de pool_fee_events. amount0 = word1, amount1 = word2
+// (en los 3 eventos el word0 es liquidity/recipient). Devuelve null si el topic0 no es de los 3 o el
+// data está malformado.
+function decodePoolFeeLog(log: RpcLog): {
+  txHash: string; logIndex: number; blockNumber: number; blockHash: string;
+  eventType: "increase" | "decrease" | "collect"; amount0Raw: string; amount1Raw: string;
+} | null {
+  try {
+    const topic0 = (log.topics?.[0] ?? "").toLowerCase();
+    const eventType = TOPIC_TO_TYPE[topic0];
+    if (!eventType) return null;
+    const data = log.data?.startsWith("0x") ? log.data.slice(2) : (log.data ?? "");
+    if (data.length < 64 * 3) return null;
+    return {
+      txHash: log.transactionHash,
+      logIndex: Number(BigInt(log.logIndex)),
+      blockNumber: Number(BigInt(log.blockNumber)),
+      blockHash: log.blockHash,
+      eventType,
+      amount0Raw: uintAt(data, 1).toString(),
+      amount1Raw: uintAt(data, 2).toString(),
+    };
+  } catch { return null; }
+}
+
+type LifetimeCategory = "skipped" | "nochange" | "updated" | "stale" | "initialized" | "unavailable" | "errored" | "no_key";
+
+// Worker AISLADO por pool. Decide entre: (a) avanzar cursor SIN getLogs si la señal estructural no
+// cambió; (b) escanear incremental (chunked + presupuesto) ante cambio; (c) inicializar cursor si es
+// la primera vez (el histórico lo rellena el back-fill externo, decisión A). ctx:any corta TS2589.
+async function refreshOnePoolLifetime(ctx: any, pool: any): Promise<LifetimeCategory> {
+  if (!pool.tokenId) return "skipped";
+  const rpcs = RPC[pool.network];
+  const nft = NFT_MANAGER[pool.network];
+  if (!rpcs || !nft) return "skipped";
+
+  const url = alchemyUrl(pool.network);
+  if (!url) {
+    if (pool.feesLifetimeStatus !== "no_key") {
+      await ctx.runMutation(internal.pools.patchPoolLifetimeMeta, { poolId: pool._id, status: "no_key" });
+    }
+    return "no_key";
+  }
+
+  const currentKey = await readPositionSnapshotKey(rpcs, nft, pool.tokenId);
+  if (currentKey == null) return "unavailable";   // RPC caído / no decodificable → no concluir
+  const latest = await getLatestBlock(rpcs);
+  if (latest == null) return "unavailable";
+  const conf = CONFIRMATIONS[pool.network] ?? 20;
+  const safeHead = latest - conf;
+  if (safeHead <= 0) return "skipped";
+
+  const cursor: number | null = pool.feesLifetimeCursorBlock ?? null;
+  const storedKey: string | null = pool.lifetimeSnapshotKey ?? null;
+
+  // Primera vez: no intentamos back-fill amplio con Free (rango enorme). Inicializamos el cursor en el
+  // safe head y marcamos `stale` (el total cobrado histórico lo rellena el script externo, decisión A).
+  if (cursor == null) {
+    await ctx.runMutation(internal.pools.patchPoolLifetimeMeta, {
+      poolId: pool._id, cursorBlock: safeHead, snapshotKey: currentKey, status: "stale",
+    });
+    return "initialized";
+  }
+
+  // Sin cambio estructural → avanzar cursor sin pedir logs (camino barato, la mayoría de las corridas).
+  if (storedKey != null && currentKey === storedKey) {
+    if (cursor < safeHead) {
+      await ctx.runMutation(internal.pools.patchPoolLifetimeMeta, {
+        poolId: pool._id, cursorBlock: safeHead, snapshotKey: currentKey, status: "ok",
+      });
+    }
+    return "nochange";
+  }
+
+  // Cambio estructural (o key desconocida) → escanear incremental, chunked por rango + presupuesto.
+  const margin = conf;   // re-escaneo anti-reorg de una ventana corta
+  const startBlock = Math.max(0, cursor + 1 - margin);
+  // Borrar logs de la ventana re-escaneada antes de reinsertar la rama canónica (anti-reorg ALTO-3).
+  await ctx.runMutation(internal.pools.deletePoolFeeEventsFromBlock, { poolId: pool._id, fromBlock: startBlock });
+
+  const tokenIdTopic = "0x" + pad(BigInt(pool.tokenId));
+  let fromBlock = startBlock;
+  let scannedTo = startBlock - 1;
+  let chunks = 0;
+  while (fromBlock <= safeHead && chunks < GETLOGS_MAX_CHUNKS_PER_RUN) {
+    const toBlock = Math.min(fromBlock + ALCHEMY_GETLOGS_MAX_RANGE - 1, safeHead);
+    let logs: RpcLog[];
+    try {
+      logs = await rpcGetLogs(url, nft, tokenIdTopic, fromBlock, toBlock);
+    } catch (e) {
+      console.error(`refreshOnePoolLifetime: getLogs falló pool ${pool._id}`, e);
+      // Persistir el progreso parcial y marcar error; el próximo ciclo continúa desde scannedTo.
+      await ctx.runMutation(internal.pools.recomputePoolLifetimeAggregates, {
+        poolId: pool._id, cursorBlock: Math.max(cursor, scannedTo), status: "error",
+      });
+      return "errored";
+    }
+    const events = logs.map(decodePoolFeeLog).filter((e: any) => e != null);
+    if (events.length) {
+      await ctx.runMutation(internal.pools.upsertPoolFeeEvents, { poolId: pool._id, events });
+    }
+    scannedTo = toBlock;
+    fromBlock = toBlock + 1;
+    chunks++;
+  }
+
+  const reachedHead = scannedTo >= safeHead;
+  // Recomputar agregados DESDE LA TABLA. snapshotKey solo se actualiza al ponerse al día (si no, el
+  // próximo ciclo seguirá viendo currentKey != storedKey y continuará el barrido pendiente → stale).
+  await ctx.runMutation(internal.pools.recomputePoolLifetimeAggregates, {
+    poolId: pool._id,
+    cursorBlock: scannedTo,
+    status: reachedHead ? "ok" : "stale",
+    ...(reachedHead ? { snapshotKey: currentKey } : {}),
+  });
+  return reachedHead ? "updated" : "stale";
+}
+
+export const refreshAllPoolLifetimes = internalAction({
+  args: {},
+  handler: async (ctx): Promise<any> => {
+    const pools = await ctx.runQuery(internal.pools.listPoolsInternal);
+    const targets = pools.filter((p: any) => p.tokenId && RPC[p.network] && NFT_MANAGER[p.network]);
+    const counts: Record<LifetimeCategory, number> = {
+      skipped: 0, nochange: 0, updated: 0, stale: 0, initialized: 0, unavailable: 0, errored: 0, no_key: 0,
+    };
+    for (let i = 0; i < targets.length; i += POOL_SCAN_CONCURRENCY) {
+      const batch = targets.slice(i, i + POOL_SCAN_CONCURRENCY);
+      const results = await Promise.allSettled(batch.map((p: any) => refreshOnePoolLifetime(ctx, p)));
+      for (const r of results) {
+        if (r.status === "fulfilled") counts[r.value]++;
+        else { counts.errored++; console.error("refreshAllPoolLifetimes: worker rechazado", r.reason); }
+      }
+    }
+    return { total: targets.length, ...counts };
+  },
+});
+
+// (JAV-117 decisión A) Back-fill HISTÓRICO puntual: reconstruye el total cobrado desde el origen leyendo
+// TODOS los eventos de la posición con un RPC de ARCHIVO de rangos amplios (Alchemy PAYG, o dRPC/Ankr vía
+// `rpcUrl`). Se dispara a MANO (dashboard Convex), no en cron. Rellena pool_fee_events + agregados + cursor
+// y deja status "ok". Idempotente: re-ejecutar no duplica (upsert por txHash+logIndex).
+const BACKFILL_MAX_RANGE = 50_000;     // archive RPC admite rangos amplios filtrando por tokenId indexed
+const BACKFILL_MAX_CHUNKS = 1_000;     // tope duro de requests por ejecución (one-off)
+export const backfillPoolLifetime = internalAction({
+  args: { poolId: v.id("pools"), fromBlock: v.optional(v.number()), rpcUrl: v.optional(v.string()) },
+  handler: async (ctx, { poolId, fromBlock, rpcUrl }): Promise<any> => {
+    const state: any = await ctx.runQuery(internal.pools.getPoolLifetimeStateInternal, { id: poolId });
+    if (!state || state.tokenId == null) return { ok: false, reason: "pool sin tokenId" };
+    const rpcs = RPC[state.network];
+    const nft = NFT_MANAGER[state.network];
+    if (!rpcs || !nft) return { ok: false, reason: "red no soportada" };
+    const url = rpcUrl ?? alchemyUrl(state.network);
+    if (!url) return { ok: false, reason: "sin RPC de archivo (pasa rpcUrl o configura ALCHEMY_API_KEY PAYG)" };
+
+    const latest = await getLatestBlock(rpcs);
+    if (latest == null) return { ok: false, reason: "no se pudo leer latestBlock" };
+    const conf = CONFIRMATIONS[state.network] ?? 20;
+    const safeHead = latest - conf;
+    if (safeHead <= 0) return { ok: false, reason: "cadena demasiado nueva" };
+
+    // Desde 0 por defecto (el filtro por tokenId indexed mantiene el resultado chico). Borra todo lo
+    // previo de la ventana para reconstruir limpio (idempotente y a prueba de re-ejecuciones).
+    const start = Math.max(0, fromBlock ?? 0);
+    await ctx.runMutation(internal.pools.deletePoolFeeEventsFromBlock, { poolId, fromBlock: start });
+
+    const tokenIdTopic = "0x" + pad(BigInt(state.tokenId));
+    let from = start;
+    let chunks = 0;
+    let totalEvents = 0;
+    while (from <= safeHead && chunks < BACKFILL_MAX_CHUNKS) {
+      const to = Math.min(from + BACKFILL_MAX_RANGE - 1, safeHead);
+      let logs: RpcLog[];
+      try {
+        logs = await rpcGetLogs(url, nft, tokenIdTopic, from, to);
+      } catch (e) {
+        console.error(`backfillPoolLifetime: getLogs falló pool ${poolId} [${from},${to}]`, e);
+        return { ok: false, reason: "getLogs falló (¿rango muy amplio para el RPC?)", scannedTo: from - 1, totalEvents };
+      }
+      const events = logs.map(decodePoolFeeLog).filter((e: any) => e != null);
+      if (events.length) {
+        await ctx.runMutation(internal.pools.upsertPoolFeeEvents, { poolId, events });
+        totalEvents += events.length;
+      }
+      from = to + 1;
+      chunks++;
+    }
+    const reachedHead = from > safeHead;
+    const currentKey = await readPositionSnapshotKey(rpcs, nft, state.tokenId);
+    await ctx.runMutation(internal.pools.recomputePoolLifetimeAggregates, {
+      poolId,
+      cursorBlock: reachedHead ? safeHead : from - 1,
+      status: reachedHead ? "ok" : "stale",
+      ...(reachedHead && currentKey ? { snapshotKey: currentKey } : {}),
+    });
+    return { ok: true, reachedHead, totalEvents, chunks, cursorBlock: reachedHead ? safeHead : from - 1 };
   },
 });
 

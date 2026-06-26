@@ -8,7 +8,7 @@
 ## Solución (gratis, un botón) — todo en `convex/actions/poolScanner.ts`
 1. **`LOGS_RPC`**: RPC públicos de archivo por red (dRPC + PublicNode), SIN API key. Se usan SOLO en el back-fill. El cron incremental sigue con Alchemy (intacto).
 2. **`getLogsAdaptive` + range-halving**: recorre `[start, safeHead]` en trozos de `BACKFILL_INITIAL_SPAN` (1M); si un proveedor rechaza el rango (`GetLogsRangeTooLargeError`: HTTP 413/400, o mensaje "range/too many results/…", o timeout) parte el trozo a la mitad y reintenta. `getLogsRangeMulti` prueba varios proveedores antes de partir. Acotado por `BACKFILL_CALL_BUDGET` (600).
-3. **Auto start-block**: si no se pasa `fromBlock`, se deriva de `initialLiquidityAt − 45 días` (margen, porque ese campo es la 1ª observación del sistema, no el mint real) vía `blockAtOrBeforeTimestamp` (búsqueda binaria con `eth_getBlockByNumber`). Sin marca temporal → `start = 0`.
+3. **Inicio = ORIGEN (bloque 0)** por defecto (fix Codex): se escanea `[0, safeHead]` en un trozo inicial y el range-halving abarata los rangos vacíos. NO se usa heurística de `initialLiquidityAt` (era 1ª observación, no mint → certificaría histórico incompleto). `fromBlock` explícito permite arrancar más arriba pero entonces **NO** se certifica histórico (queda `stale`).
 4. **`backfillAllPoolLifetimes`**: un internal action que recorre todos los pools (secuencial, acotado por `limit`) → un clic, sin args.
 
 ## Invariantes preservados (de JAV-117)

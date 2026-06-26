@@ -287,42 +287,6 @@ async function getLogsAdaptive(urls: string[], address: string, tokenIdTopic: st
   return { logs: out, complete: true };
 }
 
-// eth_getBlockByNumber → timestamp (segundos) de un bloque, o null.
-async function blockTimestamp(urls: string[], blockNum: number): Promise<number | null> {
-  for (const url of urls) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
-      try {
-        const res = await fetch(url, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jsonrpc: "2.0", method: "eth_getBlockByNumber", params: ["0x" + blockNum.toString(16), false], id: 1 }),
-          signal: controller.signal,
-        });
-        if (!res.ok) continue;
-        const json = await res.json() as { result?: { timestamp?: string } };
-        if (json.result?.timestamp) { const t = Number(BigInt(json.result.timestamp)); if (Number.isFinite(t) && t > 0) return t; }
-      } finally { clearTimeout(timer); }
-    } catch { /* siguiente */ }
-  }
-  return null;
-}
-
-// Búsqueda binaria del mayor bloque con timestamp <= targetSec (≈ el bloque al/ antes del momento dado).
-// ~log2(latest) llamadas. Devuelve 0 si no se puede resolver (back-fill caería a fromBlock 0).
-async function blockAtOrBeforeTimestamp(urls: string[], targetSec: number, latest: number): Promise<number> {
-  let lo = 0, hi = latest, ans = 0;
-  let guard = 0;
-  while (lo <= hi && guard++ < 64) {
-    const mid = Math.floor((lo + hi) / 2);
-    const ts = await blockTimestamp(urls, mid);
-    if (ts == null) return 0;   // no resoluble → conservador: desde 0 (el caller acota por presupuesto)
-    if (ts <= targetSec) { ans = mid; lo = mid + 1; }
-    else { hi = mid - 1; }
-  }
-  return ans;
-}
-
 // (JAV-117) Snapshot estructural de positions(): liquidity + feeGrowthInside0/1Last + tokensOwed0/1
 // ALMACENADOS (slots 7..11). Estos solo cambian al modificar la posición (Increase/Decrease/Collect),
 // NO con la acumulación pasiva de fees → key igual ⟺ no hubo evento desde el último ciclo.
@@ -1187,9 +1151,7 @@ export const refreshAllPoolLifetimes = internalAction({
 // API key. `fromBlock` opcional fuerza el inicio; si no, se AUTODERIVA desde initialLiquidityAt (timestamp→
 // bloque) con margen → evita escanear desde el bloque 0. `rpcUrl` opcional sobreescribe el proveedor
 // (p. ej. Alchemy PAYG). Se dispara a MANO (dashboard) o vía backfillAllPoolLifetimes. Idempotente.
-const BACKFILL_INITIAL_SPAN = 1_000_000;            // trozo inicial; el halving lo reduce si el RPC lo rechaza
-const BACKFILL_CALL_BUDGET = 600;                   // tope de getLogs por pool (one-off)
-const BACKFILL_START_MARGIN_SEC = 45 * 24 * 3600;   // margen: initialLiquidityAt es 1ª observación, no el mint
+const BACKFILL_CALL_BUDGET = 2_000;   // tope de getLogs por pool (one-off, guard anti-runaway)
 export const backfillPoolLifetime = internalAction({
   args: { poolId: v.id("pools"), fromBlock: v.optional(v.number()), rpcUrl: v.optional(v.string()) },
   handler: async (ctx, { poolId, fromBlock, rpcUrl }): Promise<any> => {
@@ -1208,24 +1170,19 @@ export const backfillPoolLifetime = internalAction({
     const safeHead = latest - conf;
     if (safeHead <= 0) return { ok: false, reason: "cadena demasiado nueva" };
 
-    // Inicio: explícito, o autoderivado desde initialLiquidityAt − margen (cubre el histórico sin ir a 0).
-    const autoStart = fromBlock == null;
-    let start: number;
-    if (!autoStart) {
-      start = Math.max(0, fromBlock as number);
-    } else if (state.initialLiquidityAt != null) {
-      const targetSec = Math.floor(state.initialLiquidityAt / 1000) - BACKFILL_START_MARGIN_SEC;
-      start = await blockAtOrBeforeTimestamp(rpcs, Math.max(0, targetSec), safeHead);
-    } else {
-      start = 0;   // sin marca temporal → desde el origen (el presupuesto/halving lo acota)
-    }
-    if (start > safeHead) start = safeHead;
+    // (Codex JAV-119) Inicio = ORIGEN (bloque 0) por defecto, para certificar histórico completo SIN
+    // heurísticas inseguras (initialLiquidityAt es la 1ª observación del sistema, no el mint on-chain).
+    // El range-halving hace barato el barrido de rangos vacíos en proveedores de rango amplio. `fromBlock`
+    // explícito permite arrancar más arriba (entonces NO se certifica histórico → queda stale).
+    const start = Math.max(0, fromBlock ?? 0);
+    if (start > safeHead) return { ok: false, reason: "start > safeHead (nada que escanear)" };
 
-    // Lectura adaptativa de TODO [start, safeHead]: si un proveedor rechaza el rango, se parte a la mitad.
+    // Lectura adaptativa de TODO [start, safeHead] en un solo trozo inicial: si un proveedor rechaza el
+    // rango, se parte a la mitad recursivamente (acotado por BACKFILL_CALL_BUDGET).
     const tokenIdTopic = "0x" + pad(BigInt(state.tokenId));
     let scan: { logs: RpcLog[]; complete: boolean };
     try {
-      scan = await getLogsAdaptive(logUrls, nft, tokenIdTopic, start, safeHead, BACKFILL_INITIAL_SPAN, BACKFILL_CALL_BUDGET);
+      scan = await getLogsAdaptive(logUrls, nft, tokenIdTopic, start, safeHead, safeHead - start + 1, BACKFILL_CALL_BUDGET);
     } catch (e) {
       console.error(`backfillPoolLifetime: getLogs falló pool ${poolId}`, e);
       return { ok: false, reason: "getLogs falló (transporte)", start };   // no mutar: cache previo intacto
@@ -1236,8 +1193,9 @@ export const backfillPoolLifetime = internalAction({
     }
 
     const staged = scan.logs.map(decodePoolFeeLog).filter((e: any) => e != null);
-    // coversHistory: autoStart cubre desde ≈creación; start===0 o backfill previo también. Solo así "ok".
-    const coversHistory = autoStart || start === 0 || state.backfilledAt != null;
+    // (Codex JAV-119) Certificar histórico (backfilledAt/ok) SOLO si se cubrió desde el ORIGEN real
+    // (start===0) o ya existía un backfill completo previo. Un start>0 explícito NO certifica → stale.
+    const coversHistory = start === 0 || state.backfilledAt != null;
     const currentKey = await readPositionSnapshotKey(rpcs, nft, state.tokenId);
     await ctx.runMutation(internal.pools.applyPoolFeeEventsWindow, {
       poolId,

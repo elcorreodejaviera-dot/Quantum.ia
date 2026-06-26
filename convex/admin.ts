@@ -184,6 +184,12 @@ export const getUserDetail = query({
           feeTier: p.feeTier ?? null,
           minRange: p.minRange, maxRange: p.maxRange,
           initialLiquidityUsd: typeof p.initialLiquidityUsd === "number" ? p.initialLiquidityUsd : null,
+          // (JAV-117) Tiempo de vida = vida total desde initialLiquidityAt (fallback _creationTime).
+          initialLiquidityAt: typeof p.initialLiquidityAt === "number" ? p.initialLiquidityAt : null,
+          lifeSinceAt: typeof p.initialLiquidityAt === "number" ? p.initialLiquidityAt : p._creationTime,
+          // (JAV-117) Estado del cache lifetime (el USD lo calcula la acción adminLive en vivo).
+          feesLifetimeStatus: p.feesLifetimeStatus ?? null,
+          feesLifetimeCalcAt: p.feesLifetimeCalcAt ?? null,
           tvl: p.tvl ?? p.subgraphTvlUsd ?? null,
           fees1d: p.fees1d ?? p.subgraphFeesUsd1d ?? null,
           closed: p.closed === true,
@@ -229,6 +235,11 @@ export const getUserLiveTargetsInternal = internalQuery({
         botId: b._id, baseAsset: b.baseAsset ?? null, hlAccountId: b.hlAccountId ?? null,
         poolId: p._id, tokenId: p.tokenId, network: p.network,
         poolAddress: p.poolAddress ?? null, minRange: p.minRange, maxRange: p.maxRange,
+        // (JAV-117) Agregados lifetime cacheados (raw) → la acción adminLive los pasa a
+        // fetchPositionLiquidity para calcular feesLifetimeUsd en vivo (valuación a spot).
+        feesCollectedRaw0: p.feesCollectedRaw0 ?? null, feesCollectedRaw1: p.feesCollectedRaw1 ?? null,
+        principalDebt0: p.principalDebt0 ?? null, principalDebt1: p.principalDebt1 ?? null,
+        feesLifetimeStatus: p.feesLifetimeStatus ?? null,
       });
       if (positions.length >= MAX_LIVE_POSITIONS) break;
     }

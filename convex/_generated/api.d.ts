@@ -35,6 +35,8 @@ import type * as migrations from "../migrations.js";
 import type * as plans from "../plans.js";
 import type * as pools from "../pools.js";
 import type * as seed from "../seed.js";
+import type * as spotDefenseBots from "../spotDefenseBots.js";
+import type * as spotDefenseEngine from "../spotDefenseEngine.js";
 import type * as spotGridActions from "../spotGridActions.js";
 import type * as spotGridBots from "../spotGridBots.js";
 import type * as spotGridEngine from "../spotGridEngine.js";
@@ -82,6 +84,8 @@ declare const fullApi: ApiFromModules<{
   plans: typeof plans;
   pools: typeof pools;
   seed: typeof seed;
+  spotDefenseBots: typeof spotDefenseBots;
+  spotDefenseEngine: typeof spotDefenseEngine;
   spotGridActions: typeof spotGridActions;
   spotGridBots: typeof spotGridBots;
   spotGridEngine: typeof spotGridEngine;

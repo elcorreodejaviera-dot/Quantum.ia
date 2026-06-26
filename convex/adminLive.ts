@@ -74,6 +74,7 @@ export const getUserAdminLiveSnapshot = action({
         });
         let liquidityUsd: number | null = null;
         let feesUncollectedUsd: number | null = null;
+        let feesLifetimeUsd: number | null = null;   // (JAV-117) total generado (cobrado + sin cobrar)
         // (Fase 4) Revert Finance Lend (de la MISMA llamada). leverageRevert = LTV% (no multiplicador).
         let revertLtv: number | null = null, healthFactor: number | null = null, borrowHealth: number | null = null;
         let revertVaultActive = false, revertLoanKnown = false;
@@ -81,9 +82,13 @@ export const getUserAdminLiveSnapshot = action({
           const liq: any = await ctx.runAction(api.actions.poolScanner.fetchPositionLiquidity, {
             tokenId: t.tokenId, network: t.network, priceUsd: scan.currentPrice,
             poolAddress: t.poolAddress ?? undefined,
+            // (JAV-117) agregados cacheados → feesLifetimeUsd en vivo (valuación a spot).
+            feesCollectedRaw0: t.feesCollectedRaw0 ?? undefined, feesCollectedRaw1: t.feesCollectedRaw1 ?? undefined,
+            principalDebt0: t.principalDebt0 ?? undefined, principalDebt1: t.principalDebt1 ?? undefined,
           });
           liquidityUsd = Number.isFinite(liq?.liquidityUsd) ? liq.liquidityUsd : null;
           feesUncollectedUsd = typeof liq?.feesUncollectedUsd === "number" ? liq.feesUncollectedUsd : null;
+          feesLifetimeUsd = typeof liq?.feesLifetimeUsd === "number" ? liq.feesLifetimeUsd : null;
           revertLtv = Number.isFinite(liq?.leverageRevert) ? liq.leverageRevert : null;
           healthFactor = Number.isFinite(liq?.healthFactor) ? liq.healthFactor : null;
           borrowHealth = Number.isFinite(liq?.borrowHealth) ? liq.borrowHealth : null;
@@ -91,14 +96,21 @@ export const getUserAdminLiveSnapshot = action({
           revertLoanKnown = liq?.revertLoanKnown === true;
         }
         positions[t.botId] = {
-          liquidityUsd, feesUncollectedUsd, revertLtv, healthFactor, borrowHealth,
+          liquidityUsd, feesUncollectedUsd, feesLifetimeUsd, revertLtv, healthFactor, borrowHealth,
           revertVaultActive, revertLoanKnown,
+          feesLifetimeStatus: t.feesLifetimeStatus ?? null,
           currentPrice: scan?.currentPrice ?? null,
           inRange: scan?.status === "En rango" ? true : scan?.status === "Fuera de rango" ? false : null,
         };
       } catch {
         positionsPartial = true;
-        positions[t.botId] = { liquidityUsd: null, feesUncollectedUsd: null, currentPrice: null, inRange: null };
+        // (CodeRabbit) Preservar el feesLifetimeStatus fresco de `t` también en el fallback, para que
+        // AdminView degrade correctamente y no caiga a un p?.feesLifetimeStatus desactualizado.
+        positions[t.botId] = {
+          liquidityUsd: null, feesUncollectedUsd: null, feesLifetimeUsd: null,
+          feesLifetimeStatus: t.feesLifetimeStatus ?? null,
+          currentPrice: null, inRange: null,
+        };
       }
     }
 

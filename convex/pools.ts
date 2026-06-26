@@ -237,6 +237,136 @@ export const touchPoolChecked = internalMutation({
   },
 });
 
+// =====================================================================================
+// (JAV-117) Lifetime fees — eventos on-chain como fuente de verdad + agregados cacheados.
+// =====================================================================================
+
+// Recompone los agregados raw aplicando la contabilidad principal/fee en orden cronológico.
+// Decrease suma deuda de principal; Collect paga primero esa deuda y SOLO el excedente es fee cobrada;
+// Increase no afecta (su principal sigue activo, no es cobrable). Determinista y recomputable: SIEMPRE
+// se calcula desde la tabla completa, nunca sumando sobre el agregado previo (evita doble conteo).
+function computeLifetimeAggregates(
+  events: Array<{ blockNumber: number; logIndex: number; eventType: string; amount0Raw: string; amount1Raw: string }>,
+): { feesCollectedRaw0: string; feesCollectedRaw1: string; principalDebt0: string; principalDebt1: string } {
+  const sorted = [...events].sort((a, b) => a.blockNumber - b.blockNumber || a.logIndex - b.logIndex);
+  let debt0 = 0n, debt1 = 0n, fee0 = 0n, fee1 = 0n;
+  for (const e of sorted) {
+    let a0: bigint, a1: bigint;
+    // (CodeRabbit) NO silenciar filas corruptas: un raw no parseable subcontaría los agregados sin
+    // señal. pool_fee_events es la fuente de verdad → abortar el recompute conserva el cache previo
+    // (la mutation es transaccional) en vez de persistir un total incorrecto.
+    try { a0 = BigInt(e.amount0Raw); a1 = BigInt(e.amount1Raw); }
+    catch { throw new Error(`pool_fee_events raw inválido en ${e.blockNumber}:${e.logIndex}`); }
+    if (e.eventType === "decrease") {
+      debt0 += a0; debt1 += a1;
+    } else if (e.eventType === "collect") {
+      const pay0 = a0 < debt0 ? a0 : debt0; debt0 -= pay0; fee0 += a0 - pay0;
+      const pay1 = a1 < debt1 ? a1 : debt1; debt1 -= pay1; fee1 += a1 - pay1;
+    }
+    // "increase": no afecta deuda ni fee cobrada.
+  }
+  return {
+    feesCollectedRaw0: fee0.toString(), feesCollectedRaw1: fee1.toString(),
+    principalDebt0: debt0.toString(), principalDebt1: debt1.toString(),
+  };
+}
+
+export const getPoolLifetimeStateInternal = internalQuery({
+  args: { id: v.id("pools") },
+  handler: async (ctx, { id }) => {
+    const pool = await ctx.db.get(id);
+    if (!pool) return null;
+    return {
+      tokenId: pool.tokenId ?? null,
+      network: pool.network,
+      poolAddress: pool.poolAddress ?? null,
+      closed: pool.closed ?? false,
+      cursorBlock: pool.feesLifetimeCursorBlock ?? null,
+      snapshotKey: pool.lifetimeSnapshotKey ?? null,
+      backfilledAt: pool.feesLifetimeBackfilledAt ?? null,
+      initialLiquidityAt: pool.initialLiquidityAt ?? null,
+    };
+  },
+});
+
+// (ALTO-1) Reemplazo ATÓMICO de una ventana de eventos + recompute. Se llama SOLO con eventos ya leídos
+// con éxito de `[fromBlock, toBlock]` (una sola transacción Convex): borra esa ventana, reinserta la rama
+// canónica (dedupe por lote), recomputa agregados DESDE LA TABLA y persiste cursor/estado. Como NUNCA se
+// borra antes de tener los logs, un fallo de RPC no puede convertir un cache correcto en subconteo.
+export const applyPoolFeeEventsWindow = internalMutation({
+  args: {
+    poolId: v.id("pools"),
+    fromBlock: v.number(),
+    toBlock: v.number(),
+    events: v.array(v.object({
+      txHash: v.string(),
+      logIndex: v.number(),
+      blockNumber: v.number(),
+      blockHash: v.string(),
+      eventType: v.union(v.literal("increase"), v.literal("decrease"), v.literal("collect")),
+      amount0Raw: v.string(),
+      amount1Raw: v.string(),
+    })),
+    cursorBlock: v.optional(v.number()),
+    status: v.optional(v.union(v.literal("ok"), v.literal("stale"), v.literal("no_key"), v.literal("error"))),
+    snapshotKey: v.optional(v.string()),
+    backfilledAt: v.optional(v.number()),
+  },
+  handler: async (ctx, { poolId, fromBlock, toBlock, events, cursorBlock, status, snapshotKey, backfilledAt }) => {
+    // 1) Borrar SOLO la ventana re-escaneada (anti-reorg: elimina logs de rama vieja en [fromBlock,toBlock]).
+    const inWindow = await ctx.db
+      .query("pool_fee_events")
+      .withIndex("by_pool_block", q => q.eq("poolId", poolId).gte("blockNumber", fromBlock).lte("blockNumber", toBlock))
+      .collect();
+    for (const ev of inWindow) await ctx.db.delete(ev._id);
+    // 2) Reinsertar la rama canónica (dedupe por lote en memoria).
+    const seen = new Set<string>();
+    for (const e of events) {
+      if (e.blockNumber < fromBlock || e.blockNumber > toBlock) continue;   // defensa: solo la ventana
+      const key = `${e.txHash}:${e.logIndex}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      await ctx.db.insert("pool_fee_events", { poolId, ...e });
+    }
+    // 3) Recomputar agregados desde la tabla completa y persistir meta.
+    const all = await ctx.db
+      .query("pool_fee_events")
+      .withIndex("by_pool_block", q => q.eq("poolId", poolId))
+      .collect();
+    const agg = computeLifetimeAggregates(all);
+    const patch: Record<string, unknown> = { ...agg, feesLifetimeCalcAt: Date.now() };
+    if (cursorBlock !== undefined) patch.feesLifetimeCursorBlock = cursorBlock;
+    if (status !== undefined) patch.feesLifetimeStatus = status;
+    if (snapshotKey !== undefined) patch.lifetimeSnapshotKey = snapshotKey;
+    if (backfilledAt !== undefined) patch.feesLifetimeBackfilledAt = backfilledAt;
+    await ctx.db.patch(poolId, patch);
+    return { events: all.length, ...agg };
+  },
+});
+
+// Camino SIN tocar la tabla (sin cambio estructural / init / no_key / error): solo patchea meta. NUNCA
+// borra eventos ni agregados → un error transitorio no degrada el cache previo (a lo sumo marca estado).
+export const patchPoolLifetimeMeta = internalMutation({
+  args: {
+    poolId: v.id("pools"),
+    cursorBlock: v.optional(v.number()),
+    status: v.optional(v.union(v.literal("ok"), v.literal("stale"), v.literal("no_key"), v.literal("error"))),
+    snapshotKey: v.optional(v.string()),
+    backfilledAt: v.optional(v.number()),
+  },
+  handler: async (ctx, { poolId, cursorBlock, status, snapshotKey, backfilledAt }) => {
+    // (CodeRabbit) NO tocar feesLifetimeCalcAt aquí: este camino no recomputa agregados (solo avanza
+    // cursor / degrada estado) → marcar el timestamp volvería engañoso el "actualizado hace X".
+    // feesLifetimeCalcAt se setea SOLO en applyPoolFeeEventsWindow (donde sí hay recompute).
+    const patch: Record<string, unknown> = {};
+    if (cursorBlock !== undefined) patch.feesLifetimeCursorBlock = cursorBlock;
+    if (status !== undefined) patch.feesLifetimeStatus = status;
+    if (snapshotKey !== undefined) patch.lifetimeSnapshotKey = snapshotKey;
+    if (backfilledAt !== undefined) patch.feesLifetimeBackfilledAt = backfilledAt;
+    await ctx.db.patch(poolId, patch);
+  },
+});
+
 export const updatePool = mutation({
   args: {
     id: v.id("pools"),

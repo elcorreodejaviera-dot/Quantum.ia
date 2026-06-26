@@ -309,6 +309,24 @@ function CoberturaViva({ bot, arm, pool, accountById, hlBalance }) {
   );
 }
 
+// (JAV-117) Duración compacta de la vida del pool: "12d", "3d 4h", "5h", "<1h".
+function formatLifetime(sinceMs) {
+  if (!Number.isFinite(sinceMs) || sinceMs <= 0) return null;
+  const diff = Date.now() - sinceMs;
+  if (!(diff > 0)) return '<1h';
+  const h = Math.floor(diff / 3_600_000);
+  const d = Math.floor(h / 24);
+  if (d >= 1) { const rh = h - d * 24; return rh > 0 && d < 10 ? `${d}d ${rh}h` : `${d}d`; }
+  if (h >= 1) return `${h}h`;
+  return '<1h';
+}
+// (JAV-117) Fecha corta de inicio: "14 jun".
+function formatDateShort(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  try { return new Date(ms).toLocaleDateString('es-ES', { day: 'numeric', month: 'short' }); }
+  catch { return null; }
+}
+
 function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBalanceByAddress }) {
   const deletePoolMutation = useMutation(api.pools.deletePool);
   const allBots = useQuery(api.bots.listBots);
@@ -439,6 +457,28 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
     : 'APR de comisiones del pool (sin dato de liquidez activa para concentrar a tu posición).';
   const showMetricsBar = pool.liquidityReal && !pool.closed;
 
+  // (JAV-117) Vida del pool (vida total desde la primera captura: initialLiquidityAt, fallback _creationTime)
+  // + total generado en fees a lo largo de toda su vida (cobrados + sin cobrar). Se muestra aunque la
+  // posición esté cerrada (su historia sigue siendo válida). Estado del cache: ok | stale | no_key | error.
+  const lifeSinceAt = Number.isFinite(pool.initialLiquidityAt) ? pool.initialLiquidityAt : pool._creationTime;
+  const lifetimeStr = formatLifetime(lifeSinceAt);
+  const lifeDateStr = formatDateShort(lifeSinceAt);
+  const lifetimeUsd = Number.isFinite(pool.feesLifetimeUsd) ? pool.feesLifetimeUsd : null;
+  const lifetimeStatus = pool.feesLifetimeStatus ?? null;
+  const showLifetime = !!pool.tokenId && lifetimeStr != null;
+  // (MEDIO-1) no_key/error degradan a "—" aunque haya cache previo: no refrescable ⇒ no presentarlo
+  // como número utilizable. Solo ok/stale muestran valor (stale con marca *).
+  const lifetimeUsable = lifetimeStatus !== 'no_key' && lifetimeStatus !== 'error';
+  const lifetimeValueNode =
+    (lifetimeUsable && lifetimeUsd != null)
+      ? <span className="positive">{formatUsd2(lifetimeUsd)}{lifetimeStatus === 'stale' ? ' *' : ''}</span>
+      : '—';
+  const lifetimeTip =
+    lifetimeStatus === 'no_key' ? 'Total generado no disponible (falta configurar el proveedor de eventos).'
+    : lifetimeStatus === 'error' ? 'No se pudo leer el historial de fees ahora; reintentando.'
+    : lifetimeStatus === 'stale' ? 'Fees cobrados + sin cobrar en toda la vida del pool. El histórico puede estar actualizándose (*).'
+    : 'Fees generados en toda la vida del pool (cobrados + sin cobrar), valuado a precio actual.';
+
   return (
     <>
     <article className="pool-card">
@@ -484,6 +524,15 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
             value={displayFeeApr != null ? <span className="positive">{displayFeeApr.toFixed(1)}%</span> : '—'} />
           <Metric label="Fees" title="Comisiones de tu posición pendientes de cobrar."
             value={mFees != null ? <span className="positive">{formatUsd2(mFees)}</span> : '—'} />
+        </div>
+      )}
+
+      {/* (JAV-117) Vida del pool + total generado en fees (vida total). Visible aunque esté cerrado. */}
+      {showLifetime && (
+        <div className="pool-metrics-header">
+          <Metric label="Tiempo de vida" title={lifeDateStr ? `Tiempo total que lleva viva la posición (desde ${lifeDateStr}).` : 'Tiempo total que lleva viva la posición.'}
+            value={<span>{lifetimeStr}{lifeDateStr ? <span className="muted" style={{ fontWeight: 400 }}> · desde {lifeDateStr}</span> : null}</span>} />
+          <Metric label="Total generado" title={lifetimeTip} value={lifetimeValueNode} />
         </div>
       )}
 
@@ -3744,7 +3793,13 @@ function Dashboard({ user, onLogout, userId }) {
       const priceUsd = prices[asset];
       if (!priceUsd) continue;
       positionFetchedRef.current[key] = now;
-      fetchPositionAction({ tokenId: p.tokenId, network: p.network, priceUsd, poolAddress: p.poolAddress ?? undefined, entryPriceUsd: p.entryPrice ?? undefined })
+      fetchPositionAction({
+        tokenId: p.tokenId, network: p.network, priceUsd,
+        poolAddress: p.poolAddress ?? undefined, entryPriceUsd: p.entryPrice ?? undefined,
+        // (JAV-117) agregados lifetime cacheados → feesLifetimeUsd en vivo (valuación a spot).
+        feesCollectedRaw0: p.feesCollectedRaw0 ?? undefined, feesCollectedRaw1: p.feesCollectedRaw1 ?? undefined,
+        principalDebt0: p.principalDebt0 ?? undefined, principalDebt1: p.principalDebt1 ?? undefined,
+      })
         .then(result => { setPositionData(prev => ({ ...prev, [p._id]: result })); })
         .catch(() => { delete positionFetchedRef.current[key]; });
     }
@@ -3806,6 +3861,7 @@ function Dashboard({ user, onLogout, userId }) {
           liquidityReal: true,          // lectura on-chain real (vs 0 inicial mientras carga)
           exposure: pd.exposure,
           feesUncollectedUsd: pd.feesUncollectedUsd ?? null,   // F1: fees sin cobrar (null = sin dato)
+          feesLifetimeUsd: pd.feesLifetimeUsd ?? null,         // (JAV-117) total generado (cobrado + sin cobrar)
           valueAtEntryUsd: pd.valueAtEntryUsd ?? null,         // (JAV-58 Fase D) para el PNL
           feeShareRatio: pd.feeShareRatio ?? null,             // (Fee APR concentrado) L_pos / L_activa
           feeShareStatus: pd.feeShareStatus ?? null,           // (Codex) ok|out_of_range|inconsistent|unavailable

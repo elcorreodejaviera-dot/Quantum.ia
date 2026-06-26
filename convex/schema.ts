@@ -70,7 +70,51 @@ export default defineSchema({
     closedAt: v.optional(v.number()),
     closureReason: v.optional(v.string()),       // "empty" | "not_found"
     closureCheckedAt: v.optional(v.number()),    // último chequeo del cron (incluye RPC unavailable)
+
+    // (JAV-117) Lifetime fees: total generado por la posición en TODA su vida = Σ(fees cobrados) +
+    // fees sin cobrar. Los fees cobrados se reconstruyen de los eventos on-chain (pool_fee_events,
+    // fuente de verdad). Aquí cacheamos los AGREGADOS raw (cantidades de token, string uint256) +
+    // cursor + estado, recomputados SIEMPRE desde la tabla (nunca sumados sobre el agregado previo).
+    // El USD NO se cachea: se valúa al vuelo a precio spot (la cantidad es exacta, la valuación aprox.).
+    feesCollectedRaw0: v.optional(v.string()),   // Σ fees cobradas token0 (excedente sobre principal)
+    feesCollectedRaw1: v.optional(v.string()),   // Σ fees cobradas token1
+    principalDebt0: v.optional(v.string()),      // principal liberado por Decrease aún no descontado del live
+    principalDebt1: v.optional(v.string()),
+    feesLifetimeCursorBlock: v.optional(v.number()),  // último bloque FINALIZADO agregado (incremental)
+    feesLifetimeCalcAt: v.optional(v.number()),       // timestamp del último recálculo
+    // (JAV-117 ALTO-2) Marcador de cobertura histórica: timestamp del back-fill completo (eventos desde
+    // el origen presentes en pool_fee_events). SIN él, el total NO es retroactivo → status nunca puede
+    // ser "ok" (a lo sumo "stale"). Lo setea backfillPoolLifetime al llegar al safe head.
+    feesLifetimeBackfilledAt: v.optional(v.number()),
+    // ok = al día · stale = cache válida pero el incremental no alcanzó · no_key = falta ALCHEMY_API_KEY
+    // · error = fallo de lectura. La UI distingue estos casos (no solo "—").
+    feesLifetimeStatus: v.optional(
+      v.union(v.literal("ok"), v.literal("stale"), v.literal("no_key"), v.literal("error")),
+    ),
+    // Señal estructural para decidir si avanzar el cursor SIN getLogs (ALTO-2 v3). Clave compacta del
+    // snapshot persistido de positions(): liquidity | feeGrowthInside0/1Last | tokensOwed0/1 almacenados.
+    // Estos campos del NFT solo cambian al modificar la posición (Increase/Decrease/Collect), NO con la
+    // acumulación pasiva de fees → key igual ⟺ no hubo evento desde el último ciclo → cursor avanza sin
+    // pedir logs. (collect() actualiza el checkpoint almacenado, así que un cobro también cambia la key.)
+    lifetimeSnapshotKey: v.optional(v.string()),
   }).index("by_user", ["userId"]),
+
+  // (JAV-117) Fuente de verdad de los eventos de fees/principal de cada posición LP. Permite dedupe
+  // anti-reorg (Convex NO tiene índices únicos por schema → la unicidad se garantiza en la mutation,
+  // upsert por (poolId, txHash, logIndex) + dedupe por lote). Los agregados de `pools` se recomputan
+  // desde aquí. amount0/1Raw son uint256 como string. blockHash permite limpiar logs de rama vieja.
+  pool_fee_events: defineTable({
+    poolId: v.id("pools"),
+    txHash: v.string(),
+    logIndex: v.number(),
+    blockNumber: v.number(),
+    blockHash: v.string(),
+    eventType: v.union(v.literal("increase"), v.literal("decrease"), v.literal("collect")),
+    amount0Raw: v.string(),
+    amount1Raw: v.string(),
+  })
+    .index("by_pool_log", ["poolId", "txHash", "logIndex"])  // búsqueda para upsert idempotente (NO constraint)
+    .index("by_pool_block", ["poolId", "blockNumber"]),       // recomputar/limpiar por reorg
 
   // (JAV-40 #15) Historial de cierres/reaperturas de pools. El doc de pools refleja el ESTADO
   // actual (closed/closedAt); esta tabla preserva la secuencia de eventos aunque closedAt se limpie.

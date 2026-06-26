@@ -457,27 +457,12 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
     : 'APR de comisiones del pool (sin dato de liquidez activa para concentrar a tu posición).';
   const showMetricsBar = pool.liquidityReal && !pool.closed;
 
-  // (JAV-117) Vida del pool (vida total desde la primera captura: initialLiquidityAt, fallback _creationTime)
-  // + total generado en fees a lo largo de toda su vida (cobrados + sin cobrar). Se muestra aunque la
-  // posición esté cerrada (su historia sigue siendo válida). Estado del cache: ok | stale | no_key | error.
+  // (JAV-117) Vida del pool (vida total desde la primera captura: initialLiquidityAt, fallback _creationTime).
+  // Se muestra aunque la posición esté cerrada (su historia sigue siendo válida).
   const lifeSinceAt = Number.isFinite(pool.initialLiquidityAt) ? pool.initialLiquidityAt : pool._creationTime;
   const lifetimeStr = formatLifetime(lifeSinceAt);
   const lifeDateStr = formatDateShort(lifeSinceAt);
-  const lifetimeUsd = Number.isFinite(pool.feesLifetimeUsd) ? pool.feesLifetimeUsd : null;
-  const lifetimeStatus = pool.feesLifetimeStatus ?? null;
   const showLifetime = !!pool.tokenId && lifetimeStr != null;
-  // (MEDIO-1) no_key/error degradan a "—" aunque haya cache previo: no refrescable ⇒ no presentarlo
-  // como número utilizable. Solo ok/stale muestran valor (stale con marca *).
-  const lifetimeUsable = lifetimeStatus !== 'no_key' && lifetimeStatus !== 'error';
-  const lifetimeValueNode =
-    (lifetimeUsable && lifetimeUsd != null)
-      ? <span className="positive">{formatUsd2(lifetimeUsd)}{lifetimeStatus === 'stale' ? ' *' : ''}</span>
-      : '—';
-  const lifetimeTip =
-    lifetimeStatus === 'no_key' ? 'Total generado no disponible (falta configurar el proveedor de eventos).'
-    : lifetimeStatus === 'error' ? 'No se pudo leer el historial de fees ahora; reintentando.'
-    : lifetimeStatus === 'stale' ? 'Fees cobrados + sin cobrar en toda la vida del pool. El histórico puede estar actualizándose (*).'
-    : 'Fees generados en toda la vida del pool (cobrados + sin cobrar), valuado a precio actual.';
 
   return (
     <>
@@ -527,12 +512,11 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
         </div>
       )}
 
-      {/* (JAV-117) Vida del pool + total generado en fees (vida total). Visible aunque esté cerrado. */}
+      {/* (JAV-117) Vida del pool (vida total). Visible aunque esté cerrado. */}
       {showLifetime && (
         <div className="pool-metrics-header">
           <Metric label="Tiempo de vida" title={lifeDateStr ? `Tiempo total que lleva viva la posición (desde ${lifeDateStr}).` : 'Tiempo total que lleva viva la posición.'}
             value={<span>{lifetimeStr}{lifeDateStr ? <span className="muted" style={{ fontWeight: 400 }}> · desde {lifeDateStr}</span> : null}</span>} />
-          <Metric label="Total generado" title={lifetimeTip} value={lifetimeValueNode} />
         </div>
       )}
 

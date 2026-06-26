@@ -162,21 +162,11 @@ function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive, hl
   const covRatio = (hedgeNotional != null && lpExposure != null && lpExposure > 0) ? hedgeNotional / lpExposure : null;
   const covCls = covRatio == null ? '' : Math.abs(covRatio - 1) <= 0.25 ? 'av-pos-pnl' : 'av-amber';
   const sym = pos.baseAsset ?? '';
-  // (JAV-117) Tiempo de vida (vida total) + total generado en fees. lifeSinceAt viene de getUserDetail
-  // (initialLiquidityAt ?? _creationTime); el USD lifetime del snapshot live (adminLive).
+  // (JAV-117) Tiempo de vida (vida total). lifeSinceAt viene de getUserDetail
+  // (initialLiquidityAt ?? _creationTime).
   const lifeSinceAt = p?.lifeSinceAt ?? null;
   const lifetimeStr = fmtLifetime(lifeSinceAt);
   const lifeDateStr = fmtDateShort(lifeSinceAt);
-  const lifetimeUsd = live?.feesLifetimeUsd != null ? live.feesLifetimeUsd : null;
-  const lifetimeStatus = live?.feesLifetimeStatus ?? p?.feesLifetimeStatus ?? null;
-  // (MEDIO-1 + CodeRabbit) no_key/error → SIEMPRE "—" (estado definitivo no utilizable), incluso durante
-  // la carga: el loading no debe tapar un estado que ya sabemos no refrescable.
-  const lifetimeBlocked = lifetimeStatus === 'no_key' || lifetimeStatus === 'error';
-  const lifetimeVal = lifetimeBlocked
-    ? '—'
-    : (lifetimeUsd != null)
-      ? `${usd(lifetimeUsd)}${lifetimeStatus === 'stale' ? ' *' : ''}`
-      : (liveLoading ? '…' : '—');
   return (
     <div className="av-pos">
       <div className="av-pos-top">
@@ -196,9 +186,6 @@ function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive, hl
         <div className="av-cell" title={lifeDateStr ? `Vida total desde ${lifeDateStr}` : 'Vida total de la posición'}>
           <div className="k">Tiempo de vida</div>
           <div className="vv">{lifetimeStr ? `${lifetimeStr}${lifeDateStr ? ` · ${lifeDateStr}` : ''}` : '—'}</div>
-        </div>
-        <div className="av-cell" title="Fees generados en toda la vida del pool (cobrados + sin cobrar). * = histórico actualizándose.">
-          <div className="k">Total generado</div><div className="vv">{lifetimeVal}</div>
         </div>
       </div>
       <div className="av-pos-foot">

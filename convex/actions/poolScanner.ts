@@ -77,16 +77,18 @@ const RPC_TIMEOUT_MS = 8_000;
 // una respuesta determinista de la cadena, no una indisponibilidad del RPC.
 class RpcRevertError extends Error {}
 
-async function rpcCall(url: string, to: string, data: string, from?: string): Promise<string> {
+async function rpcCall(url: string, to: string, data: string, from?: string, block: string = "latest"): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
   try {
     // `from` opcional: necesario para simular collect() (guard isAuthorizedForToken con msg.sender).
+    // `block` opcional (default "latest"): permite fijar la lectura a un bloque exacto (JAV-120: leer
+    // tokensOwed/snapshotKey en el MISMO safeHead que se guarda → consistencia con el rango de getLogs).
     const callObj = from ? { to, data, from } : { to, data };
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", method: "eth_call", params: [callObj, "latest"], id: 1 }),
+      body: JSON.stringify({ jsonrpc: "2.0", method: "eth_call", params: [callObj, block], id: 1 }),
       signal: controller.signal,
     });
     if (!res.ok) throw new Error(`RPC ${url} respondió ${res.status} ${res.statusText}`);
@@ -109,11 +111,11 @@ async function rpcCall(url: string, to: string, data: string, from?: string): Pr
   }
 }
 
-async function rpcCallWithFallback(urls: string[], to: string, data: string, from?: string): Promise<string> {
+async function rpcCallWithFallback(urls: string[], to: string, data: string, from?: string, block: string = "latest"): Promise<string> {
   let lastErr: unknown;
   let revertErr: RpcRevertError | undefined;
   for (const url of urls) {
-    try { return await rpcCall(url, to, data, from); }
+    try { return await rpcCall(url, to, data, from, block); }
     catch (e) {
       lastErr = e;
       // Un revert es determinista (todos los endpoints darían lo mismo); tiene
@@ -464,10 +466,10 @@ async function fillBlockHashes(rpcs: string[], logs: RpcLog[]): Promise<RpcLog[]
 // (JAV-117) Snapshot estructural de positions(): liquidity + feeGrowthInside0/1Last + tokensOwed0/1
 // ALMACENADOS (slots 7..11). Estos solo cambian al modificar la posición (Increase/Decrease/Collect),
 // NO con la acumulación pasiva de fees → key igual ⟺ no hubo evento desde el último ciclo.
-async function readPositionSnapshotKey(rpcs: string[], nft: string, tokenId: number): Promise<string | null> {
+async function readPositionSnapshotKey(rpcs: string[], nft: string, tokenId: number, block: string = "latest"): Promise<string | null> {
   let posRaw: string;
   try {
-    posRaw = (await rpcCallWithFallback(rpcs, nft, "0x99fbab88" + pad(BigInt(tokenId)))).slice(2);
+    posRaw = (await rpcCallWithFallback(rpcs, nft, "0x99fbab88" + pad(BigInt(tokenId)), undefined, block)).slice(2);
   } catch { return null; }
   if (posRaw.length < 64 * 12) return null;
   try {
@@ -687,10 +689,10 @@ function valueFeesUsd(
 // cobrable ACTUAL, no un checkpoint viejo. Simulación sin persistencia (from=owner para el guard).
 // Devuelve {amount0Raw, amount1Raw} o null (fallo RPC/decodificación/corrupto → null, nunca 0 inventado).
 async function fetchUncollectedFeesRaw(
-  rpcs: string[], nft: string, tokenId: number,
+  rpcs: string[], nft: string, tokenId: number, block: string = "latest",
 ): Promise<{ amount0Raw: bigint; amount1Raw: bigint } | null> {
   try {
-    const ownerRaw = (await rpcCallWithFallback(rpcs, nft, "0x6352211e" + pad(BigInt(tokenId)))).slice(2);
+    const ownerRaw = (await rpcCallWithFallback(rpcs, nft, "0x6352211e" + pad(BigInt(tokenId)), undefined, block)).slice(2);
     if (ownerRaw.length < 64) return null;
     const owner = "0x" + ownerRaw.slice(24);
 
@@ -700,7 +702,7 @@ async function fetchUncollectedFeesRaw(
       + owner.slice(2).padStart(64, "0")
       + pad(MAX_U128)
       + pad(MAX_U128);
-    const res = (await rpcCallWithFallback(rpcs, nft, data, owner)).slice(2);
+    const res = (await rpcCallWithFallback(rpcs, nft, data, owner, block)).slice(2);
     if (res.length < 128) return null;
     const amount0Raw = uintAt(res, 0);
     const amount1Raw = uintAt(res, 1);
@@ -1314,6 +1316,64 @@ export const refreshAllPoolLifetimes = internalAction({
       for (const r of results) {
         if (r.status === "fulfilled") counts[r.value]++;
         else { counts.errored++; console.error("refreshAllPoolLifetimes: worker rechazado", r.reason); }
+      }
+    }
+    return { total: targets.length, ...counts };
+  },
+});
+
+// (JAV-120) Writer de snapshots de fees para "Fees 24h" REAL. Por cada pool con tokenId lee, vía RPC
+// PÚBLICO (NO Alchemy): el cobrable live (collect() simulado = tokensOwed BRUTO), la snapshotKey estructural
+// y el safeHead. Guarda eso + los agregados cacheados (collected/principalDebt; "" si ausentes →
+// aggregatesComplete=false). NO netea ni valúa aquí: el neteo (collected + max(owed−debt,0)) y el USD se
+// hacen al LEER (F3). NO money-path: fetchUncollectedFeesRaw es un eth_call (simulación, no envía tx).
+async function snapshotOnePoolFees(ctx: any, pool: any): Promise<"inserted" | "unavailable"> {
+  const rpcs = RPC[pool.network];
+  const nft = NFT_MANAGER[pool.network];
+  if (!rpcs || !nft || pool.tokenId == null) return "unavailable";
+  // (Codex F1 ALTO#1) Fijar el bloque PRIMERO y leer tokensOwed + snapshotKey EN ESE MISMO bloque (no en
+  // "latest") → el snapshot representa exactamente safeHeadBlock, que F4 usa como frontera de getLogs.
+  // safeHead = latest − confirmaciones (reorg-safe; ~minutos atrás, dentro del estado de cualquier full node).
+  const latest = await getLatestBlock(rpcs);
+  if (latest == null) return "unavailable";
+  const conf = CONFIRMATIONS[pool.network] ?? 20;
+  const safeHead = latest - conf;
+  if (safeHead <= 0) return "unavailable";
+  const blockTag = "0x" + safeHead.toString(16);
+  // Si falta CUALQUIERA de los 2 (cobrable / key) leídos en safeHead → no insertar (snapshot no certificable).
+  const owed = await fetchUncollectedFeesRaw(rpcs, nft, pool.tokenId, blockTag);
+  if (!owed) return "unavailable";
+  const snapshotKey = await readPositionSnapshotKey(rpcs, nft, pool.tokenId, blockTag);
+  if (snapshotKey == null) return "unavailable";
+  // Agregados cacheados (faltan si nunca se back-filleó): "" → aggregatesComplete=false (gate de "ok" en F3).
+  const collected0Raw = pool.feesCollectedRaw0 ?? "";
+  const collected1Raw = pool.feesCollectedRaw1 ?? "";
+  const principalDebt0Raw = pool.principalDebt0 ?? "";
+  const principalDebt1Raw = pool.principalDebt1 ?? "";
+  const aggregatesComplete =
+    collected0Raw !== "" && collected1Raw !== "" && principalDebt0Raw !== "" && principalDebt1Raw !== "";
+  await ctx.runMutation(internal.pools.insertPoolFeeSnapshot, {
+    poolId: pool._id,
+    tokensOwed0Raw: owed.amount0Raw.toString(),
+    tokensOwed1Raw: owed.amount1Raw.toString(),
+    collected0Raw, collected1Raw, principalDebt0Raw, principalDebt1Raw,
+    snapshotKey, safeHeadBlock: safeHead, aggregatesComplete,
+  });
+  return "inserted";
+}
+
+export const snapshotPoolFees = internalAction({
+  args: {},
+  handler: async (ctx): Promise<any> => {
+    const pools = await ctx.runQuery(internal.pools.listPoolsInternal);
+    const targets = pools.filter((p: any) => p.tokenId && RPC[p.network] && NFT_MANAGER[p.network]);
+    const counts = { inserted: 0, unavailable: 0, errored: 0 };
+    for (let i = 0; i < targets.length; i += POOL_SCAN_CONCURRENCY) {
+      const batch = targets.slice(i, i + POOL_SCAN_CONCURRENCY);
+      const results = await Promise.allSettled(batch.map((p: any) => snapshotOnePoolFees(ctx, p)));
+      for (const r of results) {
+        if (r.status === "fulfilled") counts[r.value]++;
+        else { counts.errored++; console.error("snapshotPoolFees: worker rechazado", r.reason); }
       }
     }
     return { total: targets.length, ...counts };

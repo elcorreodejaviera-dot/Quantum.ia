@@ -367,6 +367,38 @@ export const patchPoolLifetimeMeta = internalMutation({
   },
 });
 
+// (JAV-120) Inserta un snapshot de fees del pool y poda los viejos. Guarda los componentes BRUTOS
+// (tokensOwed/collected/principalDebt) + snapshotKey + safeHeadBlock + aggregatesComplete; el neteo y la
+// valuación USD se hacen al LEER (F3). NO money-path. Idempotencia: no aplica (serie temporal append-only),
+// el cron corre 1/h. `at` se sella aquí (Date.now()) para mantener el writer/action sin estado de tiempo.
+const FEE_SNAPSHOT_RETENTION_MS = 10 * 24 * 60 * 60 * 1000;   // ~10 días: cubre la ventana de 24h + margen
+
+export const insertPoolFeeSnapshot = internalMutation({
+  args: {
+    poolId: v.id("pools"),
+    tokensOwed0Raw: v.string(),
+    tokensOwed1Raw: v.string(),
+    collected0Raw: v.string(),
+    collected1Raw: v.string(),
+    principalDebt0Raw: v.string(),
+    principalDebt1Raw: v.string(),
+    snapshotKey: v.string(),
+    safeHeadBlock: v.number(),
+    aggregatesComplete: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    const at = Date.now();
+    await ctx.db.insert("pool_fee_snapshots", { ...args, at });
+    // Poda por antigüedad (inline, por pool). El índice by_pool_at acota el barrido a ESTE pool.
+    const cutoff = at - FEE_SNAPSHOT_RETENTION_MS;
+    const stale = await ctx.db
+      .query("pool_fee_snapshots")
+      .withIndex("by_pool_at", q => q.eq("poolId", args.poolId).lt("at", cutoff))
+      .collect();
+    for (const s of stale) await ctx.db.delete(s._id);
+  },
+});
+
 export const updatePool = mutation({
   args: {
     id: v.id("pools"),

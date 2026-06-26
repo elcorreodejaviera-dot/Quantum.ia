@@ -229,8 +229,14 @@ async function rawGetLogs(url: string, address: string, tokenIdTopic: string, fr
       body: JSON.stringify(body), signal: controller.signal,
     });
     if (!res.ok) {
-      if (res.status === 413 || res.status === 400) throw new GetLogsRangeTooLargeError(`HTTP ${res.status}`);
-      throw new Error(`getLogs respondió ${res.status}`);   // sin url (puede llevar secretos)
+      // (CodeRabbit) NO clasificar TODO 400 como rango grande: un 400 por params inválidos/método no
+      // soportado haría bisecar hasta agotar presupuesto sin converger. Solo 413, o 400 cuyo body lo indica.
+      let bodyText = "";
+      try { bodyText = await res.text(); } catch { /* sin body */ }
+      if (res.status === 413 || (res.status === 400 && isRangeTooLargeMsg(bodyText))) {
+        throw new GetLogsRangeTooLargeError(`HTTP ${res.status}`);
+      }
+      throw new Error(`getLogs respondió ${res.status}`);   // sin url ni body (pueden llevar secretos)
     }
     const json = await res.json() as { result?: RpcLog[]; error?: { message?: string; code?: number } };
     if (json.error) {
@@ -1217,7 +1223,12 @@ export const backfillAllPoolLifetimes = internalAction({
   args: { limit: v.optional(v.number()) },
   handler: async (ctx, { limit }): Promise<any> => {
     const all = await ctx.runQuery(internal.pools.listPoolsInternal);
-    const targets = all.filter((p: any) => p.tokenId && LOGS_RPC[p.network] && NFT_MANAGER[p.network]);
+    // (CodeRabbit) Procesar primero los pools AÚN sin back-fill (backfilledAt == null) → corridas
+    // sucesivas con `limit` avanzan sobre el resto en vez de reprocesar siempre el mismo prefijo.
+    const targets = all
+      .filter((p: any) => p.tokenId && LOGS_RPC[p.network] && NFT_MANAGER[p.network])
+      .sort((a: any, b: any) =>
+        Number(a.feesLifetimeBackfilledAt != null) - Number(b.feesLifetimeBackfilledAt != null));
     const cap = Math.max(1, Math.min(limit ?? 50, 100));
     const slice = targets.slice(0, cap);
     const results: any[] = [];

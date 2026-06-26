@@ -1,5 +1,10 @@
 # Reauditoria Codex - JAV-119 back-fill lifetime gratis
 
+> **ACTUALIZACIÓN (post-PR #128):** el ajuste documental que abajo impedía el "GO limpio" YA se aplicó
+> (el plan `docs/plan-jav119-backfill-gratis.md` fue alineado: sin `BACKFILL_INITIAL_SPAN`/600, sin
+> `autoStart`, sin caveat de 45 días). **Veredicto efectivo: GO de código + plan.** El resto del informe
+> refleja el estado intermedio previo a esa corrección.
+
 ## Alcance
 
 Reauditoria del diff `2663860..f9290bf` en la rama `elcorreodejaviera/jav-119-backfill-lifetime-gratis`.

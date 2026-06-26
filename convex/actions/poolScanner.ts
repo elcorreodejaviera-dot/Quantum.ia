@@ -1097,6 +1097,11 @@ export const backfillPoolLifetime = internalAction({
     }
 
     const reachedHead = failedAt == null && from > safeHead;
+    // (reaudit) El back-fill solo cubre el HISTÓRICO si arrancó desde el origen (start === 0) o si ya
+    // existía un back-fill completo previo (extensión). Un backfill parcial (fromBlock > 0 sin cobertura
+    // previa) NO puede marcar backfilledAt ni habilitar "ok" → quedaría un total subcontado como confiable.
+    const coversHistory = start === 0 || state.backfilledAt != null;
+    const complete = reachedHead && coversHistory;
     const currentKey = reachedHead ? await readPositionSnapshotKey(rpcs, nft, state.tokenId) : null;
     await ctx.runMutation(internal.pools.applyPoolFeeEventsWindow, {
       poolId,
@@ -1104,12 +1109,12 @@ export const backfillPoolLifetime = internalAction({
       toBlock: scannedTo,
       events: staged,
       cursorBlock: scannedTo,
-      status: reachedHead ? "ok" : "stale",
-      // Solo al completar TODO el rango marcamos back-fill histórico → habilita status "ok" del cron (ALTO-2).
-      ...(reachedHead ? { backfilledAt: Date.now() } : {}),
+      status: complete ? "ok" : "stale",
+      // Marcar back-fill histórico SOLO si cubre desde el origen (habilita "ok" del cron, ALTO-2/reaudit).
+      ...(complete ? { backfilledAt: Date.now() } : {}),
       ...(reachedHead && currentKey ? { snapshotKey: currentKey } : {}),
     });
-    return { ok: true, reachedHead, totalEvents: staged.length, chunks, cursorBlock: scannedTo };
+    return { ok: true, reachedHead, complete, totalEvents: staged.length, chunks, cursorBlock: scannedTo };
   },
 });
 

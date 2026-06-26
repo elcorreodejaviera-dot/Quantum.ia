@@ -188,6 +188,141 @@ async function getLatestBlock(rpcs: string[]): Promise<number | null> {
   return null;
 }
 
+// =====================================================================================
+// (JAV-119) Back-fill GRATIS: getLogs por RPC público de archivo + range-halving + timestamp→bloque.
+// =====================================================================================
+
+// RPC públicos de archivo para los getLogs del BACK-FILL (sin API key). Suelen admitir rangos amplios
+// filtrando por topic; el range-halving se adapta si alguno los rechaza. NO se usan en el cron incremental.
+const LOGS_RPC: Record<string, string[]> = {
+  Ethereum: ["https://eth.drpc.org", "https://ethereum-rpc.publicnode.com"],
+  Arbitrum: ["https://arbitrum.drpc.org", "https://arbitrum-one-rpc.publicnode.com"],
+  Optimism: ["https://optimism.drpc.org", "https://optimism-rpc.publicnode.com"],
+  Base:     ["https://base.drpc.org", "https://base-rpc.publicnode.com"],
+};
+
+// El RPC rechazó el rango por demasiado amplio / demasiados resultados (no es un fallo de transporte):
+// se resuelve partiendo el rango a la mitad y reintentando.
+class GetLogsRangeTooLargeError extends Error {}
+
+function isRangeTooLargeMsg(msg: string): boolean {
+  return /range|too many results|too large|exceed|more than .* results|limit exceeded|query timeout|response size/i.test(msg);
+}
+
+// getLogs contra un proveedor concreto (sin key). Clasifica "rango muy grande" como
+// GetLogsRangeTooLargeError para que el caller lo divida; el resto se propaga como error de transporte.
+async function rawGetLogs(url: string, address: string, tokenIdTopic: string, fromBlock: number, toBlock: number): Promise<RpcLog[]> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
+  try {
+    const body = {
+      jsonrpc: "2.0", method: "eth_getLogs", id: 1,
+      params: [{
+        address,
+        fromBlock: "0x" + fromBlock.toString(16),
+        toBlock: "0x" + toBlock.toString(16),
+        topics: [[TOPIC_INCREASE, TOPIC_DECREASE, TOPIC_COLLECT], tokenIdTopic],
+      }],
+    };
+    const res = await fetch(url, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body), signal: controller.signal,
+    });
+    if (!res.ok) {
+      if (res.status === 413 || res.status === 400) throw new GetLogsRangeTooLargeError(`HTTP ${res.status}`);
+      throw new Error(`getLogs respondió ${res.status}`);   // sin url (puede llevar secretos)
+    }
+    const json = await res.json() as { result?: RpcLog[]; error?: { message?: string; code?: number } };
+    if (json.error) {
+      const msg = json.error.message ?? "";
+      if (isRangeTooLargeMsg(msg)) throw new GetLogsRangeTooLargeError(msg);
+      throw new Error(`eth_getLogs error (${json.error.code ?? "?"}): ${msg}`);
+    }
+    return json.result ?? [];
+  } catch (e: unknown) {
+    if (e instanceof Error && e.name === "AbortError") throw new GetLogsRangeTooLargeError(`timeout ${RPC_TIMEOUT_MS}ms`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Intenta un rango contra varios proveedores. Devuelve los logs si ALGUNO responde; "range" si todos lo
+// rechazaron por tamaño (→ el caller parte el rango); o lanza si todos fallan por transporte.
+async function getLogsRangeMulti(urls: string[], address: string, tokenIdTopic: string, from: number, to: number): Promise<{ ok: true; logs: RpcLog[] } | { ok: "range" }> {
+  let sawRange = false;
+  let lastErr: unknown;
+  for (const url of urls) {
+    try { return { ok: true, logs: await rawGetLogs(url, address, tokenIdTopic, from, to) }; }
+    catch (e) {
+      if (e instanceof GetLogsRangeTooLargeError) { sawRange = true; continue; }
+      lastErr = e;
+    }
+  }
+  if (sawRange) return { ok: "range" };
+  throw lastErr ?? new Error("getLogs: todos los proveedores fallaron");
+}
+
+// Recorre [from, to] con una pila de subrangos: si un subrango es rechazado por tamaño, lo parte a la
+// mitad; acumula todos los logs. Acotado por un presupuesto de requests (one-off). Devuelve los logs y si
+// se completó (false = se agotó el presupuesto → el caller marca stale).
+async function getLogsAdaptive(urls: string[], address: string, tokenIdTopic: string, from: number, to: number, initialSpan: number, budget: number): Promise<{ logs: RpcLog[]; complete: boolean }> {
+  const out: RpcLog[] = [];
+  // Pila de [lo, hi] pendientes, en trozos de initialSpan (de mayor a menor bloque para procesar antes lo reciente).
+  const stack: Array<[number, number]> = [];
+  for (let lo = from; lo <= to; lo += initialSpan) stack.push([lo, Math.min(lo + initialSpan - 1, to)]);
+  let calls = 0;
+  while (stack.length) {
+    if (calls >= budget) return { logs: out, complete: false };
+    const [lo, hi] = stack.pop()!;
+    calls++;
+    const r = await getLogsRangeMulti(urls, address, tokenIdTopic, lo, hi);
+    if (r.ok === true) { for (const l of r.logs) out.push(l); continue; }
+    // Rango rechazado: partir a la mitad (si ya es 1 bloque y aun así lo rechaza, no es por rango → abortar).
+    if (hi <= lo) throw new Error(`getLogs rechaza un solo bloque ${lo}; no es problema de rango`);
+    const mid = Math.floor((lo + hi) / 2);
+    stack.push([mid + 1, hi]);
+    stack.push([lo, mid]);
+  }
+  return { logs: out, complete: true };
+}
+
+// eth_getBlockByNumber → timestamp (segundos) de un bloque, o null.
+async function blockTimestamp(urls: string[], blockNum: number): Promise<number | null> {
+  for (const url of urls) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
+      try {
+        const res = await fetch(url, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", method: "eth_getBlockByNumber", params: ["0x" + blockNum.toString(16), false], id: 1 }),
+          signal: controller.signal,
+        });
+        if (!res.ok) continue;
+        const json = await res.json() as { result?: { timestamp?: string } };
+        if (json.result?.timestamp) { const t = Number(BigInt(json.result.timestamp)); if (Number.isFinite(t) && t > 0) return t; }
+      } finally { clearTimeout(timer); }
+    } catch { /* siguiente */ }
+  }
+  return null;
+}
+
+// Búsqueda binaria del mayor bloque con timestamp <= targetSec (≈ el bloque al/ antes del momento dado).
+// ~log2(latest) llamadas. Devuelve 0 si no se puede resolver (back-fill caería a fromBlock 0).
+async function blockAtOrBeforeTimestamp(urls: string[], targetSec: number, latest: number): Promise<number> {
+  let lo = 0, hi = latest, ans = 0;
+  let guard = 0;
+  while (lo <= hi && guard++ < 64) {
+    const mid = Math.floor((lo + hi) / 2);
+    const ts = await blockTimestamp(urls, mid);
+    if (ts == null) return 0;   // no resoluble → conservador: desde 0 (el caller acota por presupuesto)
+    if (ts <= targetSec) { ans = mid; lo = mid + 1; }
+    else { hi = mid - 1; }
+  }
+  return ans;
+}
+
 // (JAV-117) Snapshot estructural de positions(): liquidity + feeGrowthInside0/1Last + tokensOwed0/1
 // ALMACENADOS (slots 7..11). Estos solo cambian al modificar la posición (Increase/Decrease/Collect),
 // NO con la acumulación pasiva de fees → key igual ⟺ no hubo evento desde el último ciclo.
@@ -1047,12 +1182,14 @@ export const refreshAllPoolLifetimes = internalAction({
   },
 });
 
-// (JAV-117 decisión A) Back-fill HISTÓRICO puntual: reconstruye el total cobrado desde el origen leyendo
-// TODOS los eventos de la posición con un RPC de ARCHIVO de rangos amplios (Alchemy PAYG, o dRPC/Ankr vía
-// `rpcUrl`). Se dispara a MANO (dashboard Convex), no en cron. Rellena pool_fee_events + agregados + cursor
-// y deja status "ok". Idempotente: re-ejecutar no duplica (upsert por txHash+logIndex).
-const BACKFILL_MAX_RANGE = 50_000;     // archive RPC admite rangos amplios filtrando por tokenId indexed
-const BACKFILL_MAX_CHUNKS = 1_000;     // tope duro de requests por ejecución (one-off)
+// (JAV-117 decisión A · JAV-119) Back-fill HISTÓRICO puntual: reconstruye el total cobrado leyendo TODOS
+// los eventos de la posición. Por defecto GRATIS (RPC público de archivo LOGS_RPC + range-halving), sin
+// API key. `fromBlock` opcional fuerza el inicio; si no, se AUTODERIVA desde initialLiquidityAt (timestamp→
+// bloque) con margen → evita escanear desde el bloque 0. `rpcUrl` opcional sobreescribe el proveedor
+// (p. ej. Alchemy PAYG). Se dispara a MANO (dashboard) o vía backfillAllPoolLifetimes. Idempotente.
+const BACKFILL_INITIAL_SPAN = 1_000_000;            // trozo inicial; el halving lo reduce si el RPC lo rechaza
+const BACKFILL_CALL_BUDGET = 600;                   // tope de getLogs por pool (one-off)
+const BACKFILL_START_MARGIN_SEC = 45 * 24 * 3600;   // margen: initialLiquidityAt es 1ª observación, no el mint
 export const backfillPoolLifetime = internalAction({
   args: { poolId: v.id("pools"), fromBlock: v.optional(v.number()), rpcUrl: v.optional(v.string()) },
   handler: async (ctx, { poolId, fromBlock, rpcUrl }): Promise<any> => {
@@ -1061,8 +1198,9 @@ export const backfillPoolLifetime = internalAction({
     const rpcs = RPC[state.network];
     const nft = NFT_MANAGER[state.network];
     if (!rpcs || !nft) return { ok: false, reason: "red no soportada" };
-    const url = rpcUrl ?? alchemyUrl(state.network);
-    if (!url) return { ok: false, reason: "sin RPC de archivo (pasa rpcUrl o configura ALCHEMY_API_KEY PAYG)" };
+    // Proveedor(es) de getLogs: rpcUrl explícito, o los RPC públicos de archivo (gratis, sin key).
+    const logUrls = rpcUrl ? [rpcUrl] : LOGS_RPC[state.network];
+    if (!logUrls || logUrls.length === 0) return { ok: false, reason: "sin RPC de getLogs para la red" };
 
     const latest = await getLatestBlock(rpcs);
     if (latest == null) return { ok: false, reason: "no se pudo leer latestBlock" };
@@ -1070,57 +1208,70 @@ export const backfillPoolLifetime = internalAction({
     const safeHead = latest - conf;
     if (safeHead <= 0) return { ok: false, reason: "cadena demasiado nueva" };
 
-    // (ALTO-1) Desde 0 por defecto (el filtro por tokenId indexed mantiene el resultado chico). STAGING:
-    // acumulamos los eventos de la ventana contigua leída con ÉXITO y NO borramos nada hasta el final.
-    // Ante un fallo de getLogs aplicamos solo lo ya leído ([start, scannedTo]) y NO marcamos backfill
-    // completo (no tocamos el tail no leído).
-    const start = Math.max(0, fromBlock ?? 0);
+    // Inicio: explícito, o autoderivado desde initialLiquidityAt − margen (cubre el histórico sin ir a 0).
+    const autoStart = fromBlock == null;
+    let start: number;
+    if (!autoStart) {
+      start = Math.max(0, fromBlock as number);
+    } else if (state.initialLiquidityAt != null) {
+      const targetSec = Math.floor(state.initialLiquidityAt / 1000) - BACKFILL_START_MARGIN_SEC;
+      start = await blockAtOrBeforeTimestamp(rpcs, Math.max(0, targetSec), safeHead);
+    } else {
+      start = 0;   // sin marca temporal → desde el origen (el presupuesto/halving lo acota)
+    }
+    if (start > safeHead) start = safeHead;
+
+    // Lectura adaptativa de TODO [start, safeHead]: si un proveedor rechaza el rango, se parte a la mitad.
     const tokenIdTopic = "0x" + pad(BigInt(state.tokenId));
-    const staged: any[] = [];
-    let from = start;
-    let scannedTo = start - 1;
-    let chunks = 0;
-    let failedAt: number | null = null;
-    while (from <= safeHead && chunks < BACKFILL_MAX_CHUNKS) {
-      const to = Math.min(from + BACKFILL_MAX_RANGE - 1, safeHead);
-      let logs: RpcLog[];
-      try {
-        logs = await rpcGetLogs(url, nft, tokenIdTopic, from, to);
-      } catch (e) {
-        console.error(`backfillPoolLifetime: getLogs falló pool ${poolId} [${from},${to}]`, e);
-        failedAt = from;
-        break;
-      }
-      for (const ev of logs.map(decodePoolFeeLog)) { if (ev != null) staged.push(ev); }
-      scannedTo = to;
-      from = to + 1;
-      chunks++;
+    let scan: { logs: RpcLog[]; complete: boolean };
+    try {
+      scan = await getLogsAdaptive(logUrls, nft, tokenIdTopic, start, safeHead, BACKFILL_INITIAL_SPAN, BACKFILL_CALL_BUDGET);
+    } catch (e) {
+      console.error(`backfillPoolLifetime: getLogs falló pool ${poolId}`, e);
+      return { ok: false, reason: "getLogs falló (transporte)", start };   // no mutar: cache previo intacto
+    }
+    // Cobertura PARCIAL (presupuesto agotado) → NO mutar (evita huecos no contiguos); reintentar o subir budget.
+    if (!scan.complete) {
+      return { ok: false, reason: "presupuesto de getLogs agotado; reintenta", start, budget: BACKFILL_CALL_BUDGET };
     }
 
-    if (scannedTo < start) {
-      // Falló el primer chunk: no tocar nada (cache previo intacto).
-      return { ok: false, reason: "getLogs falló en el primer chunk (¿rango muy amplio para el RPC?)", totalEvents: 0 };
-    }
-
-    const reachedHead = failedAt == null && from > safeHead;
-    // (reaudit) El back-fill solo cubre el HISTÓRICO si arrancó desde el origen (start === 0) o si ya
-    // existía un back-fill completo previo (extensión). Un backfill parcial (fromBlock > 0 sin cobertura
-    // previa) NO puede marcar backfilledAt ni habilitar "ok" → quedaría un total subcontado como confiable.
-    const coversHistory = start === 0 || state.backfilledAt != null;
-    const complete = reachedHead && coversHistory;
-    const currentKey = reachedHead ? await readPositionSnapshotKey(rpcs, nft, state.tokenId) : null;
+    const staged = scan.logs.map(decodePoolFeeLog).filter((e: any) => e != null);
+    // coversHistory: autoStart cubre desde ≈creación; start===0 o backfill previo también. Solo así "ok".
+    const coversHistory = autoStart || start === 0 || state.backfilledAt != null;
+    const currentKey = await readPositionSnapshotKey(rpcs, nft, state.tokenId);
     await ctx.runMutation(internal.pools.applyPoolFeeEventsWindow, {
       poolId,
       fromBlock: start,
-      toBlock: scannedTo,
+      toBlock: safeHead,
       events: staged,
-      cursorBlock: scannedTo,
-      status: complete ? "ok" : "stale",
-      // Marcar back-fill histórico SOLO si cubre desde el origen (habilita "ok" del cron, ALTO-2/reaudit).
-      ...(complete ? { backfilledAt: Date.now() } : {}),
-      ...(reachedHead && currentKey ? { snapshotKey: currentKey } : {}),
+      cursorBlock: safeHead,
+      status: coversHistory ? "ok" : "stale",
+      ...(coversHistory ? { backfilledAt: Date.now() } : {}),
+      ...(currentKey ? { snapshotKey: currentKey } : {}),
     });
-    return { ok: true, reachedHead, complete, totalEvents: staged.length, chunks, cursorBlock: scannedTo };
+    return { ok: true, complete: true, coversHistory, totalEvents: staged.length, start, cursorBlock: safeHead };
+  },
+});
+
+// (JAV-119) UN BOTÓN: back-fill de TODOS los pools (pocos por usuario). Secuencial (suave con los RPC
+// públicos) y acotado por `limit`. Cada pool autodetecta su inicio. Idempotente (re-ejecutar no duplica).
+export const backfillAllPoolLifetimes = internalAction({
+  args: { limit: v.optional(v.number()) },
+  handler: async (ctx, { limit }): Promise<any> => {
+    const all = await ctx.runQuery(internal.pools.listPoolsInternal);
+    const targets = all.filter((p: any) => p.tokenId && LOGS_RPC[p.network] && NFT_MANAGER[p.network]);
+    const cap = Math.max(1, Math.min(limit ?? 50, 100));
+    const slice = targets.slice(0, cap);
+    const results: any[] = [];
+    for (const p of slice) {
+      try {
+        const r: any = await ctx.runAction(internal.actions.poolScanner.backfillPoolLifetime, { poolId: p._id });
+        results.push({ poolId: p._id, pair: p.pair, ...r });
+      } catch (e) {
+        results.push({ poolId: p._id, pair: p.pair, ok: false, reason: String(e).slice(0, 200) });
+      }
+    }
+    return { considered: targets.length, processed: results.length, ok: results.filter(r => r.ok).length, results };
   },
 });
 

@@ -1148,9 +1148,9 @@ export const refreshAllPoolLifetimes = internalAction({
 
 // (JAV-117 decisión A · JAV-119) Back-fill HISTÓRICO puntual: reconstruye el total cobrado leyendo TODOS
 // los eventos de la posición. Por defecto GRATIS (RPC público de archivo LOGS_RPC + range-halving), sin
-// API key. `fromBlock` opcional fuerza el inicio; si no, se AUTODERIVA desde initialLiquidityAt (timestamp→
-// bloque) con margen → evita escanear desde el bloque 0. `rpcUrl` opcional sobreescribe el proveedor
-// (p. ej. Alchemy PAYG). Se dispara a MANO (dashboard) o vía backfillAllPoolLifetimes. Idempotente.
+// API key. Inicia en el BLOQUE 0 por defecto (certifica histórico real, sin heurísticas); `fromBlock`
+// opcional fuerza un inicio más arriba pero entonces NO certifica (queda stale). `rpcUrl` opcional
+// sobreescribe el proveedor (p. ej. Alchemy PAYG). Se dispara a MANO o vía backfillAllPoolLifetimes. Idempotente.
 const BACKFILL_CALL_BUDGET = 2_000;   // tope de getLogs por pool (one-off, guard anti-runaway)
 export const backfillPoolLifetime = internalAction({
   args: { poolId: v.id("pools"), fromBlock: v.optional(v.number()), rpcUrl: v.optional(v.string()) },

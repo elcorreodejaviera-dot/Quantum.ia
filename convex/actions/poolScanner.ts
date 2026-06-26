@@ -947,9 +947,13 @@ async function refreshOnePoolLifetime(ctx: any, pool: any): Promise<LifetimeCate
 
   const cursor: number | null = pool.feesLifetimeCursorBlock ?? null;
   const storedKey: string | null = pool.lifetimeSnapshotKey ?? null;
+  // (ALTO-2) status "ok" SOLO si el histórico está cubierto (back-fill completo). Sin él → como mucho "stale":
+  // el incremental no prueba que existan los eventos anteriores al cursor inicial.
+  const hasBackfill: boolean = pool.feesLifetimeBackfilledAt != null;
+  const okOrStale = hasBackfill ? "ok" : "stale";
 
   // Primera vez: no intentamos back-fill amplio con Free (rango enorme). Inicializamos el cursor en el
-  // safe head y marcamos `stale` (el total cobrado histórico lo rellena el script externo, decisión A).
+  // safe head y marcamos `stale` (el total cobrado histórico lo rellena backfillPoolLifetime, decisión A).
   if (cursor == null) {
     await ctx.runMutation(internal.pools.patchPoolLifetimeMeta, {
       poolId: pool._id, cursorBlock: safeHead, snapshotKey: currentKey, status: "stale",
@@ -958,25 +962,28 @@ async function refreshOnePoolLifetime(ctx: any, pool: any): Promise<LifetimeCate
   }
 
   // Sin cambio estructural → avanzar cursor sin pedir logs (camino barato, la mayoría de las corridas).
+  // (ALTO-2) NO marcar "ok" si no hay back-fill: conservar "stale" para no presentar un total incompleto
+  // como confiable.
   if (storedKey != null && currentKey === storedKey) {
     if (cursor < safeHead) {
       await ctx.runMutation(internal.pools.patchPoolLifetimeMeta, {
-        poolId: pool._id, cursorBlock: safeHead, snapshotKey: currentKey, status: "ok",
+        poolId: pool._id, cursorBlock: safeHead, snapshotKey: currentKey, status: okOrStale,
       });
     }
     return "nochange";
   }
 
   // Cambio estructural (o key desconocida) → escanear incremental, chunked por rango + presupuesto.
+  // (ALTO-1) STAGING: acumulamos los logs de la ventana contigua leída con ÉXITO y SOLO al final
+  // reemplazamos atómicamente. Ante fallo de getLogs NO tocamos la tabla ni los agregados.
   const margin = conf;   // re-escaneo anti-reorg de una ventana corta
   const startBlock = Math.max(0, cursor + 1 - margin);
-  // Borrar logs de la ventana re-escaneada antes de reinsertar la rama canónica (anti-reorg ALTO-3).
-  await ctx.runMutation(internal.pools.deletePoolFeeEventsFromBlock, { poolId: pool._id, fromBlock: startBlock });
-
   const tokenIdTopic = "0x" + pad(BigInt(pool.tokenId));
+  const staged: any[] = [];
   let fromBlock = startBlock;
   let scannedTo = startBlock - 1;
   let chunks = 0;
+  let failed = false;
   while (fromBlock <= safeHead && chunks < GETLOGS_MAX_CHUNKS_PER_RUN) {
     const toBlock = Math.min(fromBlock + ALCHEMY_GETLOGS_MAX_RANGE - 1, safeHead);
     let logs: RpcLog[];
@@ -984,31 +991,34 @@ async function refreshOnePoolLifetime(ctx: any, pool: any): Promise<LifetimeCate
       logs = await rpcGetLogs(url, nft, tokenIdTopic, fromBlock, toBlock);
     } catch (e) {
       console.error(`refreshOnePoolLifetime: getLogs falló pool ${pool._id}`, e);
-      // Persistir el progreso parcial y marcar error; el próximo ciclo continúa desde scannedTo.
-      await ctx.runMutation(internal.pools.recomputePoolLifetimeAggregates, {
-        poolId: pool._id, cursorBlock: Math.max(cursor, scannedTo), status: "error",
-      });
-      return "errored";
+      failed = true;
+      break;   // no romper la contigüidad; aplicamos solo lo leído OK
     }
-    const events = logs.map(decodePoolFeeLog).filter((e: any) => e != null);
-    if (events.length) {
-      await ctx.runMutation(internal.pools.upsertPoolFeeEvents, { poolId: pool._id, events });
-    }
+    for (const ev of logs.map(decodePoolFeeLog)) { if (ev != null) staged.push(ev); }
     scannedTo = toBlock;
     fromBlock = toBlock + 1;
     chunks++;
   }
 
-  const reachedHead = scannedTo >= safeHead;
-  // Recomputar agregados DESDE LA TABLA. snapshotKey solo se actualiza al ponerse al día (si no, el
-  // próximo ciclo seguirá viendo currentKey != storedKey y continuará el barrido pendiente → stale).
-  await ctx.runMutation(internal.pools.recomputePoolLifetimeAggregates, {
+  // No se leyó NADA con éxito (falló el primer chunk): no mutar tabla; solo marcar error conservando todo.
+  if (scannedTo < startBlock) {
+    await ctx.runMutation(internal.pools.patchPoolLifetimeMeta, { poolId: pool._id, status: "error" });
+    return "errored";
+  }
+
+  // Reemplazo atómico de la ventana contigua leída [startBlock, scannedTo] (borra+inserta+recompute).
+  const reachedHead = !failed && scannedTo >= safeHead;
+  await ctx.runMutation(internal.pools.applyPoolFeeEventsWindow, {
     poolId: pool._id,
+    fromBlock: startBlock,
+    toBlock: scannedTo,
+    events: staged,
     cursorBlock: scannedTo,
-    status: reachedHead ? "ok" : "stale",
+    status: failed ? "error" : (reachedHead ? okOrStale : "stale"),
+    // snapshotKey solo al ponerse al día sin fallos (si no, el próximo ciclo continúa el barrido pendiente).
     ...(reachedHead ? { snapshotKey: currentKey } : {}),
   });
-  return reachedHead ? "updated" : "stale";
+  return failed ? "errored" : (reachedHead ? "updated" : "stale");
 }
 
 export const refreshAllPoolLifetimes = internalAction({
@@ -1054,15 +1064,17 @@ export const backfillPoolLifetime = internalAction({
     const safeHead = latest - conf;
     if (safeHead <= 0) return { ok: false, reason: "cadena demasiado nueva" };
 
-    // Desde 0 por defecto (el filtro por tokenId indexed mantiene el resultado chico). Borra todo lo
-    // previo de la ventana para reconstruir limpio (idempotente y a prueba de re-ejecuciones).
+    // (ALTO-1) Desde 0 por defecto (el filtro por tokenId indexed mantiene el resultado chico). STAGING:
+    // acumulamos los eventos de la ventana contigua leída con ÉXITO y NO borramos nada hasta el final.
+    // Ante un fallo de getLogs aplicamos solo lo ya leído ([start, scannedTo]) y NO marcamos backfill
+    // completo (no tocamos el tail no leído).
     const start = Math.max(0, fromBlock ?? 0);
-    await ctx.runMutation(internal.pools.deletePoolFeeEventsFromBlock, { poolId, fromBlock: start });
-
     const tokenIdTopic = "0x" + pad(BigInt(state.tokenId));
+    const staged: any[] = [];
     let from = start;
+    let scannedTo = start - 1;
     let chunks = 0;
-    let totalEvents = 0;
+    let failedAt: number | null = null;
     while (from <= safeHead && chunks < BACKFILL_MAX_CHUNKS) {
       const to = Math.min(from + BACKFILL_MAX_RANGE - 1, safeHead);
       let logs: RpcLog[];
@@ -1070,25 +1082,34 @@ export const backfillPoolLifetime = internalAction({
         logs = await rpcGetLogs(url, nft, tokenIdTopic, from, to);
       } catch (e) {
         console.error(`backfillPoolLifetime: getLogs falló pool ${poolId} [${from},${to}]`, e);
-        return { ok: false, reason: "getLogs falló (¿rango muy amplio para el RPC?)", scannedTo: from - 1, totalEvents };
+        failedAt = from;
+        break;
       }
-      const events = logs.map(decodePoolFeeLog).filter((e: any) => e != null);
-      if (events.length) {
-        await ctx.runMutation(internal.pools.upsertPoolFeeEvents, { poolId, events });
-        totalEvents += events.length;
-      }
+      for (const ev of logs.map(decodePoolFeeLog)) { if (ev != null) staged.push(ev); }
+      scannedTo = to;
       from = to + 1;
       chunks++;
     }
-    const reachedHead = from > safeHead;
-    const currentKey = await readPositionSnapshotKey(rpcs, nft, state.tokenId);
-    await ctx.runMutation(internal.pools.recomputePoolLifetimeAggregates, {
+
+    if (scannedTo < start) {
+      // Falló el primer chunk: no tocar nada (cache previo intacto).
+      return { ok: false, reason: "getLogs falló en el primer chunk (¿rango muy amplio para el RPC?)", totalEvents: 0 };
+    }
+
+    const reachedHead = failedAt == null && from > safeHead;
+    const currentKey = reachedHead ? await readPositionSnapshotKey(rpcs, nft, state.tokenId) : null;
+    await ctx.runMutation(internal.pools.applyPoolFeeEventsWindow, {
       poolId,
-      cursorBlock: reachedHead ? safeHead : from - 1,
+      fromBlock: start,
+      toBlock: scannedTo,
+      events: staged,
+      cursorBlock: scannedTo,
       status: reachedHead ? "ok" : "stale",
+      // Solo al completar TODO el rango marcamos back-fill histórico → habilita status "ok" del cron (ALTO-2).
+      ...(reachedHead ? { backfilledAt: Date.now() } : {}),
       ...(reachedHead && currentKey ? { snapshotKey: currentKey } : {}),
     });
-    return { ok: true, reachedHead, totalEvents, chunks, cursorBlock: reachedHead ? safeHead : from - 1 };
+    return { ok: true, reachedHead, totalEvents: staged.length, chunks, cursorBlock: scannedTo };
   },
 });
 

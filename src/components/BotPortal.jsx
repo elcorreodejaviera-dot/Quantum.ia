@@ -466,8 +466,11 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
   const lifetimeUsd = Number.isFinite(pool.feesLifetimeUsd) ? pool.feesLifetimeUsd : null;
   const lifetimeStatus = pool.feesLifetimeStatus ?? null;
   const showLifetime = !!pool.tokenId && lifetimeStr != null;
+  // (MEDIO-1) no_key/error degradan a "—" aunque haya cache previo: no refrescable ⇒ no presentarlo
+  // como número utilizable. Solo ok/stale muestran valor (stale con marca *).
+  const lifetimeUsable = lifetimeStatus !== 'no_key' && lifetimeStatus !== 'error';
   const lifetimeValueNode =
-    lifetimeUsd != null
+    (lifetimeUsable && lifetimeUsd != null)
       ? <span className="positive">{formatUsd2(lifetimeUsd)}{lifetimeStatus === 'stale' ? ' *' : ''}</span>
       : '—';
   const lifetimeTip =

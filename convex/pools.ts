@@ -279,16 +279,21 @@ export const getPoolLifetimeStateInternal = internalQuery({
       closed: pool.closed ?? false,
       cursorBlock: pool.feesLifetimeCursorBlock ?? null,
       snapshotKey: pool.lifetimeSnapshotKey ?? null,
+      backfilledAt: pool.feesLifetimeBackfilledAt ?? null,
       initialLiquidityAt: pool.initialLiquidityAt ?? null,
     };
   },
 });
 
-// Upsert idempotente de eventos (Convex no tiene índices únicos reales → unicidad por mutation).
-// Dedupe por lote en memoria + búsqueda por (poolId, txHash, logIndex) antes de insertar.
-export const upsertPoolFeeEvents = internalMutation({
+// (ALTO-1) Reemplazo ATÓMICO de una ventana de eventos + recompute. Se llama SOLO con eventos ya leídos
+// con éxito de `[fromBlock, toBlock]` (una sola transacción Convex): borra esa ventana, reinserta la rama
+// canónica (dedupe por lote), recomputa agregados DESDE LA TABLA y persiste cursor/estado. Como NUNCA se
+// borra antes de tener los logs, un fallo de RPC no puede convertir un cache correcto en subconteo.
+export const applyPoolFeeEventsWindow = internalMutation({
   args: {
     poolId: v.id("pools"),
+    fromBlock: v.number(),
+    toBlock: v.number(),
     events: v.array(v.object({
       txHash: v.string(),
       logIndex: v.number(),
@@ -298,77 +303,59 @@ export const upsertPoolFeeEvents = internalMutation({
       amount0Raw: v.string(),
       amount1Raw: v.string(),
     })),
-  },
-  handler: async (ctx, { poolId, events }) => {
-    const seen = new Set<string>();
-    let inserted = 0;
-    for (const e of events) {
-      const key = `${e.txHash}:${e.logIndex}`;
-      if (seen.has(key)) continue;   // dedupe por lote
-      seen.add(key);
-      const existing = await ctx.db
-        .query("pool_fee_events")
-        .withIndex("by_pool_log", q => q.eq("poolId", poolId).eq("txHash", e.txHash).eq("logIndex", e.logIndex))
-        .first();
-      if (existing) continue;        // idempotente: ya aplicado
-      await ctx.db.insert("pool_fee_events", { poolId, ...e });
-      inserted++;
-    }
-    return { inserted };
-  },
-});
-
-// Limpieza anti-reorg: borra los eventos del pool con blockNumber >= fromBlock antes de reinsertar la
-// rama canónica. Evita logs huérfanos de una rama reorganizada (no basta con > latest−confirmations).
-export const deletePoolFeeEventsFromBlock = internalMutation({
-  args: { poolId: v.id("pools"), fromBlock: v.number() },
-  handler: async (ctx, { poolId, fromBlock }) => {
-    const stale = await ctx.db
-      .query("pool_fee_events")
-      .withIndex("by_pool_block", q => q.eq("poolId", poolId).gte("blockNumber", fromBlock))
-      .collect();
-    for (const ev of stale) await ctx.db.delete(ev._id);
-    return { deleted: stale.length };
-  },
-});
-
-// Recomputa los agregados raw DESDE LA TABLA (fuente de verdad) y persiste cursor/estado. Se llama tras
-// upsert de eventos. snapshotKey/status opcionales se patchean si vienen.
-export const recomputePoolLifetimeAggregates = internalMutation({
-  args: {
-    poolId: v.id("pools"),
     cursorBlock: v.optional(v.number()),
     status: v.optional(v.union(v.literal("ok"), v.literal("stale"), v.literal("no_key"), v.literal("error"))),
     snapshotKey: v.optional(v.string()),
+    backfilledAt: v.optional(v.number()),
   },
-  handler: async (ctx, { poolId, cursorBlock, status, snapshotKey }) => {
-    const events = await ctx.db
+  handler: async (ctx, { poolId, fromBlock, toBlock, events, cursorBlock, status, snapshotKey, backfilledAt }) => {
+    // 1) Borrar SOLO la ventana re-escaneada (anti-reorg: elimina logs de rama vieja en [fromBlock,toBlock]).
+    const inWindow = await ctx.db
+      .query("pool_fee_events")
+      .withIndex("by_pool_block", q => q.eq("poolId", poolId).gte("blockNumber", fromBlock).lte("blockNumber", toBlock))
+      .collect();
+    for (const ev of inWindow) await ctx.db.delete(ev._id);
+    // 2) Reinsertar la rama canónica (dedupe por lote en memoria).
+    const seen = new Set<string>();
+    for (const e of events) {
+      if (e.blockNumber < fromBlock || e.blockNumber > toBlock) continue;   // defensa: solo la ventana
+      const key = `${e.txHash}:${e.logIndex}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      await ctx.db.insert("pool_fee_events", { poolId, ...e });
+    }
+    // 3) Recomputar agregados desde la tabla completa y persistir meta.
+    const all = await ctx.db
       .query("pool_fee_events")
       .withIndex("by_pool_block", q => q.eq("poolId", poolId))
       .collect();
-    const agg = computeLifetimeAggregates(events);
+    const agg = computeLifetimeAggregates(all);
     const patch: Record<string, unknown> = { ...agg, feesLifetimeCalcAt: Date.now() };
     if (cursorBlock !== undefined) patch.feesLifetimeCursorBlock = cursorBlock;
     if (status !== undefined) patch.feesLifetimeStatus = status;
     if (snapshotKey !== undefined) patch.lifetimeSnapshotKey = snapshotKey;
+    if (backfilledAt !== undefined) patch.feesLifetimeBackfilledAt = backfilledAt;
     await ctx.db.patch(poolId, patch);
-    return { events: events.length, ...agg };
+    return { events: all.length, ...agg };
   },
 });
 
-// Camino "sin getLogs" (sin cambio estructural): solo avanza cursor + snapshot + estado, sin tocar agregados.
+// Camino SIN tocar la tabla (sin cambio estructural / init / no_key / error): solo patchea meta. NUNCA
+// borra eventos ni agregados → un error transitorio no degrada el cache previo (a lo sumo marca estado).
 export const patchPoolLifetimeMeta = internalMutation({
   args: {
     poolId: v.id("pools"),
     cursorBlock: v.optional(v.number()),
     status: v.optional(v.union(v.literal("ok"), v.literal("stale"), v.literal("no_key"), v.literal("error"))),
     snapshotKey: v.optional(v.string()),
+    backfilledAt: v.optional(v.number()),
   },
-  handler: async (ctx, { poolId, cursorBlock, status, snapshotKey }) => {
+  handler: async (ctx, { poolId, cursorBlock, status, snapshotKey, backfilledAt }) => {
     const patch: Record<string, unknown> = { feesLifetimeCalcAt: Date.now() };
     if (cursorBlock !== undefined) patch.feesLifetimeCursorBlock = cursorBlock;
     if (status !== undefined) patch.feesLifetimeStatus = status;
     if (snapshotKey !== undefined) patch.lifetimeSnapshotKey = snapshotKey;
+    if (backfilledAt !== undefined) patch.feesLifetimeBackfilledAt = backfilledAt;
     await ctx.db.patch(poolId, patch);
   },
 });

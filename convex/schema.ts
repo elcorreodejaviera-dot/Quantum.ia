@@ -82,6 +82,10 @@ export default defineSchema({
     principalDebt1: v.optional(v.string()),
     feesLifetimeCursorBlock: v.optional(v.number()),  // último bloque FINALIZADO agregado (incremental)
     feesLifetimeCalcAt: v.optional(v.number()),       // timestamp del último recálculo
+    // (JAV-117 ALTO-2) Marcador de cobertura histórica: timestamp del back-fill completo (eventos desde
+    // el origen presentes en pool_fee_events). SIN él, el total NO es retroactivo → status nunca puede
+    // ser "ok" (a lo sumo "stale"). Lo setea backfillPoolLifetime al llegar al safe head.
+    feesLifetimeBackfilledAt: v.optional(v.number()),
     // ok = al día · stale = cache válida pero el incremental no alcanzó · no_key = falta ALCHEMY_API_KEY
     // · error = fallo de lectura. La UI distingue estos casos (no solo "—").
     feesLifetimeStatus: v.optional(

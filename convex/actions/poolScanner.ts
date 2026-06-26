@@ -192,14 +192,23 @@ async function getLatestBlock(rpcs: string[]): Promise<number | null> {
 // (JAV-119) Back-fill GRATIS: getLogs por RPC público de archivo + range-halving + timestamp→bloque.
 // =====================================================================================
 
-// RPC públicos de archivo para los getLogs del BACK-FILL (sin API key). Suelen admitir rangos amplios
-// filtrando por topic; el range-halving se adapta si alguno los rechaza. NO se usan en el cron incremental.
-const LOGS_RPC: Record<string, string[]> = {
-  Ethereum: ["https://eth.drpc.org", "https://ethereum-rpc.publicnode.com"],
-  Arbitrum: ["https://arbitrum.drpc.org", "https://arbitrum-one-rpc.publicnode.com"],
-  Optimism: ["https://optimism.drpc.org", "https://optimism-rpc.publicnode.com"],
-  Base:     ["https://base.drpc.org", "https://base-rpc.publicnode.com"],
+// (JAV-119 v2) Proveedor de getLogs del BACK-FILL = Blockscout REST (gratis, SIN API key). Los RPC
+// públicos sin key ya gatean eth_getLogs de archivo (drpc/publicnode), y Alchemy/Blast Free capan a 10
+// bloques. Blockscout sirve los logs INDEXADOS y, clave, **filtra por topic1=tokenId** → aísla la posición
+// aunque el owner sea una wallet custodial/compartida (lo que alchemy_getAssetTransfers no podía atribuir).
+// NO se usa en el cron incremental (sigue con Alchemy). El `rpcUrl` opcional del back-fill mantiene el
+// camino eth_getLogs clásico (p. ej. Alchemy PAYG) como escape manual.
+const LOGS_BLOCKSCOUT: Record<string, string> = {
+  Ethereum: "https://eth.blockscout.com",
+  Arbitrum: "https://arbitrum.blockscout.com",
+  Optimism: "https://optimism.blockscout.com",
+  Base:     "https://base.blockscout.com",
 };
+
+// topic0 del evento Transfer ERC721 (tokenId = topic3 indexed). Sirve para hallar el bloque de mint real.
+const TOPIC_TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+// Blockscout es más lento que un RPC (índice): ventana amplia puede tardar varios s → timeout más holgado.
+const BLOCKSCOUT_TIMEOUT_MS = 25_000;
 
 // El RPC rechazó el rango por demasiado amplio / demasiados resultados (no es un fallo de transporte):
 // se resuelve partiendo el rango a la mitad y reintentando.
@@ -269,10 +278,15 @@ async function getLogsRangeMulti(urls: string[], address: string, tokenIdTopic: 
   throw lastErr ?? new Error("getLogs: todos los proveedores fallaron");
 }
 
-// Recorre [from, to] con una pila de subrangos: si un subrango es rechazado por tamaño, lo parte a la
+// Resultado de leer una ventana: logs leídos, o "range" si hay que partirla (rango muy grande / timeout).
+type RangeResult = { ok: true; logs: RpcLog[] } | { ok: "range" };
+type RangeFetcher = (lo: number, hi: number) => Promise<RangeResult>;
+
+// Recorre [from, to] con una pila de subrangos: si `fetchRange` pide partir ("range"), lo divide a la
 // mitad; acumula todos los logs. Acotado por un presupuesto de requests (one-off). Devuelve los logs y si
-// se completó (false = se agotó el presupuesto → el caller marca stale).
-async function getLogsAdaptive(urls: string[], address: string, tokenIdTopic: string, from: number, to: number, initialSpan: number, budget: number): Promise<{ logs: RpcLog[]; complete: boolean }> {
+// se completó (false = se agotó el presupuesto → el caller NO certifica). Un error de transporte/proveedor
+// (que no sea "range") se propaga → el caller NO muta. Genérico sobre el proveedor (eth RPC o Blockscout).
+async function getLogsAdaptive(fetchRange: RangeFetcher, from: number, to: number, initialSpan: number, budget: number): Promise<{ logs: RpcLog[]; complete: boolean }> {
   const out: RpcLog[] = [];
   // Pila de [lo, hi] pendientes, en trozos de initialSpan (de mayor a menor bloque para procesar antes lo reciente).
   const stack: Array<[number, number]> = [];
@@ -282,7 +296,7 @@ async function getLogsAdaptive(urls: string[], address: string, tokenIdTopic: st
     if (calls >= budget) return { logs: out, complete: false };
     const [lo, hi] = stack.pop()!;
     calls++;
-    const r = await getLogsRangeMulti(urls, address, tokenIdTopic, lo, hi);
+    const r = await fetchRange(lo, hi);
     if (r.ok === true) { for (const l of r.logs) out.push(l); continue; }
     // Rango rechazado: partir a la mitad (si ya es 1 bloque y aun así lo rechaza, no es por rango → abortar).
     if (hi <= lo) throw new Error(`getLogs rechaza un solo bloque ${lo}; no es problema de rango`);
@@ -291,6 +305,160 @@ async function getLogsAdaptive(urls: string[], address: string, tokenIdTopic: st
     stack.push([lo, mid]);
   }
   return { logs: out, complete: true };
+}
+
+// ===== Blockscout REST: getLogs indexado por tokenId + mint + estado de indexación + relleno de blockHash =====
+
+// Una página de getLogs vía Blockscout REST (Etherscan-compatible). Devuelve logs (blockHash="" se rellena
+// después). status:"0" con "No records found" ⇒ []; otro status:0 ⇒ Error (no mutar). HTTP 429/403/401/5xx
+// ⇒ Error (abortar, NO halving). timeout ⇒ GetLogsRangeTooLargeError (→ halving).
+async function blockscoutLogsPage(baseUrl: string, params: Record<string, string>): Promise<RpcLog[]> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), BLOCKSCOUT_TIMEOUT_MS);
+  try {
+    const qs = new URLSearchParams({ module: "logs", action: "getLogs", ...params }).toString();
+    const res = await fetch(`${baseUrl}/api?${qs}`, { signal: controller.signal });
+    if (!res.ok) throw new Error(`blockscout HTTP ${res.status}`);   // 429/403/5xx/deprecación → abortar
+    const json = await res.json() as { status?: string; message?: string; result?: any };
+    if (json.status === "1" && Array.isArray(json.result)) {
+      return json.result.map((l: any): RpcLog => ({
+        transactionHash: l.transactionHash,
+        logIndex: l.logIndex,
+        blockNumber: l.blockNumber,
+        blockHash: "",                       // la API legacy NO lo trae → se rellena vía eth_getBlockByNumber
+        topics: (l.topics ?? []).filter((t: string | null) => t != null),
+        data: l.data ?? "0x",
+      }));
+    }
+    // status "0": vacío SOLO si "No records found"; cualquier otro es error (no mutar).
+    if (json.status === "0" && /no records found/i.test(json.message ?? "")) return [];
+    throw new Error(`blockscout getLogs status=${json.status} msg=${json.message ?? ""}`);
+  } catch (e: unknown) {
+    if (e instanceof Error && e.name === "AbortError") throw new GetLogsRangeTooLargeError(`blockscout timeout ${BLOCKSCOUT_TIMEOUT_MS}ms`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Lee TODOS los logs de la posición en [from,to] (paginando). Camino primario: filtrar SOLO por
+// topic1=tokenId (1 request/ventana) y descartar topic0 desconocidos localmente. Fallback: 3 requests
+// (una por topic0) si el camino primario falla por params (no por timeout/HTTP duro).
+async function blockscoutGetLogsWindow(baseUrl: string, address: string, tokenIdTopic: string, from: number, to: number): Promise<RpcLog[]> {
+  const base = { address, fromBlock: String(from), toBlock: String(to), offset: "1000" };
+  const paged = async (extra: Record<string, string>): Promise<RpcLog[]> => {
+    const acc: RpcLog[] = [];
+    for (let page = 1; page <= 50; page++) {           // tope duro anti-runaway (50k logs/ventana)
+      const got = await blockscoutLogsPage(baseUrl, { ...base, ...extra, page: String(page) });
+      acc.push(...got);
+      if (got.length < 1000) return acc;               // última página
+    }
+    throw new Error("blockscout: paginación excede el tope (50 páginas)");   // no truncar en silencio
+  };
+  const known = new Set([TOPIC_INCREASE, TOPIC_DECREASE, TOPIC_COLLECT]);
+  try {
+    const logs = await paged({ topic1: tokenIdTopic });                      // primario: topic1-solo
+    return logs.filter(l => known.has((l.topics?.[0] ?? "").toLowerCase()));
+  } catch (e) {
+    if (e instanceof GetLogsRangeTooLargeError) throw e;                      // timeout → halving
+    if (e instanceof Error && /HTTP \d+/.test(e.message)) throw e;           // 429/403/5xx → abortar
+    // (CodeRabbit) El fallback a 3×topic0 es SOLO para el caso "Blockscout exige topic0"; cualquier otro
+    // error status:0 (rate limit, backend, params) NO debe enmascararse → se relanza (no mutar).
+    const requiresTopic0 = e instanceof Error && /(topic0|topic.*required|required.*topic|invalid.*topic|unsupported.*filter)/i.test(e.message);
+    if (!requiresTopic0) throw e;
+    // Fallback: 3 llamadas por topic0 (algunos Blockscout exigen topic0).
+    const out: RpcLog[] = [];
+    for (const t0 of [TOPIC_INCREASE, TOPIC_DECREASE, TOPIC_COLLECT]) {
+      out.push(...await paged({ topic0: t0, topic1: tokenIdTopic, topic0_1_opr: "and" }));
+    }
+    return out;
+  }
+}
+
+// Fetcher para getLogsAdaptive sobre Blockscout: timeout ⇒ "range" (partir); el resto se propaga (no mutar).
+function blockscoutFetcher(baseUrl: string, address: string, tokenIdTopic: string): RangeFetcher {
+  return async (lo, hi) => {
+    try { return { ok: true, logs: await blockscoutGetLogsWindow(baseUrl, address, tokenIdTopic, lo, hi) }; }
+    catch (e) { if (e instanceof GetLogsRangeTooLargeError) return { ok: "range" }; throw e; }
+  };
+}
+
+// Bloque de MINT real del tokenId desde el índice de Blockscout (transfers de la instancia NFT). El Transfer
+// `from 0x0` es el origen on-chain → arrancar ahí certifica histórico y acota el escaneo (1 llamada). null
+// si no se puede determinar (red sin Blockscout, error) → el caller cae a start=0 o no certifica.
+async function findMintBlock(baseUrl: string, nft: string, tokenId: number): Promise<number | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), BLOCKSCOUT_TIMEOUT_MS);
+  try {
+    let url: string | null = `${baseUrl}/api/v2/tokens/${nft}/instances/${tokenId}/transfers`;
+    for (let page = 0; page < 50 && url; page++) {        // pagina hasta hallar el mint (o agotar)
+      const res = await fetch(url, { signal: controller.signal });
+      if (!res.ok) return null;
+      const json = await res.json() as { items?: any[]; next_page_params?: any };
+      for (const t of json.items ?? []) {
+        const from = (t.from?.hash ?? "").toLowerCase();
+        if (from === "0x0000000000000000000000000000000000000000" && typeof t.block_number === "number") {
+          return t.block_number;
+        }
+      }
+      const np = json.next_page_params;
+      url = np ? `${baseUrl}/api/v2/tokens/${nft}/instances/${tokenId}/transfers?${new URLSearchParams(np).toString()}` : null;
+    }
+    return null;
+  } catch { return null; }
+  finally { clearTimeout(timer); }
+}
+
+// ¿Blockscout terminó de indexar bloques? Solo se CERTIFICA (ok/backfilledAt) si está completo; si no, NO
+// se muta. true ⟺ finished_indexing_blocks o indexed_blocks_ratio === "1". Ante error/duda ⇒ false (no mutar).
+async function blockscoutFullyIndexed(baseUrl: string): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${baseUrl}/api/v2/main-page/indexing-status`, { signal: controller.signal });
+    if (!res.ok) return false;
+    const json = await res.json() as { finished_indexing_blocks?: boolean; indexed_blocks_ratio?: string };
+    // (CodeRabbit) El booleano explícito MANDA: si viene false, NO permitir que indexed_blocks_ratio lo
+    // sobreescriba (mutaría sobre índice incompleto). Solo se usa el ratio cuando el booleano no está.
+    if (typeof json.finished_indexing_blocks === "boolean") return json.finished_indexing_blocks === true;
+    return json.indexed_blocks_ratio === "1";
+  } catch { return false; }
+  finally { clearTimeout(timer); }
+}
+
+// Hash de un bloque vía eth_getBlockByNumber (RPC público, sin key). null si ningún proveedor responde.
+async function getBlockHashByNumber(rpcs: string[], blockNumber: number): Promise<string | null> {
+  for (const url of rpcs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", method: "eth_getBlockByNumber", params: ["0x" + blockNumber.toString(16), false], id: 1 }),
+        signal: controller.signal,
+      });
+      if (res.ok) {
+        const json = await res.json() as { result?: { hash?: string } };
+        const hash = json.result?.hash;
+        if (hash) return hash;
+      }
+    } catch { /* siguiente RPC */ }
+    finally { clearTimeout(timer); }
+  }
+  return null;
+}
+
+// Rellena blockHash (ausente en la API legacy de Blockscout) por bloque DISTINTO. Devuelve los logs con su
+// blockHash real, o null si ALGÚN bloque no se pudo resolver (⇒ logs incompletos ⇒ el caller NO certifica/NO muta).
+async function fillBlockHashes(rpcs: string[], logs: RpcLog[]): Promise<RpcLog[] | null> {
+  const distinct = [...new Set(logs.map(l => Number(BigInt(l.blockNumber))))];
+  const byBlock = new Map<number, string>();
+  for (const bn of distinct) {
+    const hash = await getBlockHashByNumber(rpcs, bn);
+    if (!hash) return null;
+    byBlock.set(bn, hash);
+  }
+  return logs.map(l => ({ ...l, blockHash: byBlock.get(Number(BigInt(l.blockNumber)))! }));
 }
 
 // (JAV-117) Snapshot estructural de positions(): liquidity + feeGrowthInside0/1Last + tokensOwed0/1
@@ -1152,11 +1320,12 @@ export const refreshAllPoolLifetimes = internalAction({
   },
 });
 
-// (JAV-117 decisión A · JAV-119) Back-fill HISTÓRICO puntual: reconstruye el total cobrado leyendo TODOS
-// los eventos de la posición. Por defecto GRATIS (RPC público de archivo LOGS_RPC + range-halving), sin
-// API key. Inicia en el BLOQUE 0 por defecto (certifica histórico real, sin heurísticas); `fromBlock`
-// opcional fuerza un inicio más arriba pero entonces NO certifica (queda stale). `rpcUrl` opcional
-// sobreescribe el proveedor (p. ej. Alchemy PAYG). Se dispara a MANO o vía backfillAllPoolLifetimes. Idempotente.
+// (JAV-117 decisión A · JAV-119 v2) Back-fill HISTÓRICO puntual: reconstruye el total cobrado leyendo TODOS
+// los eventos de la posición. Por defecto GRATIS vía Blockscout (indexado, sin API key, filtra por tokenId →
+// sirve para wallets custodiales). Arranca en el MINT real (Transfer from 0x0 desde el índice) → certifica
+// histórico y acota el escaneo. `rpcUrl` opcional usa el camino eth_getLogs clásico (p. ej. Alchemy PAYG).
+// Solo CERTIFICA/MUTA si: mint verificado + logs completos + blockHash completo + paginación completa +
+// Blockscout fully indexed (Codex). Se dispara a MANO o vía backfillAllPoolLifetimes. Idempotente.
 const BACKFILL_CALL_BUDGET = 2_000;   // tope de getLogs por pool (one-off, guard anti-runaway)
 export const backfillPoolLifetime = internalAction({
   args: { poolId: v.id("pools"), fromBlock: v.optional(v.number()), rpcUrl: v.optional(v.string()) },
@@ -1166,9 +1335,8 @@ export const backfillPoolLifetime = internalAction({
     const rpcs = RPC[state.network];
     const nft = NFT_MANAGER[state.network];
     if (!rpcs || !nft) return { ok: false, reason: "red no soportada" };
-    // Proveedor(es) de getLogs: rpcUrl explícito, o los RPC públicos de archivo (gratis, sin key).
-    const logUrls = rpcUrl ? [rpcUrl] : LOGS_RPC[state.network];
-    if (!logUrls || logUrls.length === 0) return { ok: false, reason: "sin RPC de getLogs para la red" };
+    const baseUrl = LOGS_BLOCKSCOUT[state.network];
+    if (!rpcUrl && !baseUrl) return { ok: false, reason: "sin Blockscout para la red" };
 
     const latest = await getLatestBlock(rpcs);
     if (latest == null) return { ok: false, reason: "no se pudo leer latestBlock" };
@@ -1176,19 +1344,39 @@ export const backfillPoolLifetime = internalAction({
     const safeHead = latest - conf;
     if (safeHead <= 0) return { ok: false, reason: "cadena demasiado nueva" };
 
-    // (Codex JAV-119) Inicio = ORIGEN (bloque 0) por defecto, para certificar histórico completo SIN
-    // heurísticas inseguras (initialLiquidityAt es la 1ª observación del sistema, no el mint on-chain).
-    // El range-halving hace barato el barrido de rangos vacíos en proveedores de rango amplio. `fromBlock`
-    // explícito permite arrancar más arriba (entonces NO se certifica histórico → queda stale).
-    const start = Math.max(0, fromBlock ?? 0);
+    // (Codex v2) Gate de indexación: si Blockscout NO terminó de indexar, NO mutar (totales serían
+    // erróneos). No aplica al camino rpcUrl (proveedor eth propio). Se chequea ANTES de leer/mutar.
+    if (!rpcUrl && !(await blockscoutFullyIndexed(baseUrl))) {
+      return { ok: false, reason: "blockscout_indexing_incomplete", start: null };   // no mutar
+    }
+
+    // Origen: con rpcUrl (camino eth clásico), `fromBlock` explícito o 0. Sin rpcUrl, el MINT real desde
+    // Blockscout (certifica y acota). (CodeRabbit) Si NO se puede verificar el mint → NO mutar: caer a 0 y
+    // certificar sería marcar backfilledAt sin haber confirmado el origen. Se busca el mint SIEMPRE (también
+    // con fromBlock) para poder validar la cobertura.
+    const tokenId: number = state.tokenId;
+    const mintBlock = rpcUrl ? null : await findMintBlock(baseUrl, nft, tokenId);
+    if (!rpcUrl && mintBlock == null) {
+      return { ok: false, reason: "mint no verificado en Blockscout", start: null };   // no mutar
+    }
+    const start = Math.max(0, fromBlock ?? mintBlock ?? 0);
     if (start > safeHead) return { ok: false, reason: "start > safeHead (nada que escanear)" };
 
-    // Lectura adaptativa de TODO [start, safeHead] en un solo trozo inicial: si un proveedor rechaza el
-    // rango, se parte a la mitad recursivamente (acotado por BACKFILL_CALL_BUDGET).
-    const tokenIdTopic = "0x" + pad(BigInt(state.tokenId));
+    // (Codex v2 · CodeRabbit) Certifica histórico SOLO con origen verificado. rpcUrl: start===0 (eth clásico).
+    // Blockscout: arrancar EN o ANTES del mint real (start<=mintBlock) cubre todos los eventos. Un fromBlock
+    // > mint NO certifica → stale. O ya había backfill completo previo.
+    const originVerified = rpcUrl ? start === 0 : (mintBlock != null && start <= mintBlock);
+    const coversHistory = originVerified || state.backfilledAt != null;
+
+    // Lectura adaptativa de [start, safeHead] vía Blockscout (o eth si rpcUrl). Si pide partir el rango se
+    // bisecta (BACKFILL_CALL_BUDGET); un error de proveedor se propaga → NO mutar.
+    const tokenIdTopic = "0x" + pad(BigInt(tokenId));
+    const fetcher: RangeFetcher = rpcUrl
+      ? (lo, hi) => getLogsRangeMulti([rpcUrl], nft, tokenIdTopic, lo, hi)
+      : blockscoutFetcher(baseUrl, nft, tokenIdTopic);
     let scan: { logs: RpcLog[]; complete: boolean };
     try {
-      scan = await getLogsAdaptive(logUrls, nft, tokenIdTopic, start, safeHead, safeHead - start + 1, BACKFILL_CALL_BUDGET);
+      scan = await getLogsAdaptive(fetcher, start, safeHead, safeHead - start + 1, BACKFILL_CALL_BUDGET);
     } catch (e) {
       console.error(`backfillPoolLifetime: getLogs falló pool ${poolId}`, e);
       return { ok: false, reason: "getLogs falló (transporte)", start };   // no mutar: cache previo intacto
@@ -1198,11 +1386,32 @@ export const backfillPoolLifetime = internalAction({
       return { ok: false, reason: "presupuesto de getLogs agotado; reintenta", start, budget: BACKFILL_CALL_BUDGET };
     }
 
-    const staged = scan.logs.map(decodePoolFeeLog).filter((e: any) => e != null);
-    // (Codex JAV-119) Certificar histórico (backfilledAt/ok) SOLO si se cubrió desde el ORIGEN real
-    // (start===0) o ya existía un backfill completo previo. Un start>0 explícito NO certifica → stale.
-    const coversHistory = start === 0 || state.backfilledAt != null;
-    const currentKey = await readPositionSnapshotKey(rpcs, nft, state.tokenId);
+    // (Codex v2) Blockscout legacy NO trae blockHash → rellenar por bloque distinto. Si ALGUNO no resuelve,
+    // los logs están incompletos → NO mutar.
+    let logs = scan.logs;
+    if (!rpcUrl) {
+      const filled = await fillBlockHashes(rpcs, logs);
+      if (filled == null) return { ok: false, reason: "no se pudo resolver blockHash de todos los bloques", start };
+      logs = filled;
+    }
+
+    // (Codex v2) Decodificación ESTRICTA en el back-fill histórico: NO descartar en silencio. Si un log con
+    // topic0 relevante (Increase/Decrease/Collect) no decodifica, los eventos de la ventana están
+    // incompletos → subcontaríamos y marcaríamos ok/backfilledAt erróneo ⇒ ok:false SIN mutar. Los topic0
+    // no relevantes (no debería haberlos: ya se filtran al leer) se ignoran.
+    const RELEVANT_TOPIC0 = new Set([TOPIC_INCREASE, TOPIC_DECREASE, TOPIC_COLLECT]);
+    const staged: NonNullable<ReturnType<typeof decodePoolFeeLog>>[] = [];
+    for (const log of logs) {
+      const decoded = decodePoolFeeLog(log);
+      if (decoded != null) { staged.push(decoded); continue; }
+      const topic0 = (log.topics?.[0] ?? "").toLowerCase();
+      if (RELEVANT_TOPIC0.has(topic0)) {
+        console.error(`backfillPoolLifetime: log relevante no decodificable pool ${poolId}`, { blockNumber: log.blockNumber, txHash: log.transactionHash, logIndex: log.logIndex });
+        return { ok: false, reason: "log relevante no decodificable (backfill estricto)", start };   // no mutar
+      }
+      // topic0 no relevante → ignorar
+    }
+    const currentKey = await readPositionSnapshotKey(rpcs, nft, tokenId);
     await ctx.runMutation(internal.pools.applyPoolFeeEventsWindow, {
       poolId,
       fromBlock: start,
@@ -1213,7 +1422,7 @@ export const backfillPoolLifetime = internalAction({
       ...(coversHistory ? { backfilledAt: Date.now() } : {}),
       ...(currentKey ? { snapshotKey: currentKey } : {}),
     });
-    return { ok: true, complete: true, coversHistory, totalEvents: staged.length, start, cursorBlock: safeHead };
+    return { ok: true, complete: true, coversHistory, totalEvents: staged.length, start, mintBlock, cursorBlock: safeHead };
   },
 });
 
@@ -1226,7 +1435,7 @@ export const backfillAllPoolLifetimes = internalAction({
     // (CodeRabbit) Procesar primero los pools AÚN sin back-fill (backfilledAt == null) → corridas
     // sucesivas con `limit` avanzan sobre el resto en vez de reprocesar siempre el mismo prefijo.
     const targets = all
-      .filter((p: any) => p.tokenId && LOGS_RPC[p.network] && NFT_MANAGER[p.network])
+      .filter((p: any) => p.tokenId && LOGS_BLOCKSCOUT[p.network] && NFT_MANAGER[p.network])
       .sort((a: any, b: any) =>
         Number(a.feesLifetimeBackfilledAt != null) - Number(b.feesLifetimeBackfilledAt != null));
     const cap = Math.max(1, Math.min(limit ?? 50, 100));

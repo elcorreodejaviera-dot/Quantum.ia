@@ -362,6 +362,10 @@ async function blockscoutGetLogsWindow(baseUrl: string, address: string, tokenId
   } catch (e) {
     if (e instanceof GetLogsRangeTooLargeError) throw e;                      // timeout → halving
     if (e instanceof Error && /HTTP \d+/.test(e.message)) throw e;           // 429/403/5xx → abortar
+    // (CodeRabbit) El fallback a 3×topic0 es SOLO para el caso "Blockscout exige topic0"; cualquier otro
+    // error status:0 (rate limit, backend, params) NO debe enmascararse → se relanza (no mutar).
+    const requiresTopic0 = e instanceof Error && /(topic0|topic.*required|required.*topic|invalid.*topic|unsupported.*filter)/i.test(e.message);
+    if (!requiresTopic0) throw e;
     // Fallback: 3 llamadas por topic0 (algunos Blockscout exigen topic0).
     const out: RpcLog[] = [];
     for (const t0 of [TOPIC_INCREASE, TOPIC_DECREASE, TOPIC_COLLECT]) {
@@ -414,7 +418,10 @@ async function blockscoutFullyIndexed(baseUrl: string): Promise<boolean> {
     const res = await fetch(`${baseUrl}/api/v2/main-page/indexing-status`, { signal: controller.signal });
     if (!res.ok) return false;
     const json = await res.json() as { finished_indexing_blocks?: boolean; indexed_blocks_ratio?: string };
-    return json.finished_indexing_blocks === true || json.indexed_blocks_ratio === "1";
+    // (CodeRabbit) El booleano explícito MANDA: si viene false, NO permitir que indexed_blocks_ratio lo
+    // sobreescriba (mutaría sobre índice incompleto). Solo se usa el ratio cuando el booleano no está.
+    if (typeof json.finished_indexing_blocks === "boolean") return json.finished_indexing_blocks === true;
+    return json.indexed_blocks_ratio === "1";
   } catch { return false; }
   finally { clearTimeout(timer); }
 }
@@ -1343,16 +1350,22 @@ export const backfillPoolLifetime = internalAction({
       return { ok: false, reason: "blockscout_indexing_incomplete", start: null };   // no mutar
     }
 
-    // Origen: con rpcUrl, `fromBlock` explícito o 0 (camino clásico). Sin rpcUrl, el MINT real desde
-    // Blockscout (certifica y acota); si no se halla y no hay fromBlock, cae a 0.
+    // Origen: con rpcUrl (camino eth clásico), `fromBlock` explícito o 0. Sin rpcUrl, el MINT real desde
+    // Blockscout (certifica y acota). (CodeRabbit) Si NO se puede verificar el mint → NO mutar: caer a 0 y
+    // certificar sería marcar backfilledAt sin haber confirmado el origen. Se busca el mint SIEMPRE (también
+    // con fromBlock) para poder validar la cobertura.
     const tokenId: number = state.tokenId;
-    const mintBlock = rpcUrl ? null : (fromBlock == null ? await findMintBlock(baseUrl, nft, tokenId) : null);
+    const mintBlock = rpcUrl ? null : await findMintBlock(baseUrl, nft, tokenId);
+    if (!rpcUrl && mintBlock == null) {
+      return { ok: false, reason: "mint no verificado en Blockscout", start: null };   // no mutar
+    }
     const start = Math.max(0, fromBlock ?? mintBlock ?? 0);
     if (start > safeHead) return { ok: false, reason: "start > safeHead (nada que escanear)" };
 
-    // (Codex v2) Certifica histórico SOLO con origen verificado: mint real (start===mintBlock), bloque 0, o
-    // backfill completo previo. Un fromBlock>0 arbitrario sin mint verificado NO certifica → stale.
-    const originVerified = (mintBlock != null && start === mintBlock) || start === 0;
+    // (Codex v2 · CodeRabbit) Certifica histórico SOLO con origen verificado. rpcUrl: start===0 (eth clásico).
+    // Blockscout: arrancar EN o ANTES del mint real (start<=mintBlock) cubre todos los eventos. Un fromBlock
+    // > mint NO certifica → stale. O ya había backfill completo previo.
+    const originVerified = rpcUrl ? start === 0 : (mintBlock != null && start <= mintBlock);
     const coversHistory = originVerified || state.backfilledAt != null;
 
     // Lectura adaptativa de [start, safeHead] vía Blockscout (o eth si rpcUrl). Si pide partir el rango se

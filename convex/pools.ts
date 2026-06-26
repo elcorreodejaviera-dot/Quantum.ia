@@ -399,6 +399,47 @@ export const insertPoolFeeSnapshot = internalMutation({
   },
 });
 
+// (JAV-120 F3) Datos para "Fees 24h" real: valida acceso (owner/admin) y devuelve los snapshots de los
+// extremos de la ventana — el más reciente ("ahora") y el más nuevo con at ≤ now−24h ("referencia") — más
+// el más viejo (para el countdown de warming_up). Read-only. La valuación USD se hace en la action (RPC).
+const FEE24H_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+export const getFees24hWindowInternal = internalQuery({
+  args: { poolId: v.id("pools") },
+  handler: async (ctx, { poolId }) => {
+    const user = await requireUser(ctx);
+    const pool = await ctx.db.get(poolId);
+    if (!pool) throw new Error("Pool no encontrado.");
+    if (pool.userId !== user._id && user.role !== "admin") throw new Error("Sin permiso para ver este pool.");
+    const serverNow = Date.now();
+    const nowSnap = await ctx.db
+      .query("pool_fee_snapshots")
+      .withIndex("by_pool_at", q => q.eq("poolId", poolId))
+      .order("desc").first();
+    // (Codex F3 ALTO) El ref se ancla en nowSnap.at − 24h (NO en serverNow): así la ventana se mide entre
+    // dos puntos de datos REALES y es SIEMPRE ≥24h. Anclar en serverNow podía dar ventana <24h (o 0h con
+    // nowSnap===refSnap si el cron murió) y reportar ok engañoso.
+    const refSnap = nowSnap
+      ? await ctx.db
+          .query("pool_fee_snapshots")
+          .withIndex("by_pool_at", q => q.eq("poolId", poolId).lte("at", nowSnap.at - FEE24H_WINDOW_MS))
+          .order("desc").first()
+      : null;
+    const oldestSnap = await ctx.db
+      .query("pool_fee_snapshots")
+      .withIndex("by_pool_at", q => q.eq("poolId", poolId))
+      .order("asc").first();
+    return {
+      tokenId: pool.tokenId ?? null,
+      network: pool.network,
+      serverNow,
+      oldestAt: oldestSnap?.at ?? null,
+      nowSnap: nowSnap ?? null,
+      refSnap: refSnap ?? null,
+    };
+  },
+});
+
 export const updatePool = mutation({
   args: {
     id: v.id("pools"),

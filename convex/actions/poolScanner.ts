@@ -1083,6 +1083,71 @@ export const fetchPositionLiquidity = action({
   },
 });
 
+// (JAV-120 F3) "Fees 24h" REAL por posición = Δ(fees acumuladas netas) entre el snapshot "ahora" y el
+// "referencia" (≥24h). Usa SOLO snapshots almacenados en ambos extremos (consistencia de bloque + barato;
+// nada de RPC de cobrable en la lectura). Authz owner/admin vía getFees24hWindowInternal. Read-only/display.
+// Estados: ok | warming_up (sin ref ≥24h) | stale (ref > 26h, hueco de cron) | partial (cambió la posición
+// en la ventana → lo cierra F4 con eventos) | unavailable (sin snapshot / metadata / red).
+// NETO: con snapshotKey IGUAL no hubo collect/increase/decrease ⇒ collected y principalDebt son constantes
+// y CANCELAN en el delta ⇒ fees24h = owed_now − owed_ref (≥0 por crecimiento pasivo). feeShareStatus NO
+// gatea este valor real (Codex v2 MEDIO#2): una posición hoy fuera de rango pudo generar fees en la ventana.
+const FEE24H_WINDOW_MS = 24 * 60 * 60 * 1000;
+const FEE24H_MAX_REF_AGE_MS = 26 * 60 * 60 * 1000;   // ventana nowSnap−refSnap: 24h..26h; más → stale (hueco)
+const FEE24H_MAX_NOW_AGE_MS = 2 * 60 * 60 * 1000;    // frescura: nowSnap debe ser ≤2h viejo (cron horario)
+
+export const getPoolFees24h = action({
+  args: { poolId: v.id("pools"), priceUsd: v.number() },
+  handler: async (ctx, { poolId, priceUsd }): Promise<{
+    fees24hUsd: number | null; status: string; refAgeMs: number | null;
+    windowHours: number | null; hoursUntilReady: number | null;
+  }> => {
+    const fail = (status: string, refAgeMs: number | null = null, windowHours: number | null = null) =>
+      ({ fees24hUsd: null, status, refAgeMs, windowHours, hoursUntilReady: null });
+
+    const d = await ctx.runQuery(internal.pools.getFees24hWindowInternal, { poolId });
+    const { tokenId, network, serverNow, oldestAt, nowSnap, refSnap } = d;
+    const rpcs = RPC[network]; const nft = NFT_MANAGER[network];
+    if (tokenId == null || !rpcs || !nft) return fail("unavailable");
+    if (!nowSnap) return fail("unavailable");
+    // Frescura: si el último snapshot es viejo, el cron está caído → los datos no son "de ahora".
+    if (serverNow - nowSnap.at > FEE24H_MAX_NOW_AGE_MS) return fail("stale");
+    if (!refSnap) {
+      // Aún no hay snapshot ≥24h MÁS VIEJO que el actual: warming_up. Countdown anclado en nowSnap.at.
+      const hoursUntilReady = oldestAt != null
+        ? Math.max(0, Math.ceil((FEE24H_WINDOW_MS - (nowSnap.at - oldestAt)) / 3_600_000))
+        : 24;
+      return { fees24hUsd: null, status: "warming_up", refAgeMs: null, windowHours: null, hoursUntilReady };
+    }
+    // Ventana = nowSnap.at − refSnap.at, SIEMPRE ≥24h (el ref se ancló en nowSnap.at−24h). Tope 26h → stale.
+    const refAgeMs = nowSnap.at - refSnap.at;
+    const windowHours = Math.round((refAgeMs / 3_600_000) * 10) / 10;
+    if (refAgeMs > FEE24H_MAX_REF_AGE_MS) return fail("stale", refAgeMs, windowHours);
+    // Cambio estructural en la ventana → el delta de cobrable no es fee pura; lo certifica F4 con eventos.
+    if (nowSnap.snapshotKey !== refSnap.snapshotKey) return fail("partial", refAgeMs, windowHours);
+    // Delta de cobrable raw (key igual ⇒ = fees generadas). Defensa: negativo no debería ocurrir → partial.
+    let delta0: bigint, delta1: bigint;
+    try {
+      const d0 = BigInt(nowSnap.tokensOwed0Raw) - BigInt(refSnap.tokensOwed0Raw);
+      const d1 = BigInt(nowSnap.tokensOwed1Raw) - BigInt(refSnap.tokensOwed1Raw);
+      if (d0 < 0n || d1 < 0n) return { ...fail("partial", refAgeMs, windowHours) };
+      delta0 = d0; delta1 = d1;
+    } catch { return fail("unavailable", refAgeMs, windowHours); }
+    // Metadata de tokens (decimales/símbolo) para valuar el delta a spot. Constante por pool.
+    let posRaw: string;
+    try { posRaw = (await rpcCallWithFallback(rpcs, nft, "0x99fbab88" + pad(BigInt(tokenId)))).slice(2); }
+    catch { return fail("unavailable", refAgeMs, windowHours); }
+    if (posRaw.length < 64 * 12) return fail("unavailable", refAgeMs, windowHours);
+    const token0addr = addrAt(posRaw, 2); const token1addr = addrAt(posRaw, 3);
+    let t0: { symbol: string; decimals: number; ok: boolean };
+    let t1: { symbol: string; decimals: number; ok: boolean };
+    try { [t0, t1] = await Promise.all([tokenInfo(rpcs[0], token0addr), tokenInfo(rpcs[0], token1addr)]); }
+    catch { return fail("unavailable", refAgeMs, windowHours); }
+    const fees24hUsd = valueFeesUsd(delta0, delta1, t0, t1, priceUsd);
+    if (fees24hUsd == null) return fail("unavailable", refAgeMs, windowHours);
+    return { fees24hUsd, status: "ok", refAgeMs, windowHours, hoursUntilReady: null };
+  },
+});
+
 // Cron de detección de cierre de posiciones LP (JAV-35).
 // Recorre todos los pools con tokenId, lee su estado on-chain y persiste el
 // resultado de forma atómica. El caso crítico es el cierre EXTERNO (el usuario

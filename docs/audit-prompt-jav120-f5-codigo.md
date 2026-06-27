@@ -1,16 +1,20 @@
 # Prompt de auditoría (Codex) — CÓDIGO: JAV-120 Fase 5 (UI Fees 24h real)
 
-**RE-AUDITORÍA (r2).** Audita el **código** del commit `ac1e33f` (rama
+**RE-AUDITORÍA (r3).** Audita el **código** del commit `6609c74` (rama
 `elcorreodejaviera/jav-120-fees-24h-real`). Veredicto **GO / NO-GO**. Fase 5 (UI) del plan
 `docs/plan-fees24h-real.md`. Sobre F0–F3 (GO). F4 (getLogs de la ventana) queda como follow-up.
 **Cambio solo-UI** (display); no toca backend ni money-path.
 
-> **Corrige tu NO-GO previo** (`docs/audit-jav120-f5-ui-fees24h-codex.md`, ALTO: "$0 mostrado como Real
-> on-chain cuando no hay dato real ni estimado"). Fix: `Summary` ahora distingue 3 estados agregados —
-> `feesKnown` (usd≠null), `feesHasUnknown`, `feesAllReal`: si `feesKnown.length===0` muestra "—" / "Sin
-> datos aún"; "Real (on-chain)" SOLO si todas las posiciones son medidas; "Parcial / acumulando" si hay
-> desconocidas; "Real + estimado" si mezcla. `NetworkLiquidity` ya NO colapsa null→0 (muestra "—").
-> Verificá que dato ausente/parcial nunca se presente como "$0 Real".
+> **Corrige tus 2 NO-GO previos** (`docs/audit-jav120-f5-ui-fees24h-codex.md` y `-r2-codex.md`):
+> r1 ALTO ($0 como "Real" sin dato) y r2 ALTO (agregado 100% estimado caía en "Real + estimado"). Fix
+> final: el subtítulo de `Summary` se decide por conteo `feesRealCount`/`feesEstCount`/`feesHasUnknown`:
+> - 0 usable → "—" / "Sin datos aún"
+> - 0 medidas → "Estimado" (o "Estimado / acumulando" si hay desconocidas)
+> - ≥1 medida y 0 estimadas → "Real (on-chain)" (o "Real / acumulando" si hay desconocidas)
+> - ≥1 medida y ≥1 estimada → "Real + estimado"
+> "Real" aparece SOLO con ≥1 posición medida; "+ estimado" SOLO si hay estimadas. `NetworkLiquidity`
+> muestra "—" si ninguna red tiene valor usable (no $0). Verificá que NINGÚN agregado sin medidas diga
+> "Real" y que ningún dato ausente se muestre como $0.
 
 ## Qué cambia (`src/components/BotPortal.jsx`)
 - **Helper `poolFees24h(pool)`**: fuente única. Devuelve `{usd, real, status}`: REAL medido si

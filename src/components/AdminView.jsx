@@ -183,7 +183,7 @@ function PositionCard({ pos, live, liveLoading, pnl, hlAccount, coverageLive, hl
         <div className="av-cell"><div className="k">Rango</div><div className="vv">{p ? `${fmtPrice(p.minRange)} – ${fmtPrice(p.maxRange)}` : '—'}</div></div>
         <div className="av-cell"><div className="k">{feesLabel}</div><div className="vv">{feesVal}</div></div>
         <div className="av-cell"><div className="k">Cobertura (cap)</div><div className="vv">{coverageVal}</div></div>
-        <div className="av-cell" title={lifeDateStr ? `Vida total desde ${lifeDateStr}` : 'Vida total de la posición'}>
+        <div className="av-cell av-cell-wide" title={lifeDateStr ? `Vida total desde ${lifeDateStr}` : 'Vida total de la posición'}>
           <div className="k">Tiempo de vida</div>
           <div className="vv">{lifetimeStr ? `${lifetimeStr}${lifeDateStr ? ` · ${lifeDateStr}` : ''}` : '—'}</div>
         </div>
@@ -710,6 +710,7 @@ function AdminStyles() {
   .av-pnl{font-size:12px;color:var(--muted)}.av-pos-pnl{color:var(--green)}.av-neg-pnl{color:var(--red)}.av-amber{color:var(--amber)}
   .av-pos-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line)}
   .av-cell{background:var(--panel-2);padding:10px 14px}
+  .av-cell-wide{grid-column:1/-1}
   .av-cell .k{font-size:10px;color:var(--faint);text-transform:uppercase}
   .av-cell .vv{font-size:14px;font-weight:700;margin-top:3px}
   .av-pos-foot{display:flex;gap:8px;padding:10px 14px;border-top:1px solid var(--line);flex-wrap:wrap}

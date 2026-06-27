@@ -1279,6 +1279,12 @@ details[open] > .pool-pnl-toggle::before {
   margin-bottom: 8px;
 }
 
+/* (JAV-123) Fila de "Tiempo de vida": única métrica → a todo el ancho, sin columnas vacías.
+   Selector con 2 clases para ganar también dentro de los media queries de abajo. */
+.pool-metrics-header.pool-lifetime-row {
+  grid-template-columns: 1fr;
+}
+
 @media (max-width: 900px) {
   .pool-pnl-grid { grid-template-columns: repeat(2, 1fr); }
   .pool-pnl-grid-4 { grid-template-columns: repeat(2, 1fr); }

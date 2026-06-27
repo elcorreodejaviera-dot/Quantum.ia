@@ -8,15 +8,28 @@
 import { v } from "convex/values";
 import { action, internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
+import { TransportError } from "@nktkas/hyperliquid";
 import { decryptPrivateKey } from "./hlCredentialActions";
 import { hlIsTestnet, hlNetwork } from "./hlNetwork";
 import { elog, safeError } from "./log";
+import { SPOT_GRID_TRANSIENT_MSG } from "./spotGridConstants";
 import {
   makeSpotClients, resolveSpotAsset, getSpotPrice, getSpotBalance, getUserFees,
   getOpenSpotOrders, getSpotFills, getSpotOrderStatusByCloid,
   roundSpotPrice, floorSpotSize, roundAndValidateSpotOrder, MIN_SPOT_NOTIONAL_USD,
   placeSpotLimit, cancelSpotByCloid,
 } from "./hyperliquidSpot";
+
+// (JAV-122) Clasifica una excepción del reconcile/bootstrap/actions. "transient" = fallo de TRANSPORTE de
+// HL (5xx/timeout/red): `e instanceof TransportError` (el 502 es HttpRequestError extends TransportError) →
+// reintentar, NUNCA marcar error con el cuerpo HTML crudo. "fatal" = determinista (ValidationError, firma,
+// ApiRequestError = rechazo explícito, lógica del bot) → error terminal con mensaje corto. Espeja el
+// criterio canónico del repo (hyperliquid.ts). Vive en tierra node (usa el SDK); lo importan engine y
+// actions. Las mutations non-node NO clasifican: reciben el `message` ya limpio.
+export function classifySpotGridError(e: unknown): { kind: "transient" | "fatal"; message: string } {
+  if (e instanceof TransportError) return { kind: "transient", message: SPOT_GRID_TRANSIENT_MSG };
+  return { kind: "fatal", message: safeError(e) };
+}
 
 const SUBMIT_GRACE_MS = 30_000;     // (Codex BAJO#2) espera antes de reintentar un `submitting` colgado
 const MAX_SUBMIT_ATTEMPTS = 5;      // tras esto, la orden submitting → failed
@@ -377,7 +390,7 @@ async function placeOrder(ctx: any, exchange: any, args: {
   assetId: number; price: number; quantity: number; priceStr: string; sizeStr: string;
   pairedOrderId?: any; tranche?: number; costBasis?: number; openCloids: Set<string>;
   kind?: "grid" | "seed" | "liquidation"; repostBuyPrice?: number;
-}): Promise<{ ok: boolean; cloid?: string }> {
+}, flags?: { transientPlace: boolean }): Promise<{ ok: boolean; cloid?: string }> {
   const rec = await ctx.runMutation(internal.spotGridBots.recordSpotGridOrder, {
     botId: args.botId, token: args.token, side: args.side, gridLevel: args.gridLevel,
     generation: args.generation, cycleId: args.cycleId, assetId: args.assetId,
@@ -396,7 +409,13 @@ async function placeOrder(ctx: any, exchange: any, args: {
     });
     return { ok: r.ok, cloid: rec.cloid };   // gateBlocked → queda `submitting`, el reconcile reintenta
   } catch (e) {
-    elog("spotgrid", "place_failed", { botId: String(args.botId), side: args.side, err: safeError(e) });
+    // (JAV-122) El intento idempotente (record `submitting`) ya está persistido y el reconcile lo reintenta
+    // por CLOID. Un TRANSITORIO de HL aquí debe contar como fallo transitorio de la RONDA (backoff/escalada
+    // del bot, Codex código ALTO-1): se señaliza vía `flags` y se procesa al cierre del loop, SIN re-lanzar
+    // (re-lanzar saltearía el avance de fillCursor → doble-conteo). Un fatal queda local (orden fallida).
+    const c = classifySpotGridError(e);
+    if (c.kind === "transient" && flags) flags.transientPlace = true;
+    elog("spotgrid", "place_failed", { botId: String(args.botId), side: args.side, err: c.message });
     return { ok: false, cloid: rec.cloid };
   }
 }
@@ -405,7 +424,7 @@ async function placeOrder(ctx: any, exchange: any, args: {
 // Idempotente y re-entrante: cada fase resuelve su estado contra HL antes de (re)enviar y avanza
 // `bootstrapPhase` al confirmarla. NO depende de "no hay órdenes de la generación". Solo se ejecuta con el
 // bot running. Las fases se encadenan en la misma ronda cuando ya están confirmadas.
-async function runSeededBootstrap(ctx: any, bot: any, token: string, clients: Clients, resolved: any, szDecimals: number): Promise<void> {
+async function runSeededBootstrap(ctx: any, bot: any, token: string, clients: Clients, resolved: any, szDecimals: number, flags: { transientPlace: boolean }): Promise<void> {
   const botId = bot._id;
   const anchorPrice = pickInitialPlacementPrice(bot, Date.now()) ?? await getSpotPrice(clients.info, resolved);
   // Reparto determinista desde los MISMOS parámetros que en la creación → prometido==colocado.
@@ -494,7 +513,7 @@ async function runSeededBootstrap(ctx: any, bot: any, token: string, clients: Cl
         botId, token, side: "sell", gridLevel: lv.idx, generation: bot.generation, cycleId: 0,
         assetId: bot.assetId, price: lv.sellPrice, quantity: lv.quantity, priceStr: lv.sellPriceStr, sizeStr: lv.sizeStr,
         costBasis: seedBasis, repostBuyPrice: lv.repostBuyPrice, kind: "seed", openCloids,
-      });
+      }, flags);
     }
     await ctx.runMutation(internal.spotGridBots.setSpotGridBootstrap, { botId, token, bootstrapPhase: "buys" });
     bot = await ctx.runQuery(internal.spotGridBots.getSpotGridBotInternal, { botId });
@@ -514,7 +533,7 @@ async function runSeededBootstrap(ctx: any, bot: any, token: string, clients: Cl
       await placeOrder(ctx, clients.exchange, {
         botId, token, side: "buy", gridLevel: lv.idx, generation: bot.generation, cycleId: 0,
         assetId: bot.assetId, price: lv.buyPrice, quantity: lv.quantity, priceStr: lv.buyPriceStr, sizeStr: lv.sizeStr, kind: "grid", openCloids,
-      });
+      }, flags);
     }
     await ctx.runMutation(internal.spotGridBots.setSpotGridBootstrap, { botId, token, bootstrapPhase: "done" });
     elog("spotgrid", "seed_bootstrap_done", { botId: String(botId), sells: derived.K, buys: levels.length });
@@ -522,9 +541,12 @@ async function runSeededBootstrap(ctx: any, bot: any, token: string, clients: Cl
 }
 
 // ---- reconcile de UN bot (bajo lease ya tomado) -------------------------------------------------
-async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Clients, fees: { spotMaker: number; spotTaker: number }): Promise<void> {
+async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Clients, fees: { spotMaker: number; spotTaker: number }): Promise<{ transientPlace: boolean }> {
+  // (JAV-122, Codex código ALTO-1) Acumula si ALGÚN envío de orden falló por transitorio de HL → el loop del
+  // cron convierte el desenlace de la ronda de éxito a bump transitorio (sin re-lanzar, preservando fills).
+  const flags = { transientPlace: false };
   const bot: any = await ctx.runQuery(internal.spotGridBots.getSpotGridBotInternal, { botId });
-  if (!bot) return;
+  if (!bot) return flags;
   const isRunning = bot.status === "running";
   const resolved = await resolveSpotAsset(clients.info, bot.symbol, bot.network);
   const szDecimals = resolved.szDecimals;
@@ -552,8 +574,8 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
   // (1-seeded, JAV-103) Bootstrap por FASES para grids sembrados. Mientras no esté "done", SOLO corre el
   // bootstrap (idempotente) — NO depende de "no hay órdenes de la generación". Si está pausado, no coloca.
   if (bot.bootstrapPhase && bot.bootstrapPhase !== "done") {
-    if (isRunning) await runSeededBootstrap(ctx, bot, token, clients, resolved, szDecimals);
-    return;   // los fills se procesan en rondas posteriores (bootstrap done)
+    if (isRunning) await runSeededBootstrap(ctx, bot, token, clients, resolved, szDecimals, flags);
+    return flags;   // los fills se procesan en rondas posteriores (bootstrap done)
   }
 
   // (1) Colocación inicial LEGACY (grids no-seeded / manuales): running sin órdenes de la generación actual.
@@ -572,10 +594,10 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
     for (const lv of levels) {
       await ctx.runMutation(internal.spotGridBots.renewSpotGridReconcile, { botId, token });
       await placeOrder(ctx, clients.exchange, { botId, token, side: "buy", gridLevel: lv.idx, generation: bot.generation, cycleId: 0,
-        assetId: bot.assetId, price: lv.buyPrice, quantity: lv.quantity, priceStr: lv.buyPriceStr, sizeStr: lv.sizeStr, openCloids });
+        assetId: bot.assetId, price: lv.buyPrice, quantity: lv.quantity, priceStr: lv.buyPriceStr, sizeStr: lv.sizeStr, openCloids }, flags);
     }
     elog("spotgrid", "initial_placed", { botId: String(botId), levels: levels.length });
-    return;   // próxima ronda procesa fills
+    return flags;   // próxima ronda procesa fills
   }
 
   // (2) Resolver `submitting` colgados.
@@ -597,7 +619,11 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
       await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, incAttempt: true });
       await gatedPlace(ctx, clients.exchange, botId, token, { assetId: o.assetId, isBuy: o.side === "buy", priceStr, sizeStr, cloid: o.cloid, openCloids });
     } catch (e) {
-      await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, errorMessage: safeError(e) });
+      // (JAV-122) Nunca persistir el cuerpo HTML de un 502 en spot_grid_orders.errorMessage: clasificar. Un
+      // transitorio cuenta para el backoff/escalada del bot vía `flags` (Codex código ALTO-1).
+      const c = classifySpotGridError(e);
+      if (c.kind === "transient") flags.transientPlace = true;
+      await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, errorMessage: c.message });
     }
   }
 
@@ -652,7 +678,7 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
           const tranche = o.sellTranche ?? 0;
           // SELL lleva su propio costBasis (= VWAP de lo vendido) para un netProfit limpio por tranche.
           await placeOrder(ctx, clients.exchange, { botId, token, side: "sell", gridLevel: o.gridLevel, generation: bot.generation, cycleId: o.cycleId,
-            assetId: bot.assetId, price: sellPrice, quantity: sellQty, priceStr: String(sellPrice), sizeStr: String(sellQty), pairedOrderId: o._id, tranche, costBasis: basis, openCloids });
+            assetId: bot.assetId, price: sellPrice, quantity: sellQty, priceStr: String(sellPrice), sizeStr: String(sellQty), pairedOrderId: o._id, tranche, costBasis: basis, openCloids }, flags);
           // Restar lo vendido del pendiente (la fracción no vendida conserva su costo proporcional al mismo VWAP).
           const remQty = Math.max(0, pendQty - sellQty);
           await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, pendingSellQty: remQty, pendingSellCost: basis * remQty, sellTranche: tranche + 1 });
@@ -672,7 +698,10 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
           const { priceStr, sizeStr } = roundAndValidateSpotOrder({ price: res.repostPrice, size: res.repostQuantity, szDecimals, isBuy: true });
           await gatedPlace(ctx, clients.exchange, botId, token, { assetId: res.repostAssetId, isBuy: true, priceStr, sizeStr, cloid: res.repostCloid, openCloids });
         } catch (e) {
-          await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: res.repostCloid, errorMessage: safeError(e) });
+          // (JAV-122) Idem: mensaje clasificado, nunca HTML crudo; transitorio cuenta vía `flags`.
+          const c = classifySpotGridError(e);
+          if (c.kind === "transient") flags.transientPlace = true;
+          await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: res.repostCloid, errorMessage: c.message });
         }
       }
     }
@@ -680,13 +709,17 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
   if (maxTime > (bot.fillCursor ?? 0)) {
     await ctx.runMutation(internal.spotGridBots.setSpotGridFillCursor, { botId, token, fillCursor: maxTime });
   }
+  return flags;
 }
 
 // ---- entry del cron: reconcilia todos los bots activos, agrupando por cuenta -----------------------
 export const reconcileAllSpotGrids = internalAction({
   args: {},
   handler: async (ctx): Promise<any> => {
-    const bots: any[] = await ctx.runQuery(internal.spotGridBots.listActiveSpotGridBotsInternal, {});
+    const active: any[] = await ctx.runQuery(internal.spotGridBots.listActiveSpotGridBotsInternal, {});
+    // (JAV-122) Además de los activos, retomar los `error` transitorios RECUPERABLES (Parte 2).
+    const recoverable: any[] = await ctx.runQuery(internal.spotGridBots.listRecoverableErrorSpotGridBotsInternal, {});
+    const bots: any[] = [...active, ...recoverable];
     // Agrupar por cuenta (Codex #5): una ronda de cliente por cuenta.
     const byAccount = new Map<string, any[]>();
     for (const b of bots) {
@@ -699,11 +732,19 @@ export const reconcileAllSpotGrids = internalAction({
         const claim = await ctx.runMutation(internal.spotGridBots.claimSpotGridReconcile, { botId: bot._id });
         if (!claim.ok) continue;
         const token = claim.token;
+        // (JAV-122, Codex r3) Origen AUTORITATIVO leído de DB al claimar (no el snapshot rancio de la lista):
+        // ¿esta ronda es una recuperación desde `error` o una reconciliación activa?
+        const wasError = claim.wasError === true;
         try {
           // (ALTO#2) Revalidar gate live ANTES de tocar HL.
           const gate: any = await ctx.runQuery(internal.spotGridBots.assertSpotGridLiveAdmissibleInternal, { botId: bot._id });
           if (!gate.ok) {
-            await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, { botId: bot._id, token, status: gate.policy, errorMessage: gate.reason });
+            // (JAV-122) policy:"error" = no-admisible NO transitorio → errorKind:"fatal" (no se re-recupera);
+            // policy:"paused" → errorKind undefined. setSpotGridStatus limpia los campos de recovery.
+            await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, {
+              botId: bot._id, token, status: gate.policy,
+              errorKind: gate.policy === "error" ? "fatal" : undefined, errorMessage: gate.reason,
+            });
             elog("spotgrid", "gate_blocked", { botId: String(bot._id), reason: gate.reason });
             continue;
           }
@@ -713,11 +754,41 @@ export const reconcileAllSpotGrids = internalAction({
           const { info, exchange } = makeSpotClients(privKey as `0x${string}`, hlIsTestnet());
           const address = credInfo.credential.tradingAccountAddress;
           const fees = await getUserFees(info, address);
-          await reconcileOneBot(ctx, bot._id, token, { info, exchange, address }, fees);
+          const res = await reconcileOneBot(ctx, bot._id, token, { info, exchange, address }, fees);
+          // (JAV-122, Codex código ALTO-1) Si algún ENVÍO de orden falló por transitorio (capturado local,
+          // sin re-lanzar para no romper el avance de fillCursor), la ronda NO es un éxito limpio: cuenta
+          // como fallo transitorio del bot (backoff/escalada o reintento de recuperación), igual que si el
+          // transitorio hubiera llegado al catch central.
+          if (res.transientPlace) {
+            if (wasError) await ctx.runMutation(internal.spotGridBots.bumpSpotGridErrorRecovery, { botId: bot._id, token });
+            else {
+              const r: any = await ctx.runMutation(internal.spotGridBots.bumpSpotGridTransient, { botId: bot._id, token, message: SPOT_GRID_TRANSIENT_MSG });
+              elog("spotgrid", r.escalated ? "place_transient_escalated" : "place_transient_retry", { botId: String(bot._id), fails: r.count });
+            }
+          } else if (wasError) {
+            // Éxito de recuperación: restaurar el estado previo (running|paused).
+            await ctx.runMutation(internal.spotGridBots.recoverSpotGridFromError, { botId: bot._id, token });
+          } else {
+            // Ronda activa limpia: resetear contadores de transitorio (con o sin fills).
+            await ctx.runMutation(internal.spotGridBots.markSpotGridReconcileSuccess, { botId: bot._id, token });
+          }
           reconciled++;
         } catch (e) {
-          await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, { botId: bot._id, token, status: "error", errorMessage: safeError(e) });
-          elog("spotgrid", "reconcile_error", { botId: String(bot._id), err: safeError(e) });
+          // (JAV-122) Clasificar: transitorio de HL (502/timeout/red) NO mata el bot; fatal sí.
+          const { kind, message } = classifySpotGridError(e);
+          if (kind === "transient") {
+            if (wasError) {
+              // Reintento de recuperación fallido → sube errorRecoveryAttempts (NO transientFailCount), backoff largo.
+              await ctx.runMutation(internal.spotGridBots.bumpSpotGridErrorRecovery, { botId: bot._id, token });
+              elog("spotgrid", "recovery_transient_retry", { botId: String(bot._id) });
+            } else {
+              const r: any = await ctx.runMutation(internal.spotGridBots.bumpSpotGridTransient, { botId: bot._id, token, message });
+              elog("spotgrid", r.escalated ? "reconcile_transient_escalated" : "reconcile_transient_retry", { botId: String(bot._id), fails: r.count });
+            }
+          } else {
+            await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, { botId: bot._id, token, status: "error", errorKind: "fatal", errorMessage: message });
+            elog("spotgrid", "reconcile_error", { botId: String(bot._id), err: message });
+          }
         } finally {
           await ctx.runMutation(internal.spotGridBots.releaseSpotGridReconcile, { botId: bot._id, token });
         }
@@ -831,6 +902,10 @@ export const stopSpotGridBot = action({
       await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, { botId, token, status: "stopped", clearLease: true });
       elog("spotgrid", "stopped", { botId: String(botId), cancelled: live.length });
       return { ok: true };
+    } catch (e) {
+      // (JAV-122) Nunca mostrar al usuario el cuerpo HTML de un 502: re-lanzar el mensaje CLASIFICADO. Los
+      // throws deterministas de arriba ("Liquidación incompleta…", etc.) se preservan (rama fatal = safeError).
+      throw new Error(classifySpotGridError(e).message);
     } finally {
       // setSpotGridStatus(stopped) ya limpió el lease; release es no-op si el token ya no aplica.
       await ctx.runMutation(internal.spotGridBots.releaseSpotGridReconcile, { botId, token });

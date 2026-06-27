@@ -11,7 +11,7 @@ import { action } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { InfoClient, HttpTransport } from "@nktkas/hyperliquid";
 import { resolveSpotAsset, getSpotPrice, getSpotBalance } from "./hyperliquidSpot";
-import { deriveAutoGrid, deriveSeededGrid } from "./spotGridEngine";   // (JAV-101/103) helpers puros de reparto
+import { deriveAutoGrid, deriveSeededGrid, classifySpotGridError } from "./spotGridEngine";   // (JAV-101/103) helpers puros + (JAV-122) clasificador
 import { hlNetwork, hlIsTestnet, assertExpectedNetwork } from "./hlNetwork";
 import { requireAuth } from "./helpers";
 
@@ -29,6 +29,7 @@ export const createSpotGridBot = action({
   },
   // Promise<any>: corta el ciclo de inferencia (TS2589) al encadenar internal.* en el mismo módulo.
   handler: async (ctx, a): Promise<any> => {
+   try {
     await requireAuth(ctx);
     assertExpectedNetwork(a.expectedNetwork);                  // red del backend = fuente de verdad
     if (!a.confirm) throw new Error("Crear Spot Grid requiere confirmación LIVE explícita.");
@@ -84,5 +85,11 @@ export const createSpotGridBot = action({
       seeded, seedPercent,
     });
     return { ...res, gridCount, orderSize, capped, coveredFloor, seeded, seedPercent };
+   } catch (e) {
+     // (JAV-122) Un 502/timeout de HL en las lecturas públicas (resolve/price/balance) no debe llegar al
+     // portal como HTML crudo: re-lanzar el mensaje CLASIFICADO. Las validaciones deterministas (preflight,
+     // "Balance insuficiente", etc.) se preservan intactas (rama fatal = safeError = mismo e.message).
+     throw new Error(classifySpotGridError(e).message);
+   }
   },
 });

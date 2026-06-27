@@ -6,6 +6,11 @@ import { requireAdmin, requireBotManager, requireTradeLive, getUserOrNull, write
 import { elog, safeError } from "./log";
 import { toHlCloid, spotGridCloidInput } from "./cloids";   // (JAV-92) cloid determinista (helper hoja, no-node)
 import { hlNetwork } from "./hlNetwork";   // (JAV-92) red efectiva del backend (fuente de verdad)
+import {   // (JAV-122) topes/backoffs de resiliencia a transitorios (módulo hoja non-node)
+  SPOT_GRID_TRANSIENT_BACKOFF_MS, SPOT_GRID_MAX_TRANSIENT_FAILS,
+  SPOT_GRID_ERROR_RETRY_BACKOFF_MS, SPOT_GRID_MAX_ERROR_RECOVERIES,
+  SPOT_GRID_RECOVERY_EXHAUSTED_MSG, SPOT_GRID_NO_RECOVER_STATUS_MSG,
+} from "./spotGridConstants";
 
 // (QSG / JAV-91) Spot Grid Live — persistencia + comandos backend. NON-node (convex-testable). NO envía
 // órdenes a HL (eso es el motor de PR3). La resolución de activo/precio/balance vía RPC vive en la
@@ -261,7 +266,13 @@ export const pauseSpotGridBot = mutation({
     const bot = await ctx.db.get(botId);
     if (!bot || bot.userId !== user._id) throw new Error("Bot no encontrado o ajeno.");
     if (bot.status === "stopped") throw new Error("El bot ya está detenido.");
-    await ctx.db.patch(botId, { status: "paused", updatedAt: Date.now() });
+    // (JAV-122) La pausa manual admite un bot en `error`; al pasarlo a `paused` debe limpiar el estado de
+    // recovery (no comparte setSpotGridStatus: no tiene lease/token) → sin `errorKind:"transient"`/
+    // recoverToStatus fantasma sobre un bot pausado.
+    await ctx.db.patch(botId, {
+      status: "paused", errorKind: undefined, errorMessage: undefined, recoverToStatus: undefined,
+      transientFailCount: 0, errorRecoveryAttempts: 0, nextRetryAt: 0, updatedAt: Date.now(),
+    });
     return { ok: true as const };
   },
 });
@@ -455,17 +466,32 @@ function leaseOk(bot: any, token: string): boolean {
   return !!bot && bot.reconcileLeaseToken === token && (bot.reconcileLeaseUntil ?? 0) > Date.now();
 }
 
-// Claima el lease de reconcile si está libre/vencido y el bot está activo (running|paused). NO stopped.
+// (JAV-122) Predicate ÚNICO de "error transitorio recuperable por el cron". Lo comparten la query
+// listRecoverableErrorSpotGridBotsInternal y el claim (punto autoritativo bajo lease) → no pueden divergir
+// (Codex r6 COND-1). Un error-transient SIN recoverToStatus, o que superó el tope de reintentos, NO es
+// recuperable (queda terminal). El gate de nextRetryAt (backoff) se aplica aparte (también a running/paused).
+function isRecoverableError(bot: any): boolean {
+  return bot.status === "error" && bot.errorKind === "transient"
+    && (bot.recoverToStatus === "running" || bot.recoverToStatus === "paused")
+    && (bot.errorRecoveryAttempts ?? 0) < SPOT_GRID_MAX_ERROR_RECOVERIES;
+}
+
+// Claima el lease de reconcile si está libre/vencido y el bot es elegible: activo (running|paused) o un
+// `error` recuperable (JAV-122, mismo predicate que la query). NO stopped, NO error fatal/agotado. Respeta
+// el backoff (nextRetryAt). Devuelve `wasError` LEÍDO DE DB bajo el lease (Codex r3) → el loop lo usa como
+// origen autoritativo (ronda de recuperación vs activa), no el snapshot rancio de la lista.
 export const claimSpotGridReconcile = internalMutation({
   args: { botId: v.id("spot_grid_bots") },
   handler: async (ctx, { botId }) => {
     const bot = await ctx.db.get(botId);
     if (!bot) return { ok: false as const };
-    if (bot.status !== "running" && bot.status !== "paused") return { ok: false as const };
+    const eligible = bot.status === "running" || bot.status === "paused" || isRecoverableError(bot);
+    if (!eligible) return { ok: false as const };
+    if ((bot.nextRetryAt ?? 0) > Date.now()) return { ok: false as const };   // backoff activo
     if (bot.reconcileLeaseToken && (bot.reconcileLeaseUntil ?? 0) > Date.now()) return { ok: false as const };
     const token = crypto.randomUUID();
     await ctx.db.patch(botId, { reconcileLeaseToken: token, reconcileLeaseUntil: Date.now() + SPOT_GRID_LEASE_MS, updatedAt: Date.now() });
-    return { ok: true as const, token };
+    return { ok: true as const, token, wasError: bot.status === "error" };
   },
 });
 
@@ -504,6 +530,16 @@ export const setSpotGridBootstrap = internalMutation({
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
     for (const k of ["bootstrapPhase", "seedStatus", "seedQty", "seedAvgPx", "seedNotionalReal", "seedPercent", "liquidationSeq", "status", "errorMessage"] as const) {
       if (a[k] !== undefined) patch[k] = a[k];
+    }
+    // (JAV-122) Los `status:"error"` del bootstrap son deterministas/FATALES (semilla inválida, IOC sin
+    // fill). Marcar errorKind:"fatal" y limpiar campos de recovery (consistencia con la regla "toda
+    // transición no-error-transient limpia recovery") → no quedan recuperables ni con estado fantasma.
+    if (a.status === "error") {
+      patch.errorKind = "fatal";
+      patch.recoverToStatus = undefined;
+      patch.transientFailCount = 0;
+      patch.errorRecoveryAttempts = 0;
+      patch.nextRetryAt = 0;
     }
     await ctx.db.patch(a.botId, patch);
     return { ok: true as const };
@@ -613,10 +649,15 @@ export const markSpotGridOrder = internalMutation({
   },
 });
 
+// (JAV-122) Mutation de transiciones NO error-transient (fatal, gate.policy, running/paused/stopped). La
+// escalada error-transient NO pasa por aquí (la hace bumpSpotGridTransient con su propio patch). Semántica
+// EXPLÍCITA de errorKind (Codex r6 COND-2) + NORMALIZA siempre los campos de recovery (Codex r5) para no
+// dejar estado fantasma: ningún `errorKind:"transient"`/recoverToStatus heredado donde ya no corresponde.
 export const setSpotGridStatus = internalMutation({
   args: {
     botId: v.id("spot_grid_bots"), token: v.string(),
     status: v.union(v.literal("running"), v.literal("paused"), v.literal("stopped"), v.literal("error")),
+    errorKind: v.optional(v.union(v.literal("transient"), v.literal("fatal"))),
     errorMessage: v.optional(v.string()), clearLease: v.optional(v.boolean()),
   },
   handler: async (ctx, a) => {
@@ -624,10 +665,111 @@ export const setSpotGridStatus = internalMutation({
     if (!leaseOk(bot, a.token)) return { ok: false as const };
     await emitSpotGridErrorAlert(ctx, bot!, a.status, a.errorMessage);   // (JAV-94) antes del patch: detecta la transición
     const patch: Record<string, unknown> = { status: a.status, updatedAt: Date.now() };
-    if (a.errorMessage !== undefined) patch.errorMessage = a.errorMessage;
+    // errorKind EXPLÍCITO (asignación incondicional): error → fatal por defecto (los stops setean error sin
+    // errorKind y NUNCA deben conservar un `transient` previo); no-error → limpiar.
+    if (a.status === "error") {
+      patch.errorKind = a.errorKind ?? "fatal";
+      if (a.errorMessage !== undefined) patch.errorMessage = a.errorMessage;
+    } else {
+      patch.errorKind = undefined;
+      patch.errorMessage = a.errorMessage !== undefined ? a.errorMessage : undefined;   // gate.reason o limpio
+    }
+    // NORMALIZA los campos de recovery en TODA transición que pase por aquí (no es error-transient).
+    patch.recoverToStatus = undefined;
+    patch.transientFailCount = 0;
+    patch.errorRecoveryAttempts = 0;
+    patch.nextRetryAt = 0;
     if (a.clearLease || a.status === "stopped") { patch.reconcileLeaseToken = undefined; patch.reconcileLeaseUntil = 0; }
     await ctx.db.patch(a.botId, patch);
     return { ok: true as const };
+  },
+});
+
+// (JAV-122) Bump de transitorio con el bot ACTIVO (Parte 1). Bajo lease. Calcula el contador DENTRO de la
+// mutation (Codex r2). Si alcanza el tope → ESCALA atómicamente a error+errorKind:"transient", capturando
+// recoverToStatus = estado previo (running|paused) para restaurarlo en recovery (Codex r4), y resetea los
+// contadores. Si no escala → solo sube el contador + backoff, sin tocar status/errorMessage (el usuario no
+// ve nada). Devuelve {escalated, count}.
+export const bumpSpotGridTransient = internalMutation({
+  args: { botId: v.id("spot_grid_bots"), token: v.string(), message: v.string() },
+  handler: async (ctx, { botId, token, message }) => {
+    const bot = await ctx.db.get(botId);
+    if (!leaseOk(bot, token)) return { ok: false as const };
+    const count = (bot!.transientFailCount ?? 0) + 1;
+    if (count >= SPOT_GRID_MAX_TRANSIENT_FAILS) {
+      const recoverToStatus = bot!.status === "paused" ? "paused" as const : "running" as const;
+      await emitSpotGridErrorAlert(ctx, bot!, "error", message);   // transición a error → alerta al dueño
+      await ctx.db.patch(botId, {
+        status: "error", errorKind: "transient", errorMessage: message, recoverToStatus,
+        transientFailCount: 0, errorRecoveryAttempts: 0,
+        nextRetryAt: Date.now() + SPOT_GRID_ERROR_RETRY_BACKOFF_MS, updatedAt: Date.now(),
+      });
+      return { ok: true as const, escalated: true as const, count };
+    }
+    await ctx.db.patch(botId, {
+      transientFailCount: count, nextRetryAt: Date.now() + SPOT_GRID_TRANSIENT_BACKOFF_MS, updatedAt: Date.now(),
+    });
+    return { ok: true as const, escalated: false as const, count };
+  },
+});
+
+// (JAV-122) Bump de un reintento de RECUPERACIÓN fallido por transitorio (Parte 2). Bajo lease Y solo si el
+// bot SIGUE en error+errorKind:"transient" (Codex r3: una pausa/stop concurrente lo cambió → no-op).
+// Incrementa errorRecoveryAttempts (contador SEPARADO) + backoff largo. Al alcanzar el tope, deja un
+// errorMessage accionable (Codex r4): la query deja de devolverlo → terminal visible.
+export const bumpSpotGridErrorRecovery = internalMutation({
+  args: { botId: v.id("spot_grid_bots"), token: v.string() },
+  handler: async (ctx, { botId, token }) => {
+    const bot = await ctx.db.get(botId);
+    if (!leaseOk(bot, token)) return { ok: false as const };
+    if (bot!.status !== "error" || bot!.errorKind !== "transient") return { ok: false as const };
+    const attempts = (bot!.errorRecoveryAttempts ?? 0) + 1;
+    const patch: Record<string, unknown> = {
+      errorRecoveryAttempts: attempts, nextRetryAt: Date.now() + SPOT_GRID_ERROR_RETRY_BACKOFF_MS, updatedAt: Date.now(),
+    };
+    if (attempts >= SPOT_GRID_MAX_ERROR_RECOVERIES) patch.errorMessage = SPOT_GRID_RECOVERY_EXHAUSTED_MSG;
+    await ctx.db.patch(botId, patch);
+    return { ok: true as const, attempts };
+  },
+});
+
+// (JAV-122) Reset de contadores en TODA ronda exitosa con el bot activo (Parte 1, Codex r1). Bajo lease.
+// Estrictamente contadores/backoff: NO toca status/errorKind/errorMessage (Codex r6 bajo). Corre con o sin
+// fills (a diferencia de setSpotGridFillCursor, que solo corre con fills nuevos).
+export const markSpotGridReconcileSuccess = internalMutation({
+  args: { botId: v.id("spot_grid_bots"), token: v.string() },
+  handler: async (ctx, { botId, token }) => {
+    const bot = await ctx.db.get(botId);
+    if (!leaseOk(bot, token)) return { ok: false as const };
+    await ctx.db.patch(botId, { transientFailCount: 0, nextRetryAt: 0, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
+// (JAV-122) Éxito de una ronda de RECUPERACIÓN (Parte 2). Bajo lease Y solo si el bot SIGUE en
+// error+errorKind:"transient" (Codex r3: barrera anti-carrera; una pausa/stop concurrente → no-op). Restaura
+// el estado previo `recoverToStatus` (running|paused, NO siempre running — Codex r4) y limpia errorMessage/
+// errorKind/contadores. Si falta recoverToStatus (no debería: la query lo excluye) → TERMINALIZA a fatal
+// con mensaje accionable (Codex r5/r6), no no-op silencioso que lo dejaría en bucle.
+export const recoverSpotGridFromError = internalMutation({
+  args: { botId: v.id("spot_grid_bots"), token: v.string() },
+  handler: async (ctx, { botId, token }) => {
+    const bot = await ctx.db.get(botId);
+    if (!leaseOk(bot, token)) return { ok: false as const };
+    if (bot!.status !== "error" || bot!.errorKind !== "transient") return { ok: false as const };   // transición concurrente
+    const target = bot!.recoverToStatus;
+    if (target !== "running" && target !== "paused") {
+      await ctx.db.patch(botId, {
+        errorKind: "fatal", errorMessage: SPOT_GRID_NO_RECOVER_STATUS_MSG, recoverToStatus: undefined,
+        transientFailCount: 0, errorRecoveryAttempts: 0, nextRetryAt: 0, updatedAt: Date.now(),
+      });
+      return { ok: false as const, terminalized: true as const };
+    }
+    await ctx.db.patch(botId, {
+      status: target, errorKind: undefined, errorMessage: undefined, recoverToStatus: undefined,
+      transientFailCount: 0, errorRecoveryAttempts: 0, nextRetryAt: 0, updatedAt: Date.now(),
+    });
+    return { ok: true as const, restoredTo: target };
   },
 });
 
@@ -705,6 +847,18 @@ export const listActiveSpotGridBotsInternal = internalQuery({
     const running = await ctx.db.query("spot_grid_bots").withIndex("by_status_updated", (q) => q.eq("status", "running")).collect();
     const paused = await ctx.db.query("spot_grid_bots").withIndex("by_status_updated", (q) => q.eq("status", "paused")).collect();
     return [...running, ...paused];   // reconcilia activos (paused registra fills pero no repone)
+  },
+});
+
+// (JAV-122) Bots en `error` RECUPERABLE por el cron (Parte 2): error-transient con estado de retorno y bajo
+// el tope, con backoff vencido. Usa el MISMO predicate que el claim (isRecoverableError) + el gate de
+// nextRetryAt → no divergen (Codex r6). El gate live del loop revalida admisibilidad antes de tocar HL.
+export const listRecoverableErrorSpotGridBotsInternal = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+    const errored = await ctx.db.query("spot_grid_bots").withIndex("by_status_updated", (q) => q.eq("status", "error")).collect();
+    return errored.filter((b) => isRecoverableError(b) && (b.nextRetryAt ?? 0) <= now);
   },
 });
 

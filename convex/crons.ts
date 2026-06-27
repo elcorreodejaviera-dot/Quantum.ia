@@ -75,11 +75,13 @@ crons.interval(
   internal.cronHealth.refreshPoolLifetimesWithHealth,
 );
 
-// (JAV-120) Snapshot horario de fees por posición → "Fees 24h" REAL = Δ(feesAccum) entre snapshots.
+// (JAV-120) Snapshot de fees por posición → "Fees 24h" REAL = Δ(feesAccum) entre snapshots.
 // NO money-path; independiente del de lifetime (lee cobrable live por RPC público, sin Alchemy).
+// Cadencia 5 min (antes 1h): la cifra "Fees 24h" se refresca casi en vivo sin gastar cuota Alchemy
+// (RPC público) ni acelerar el warming-up inicial de 24h. Retención (~10d) lo absorbe sin tocar nada.
 crons.interval(
   "snapshot pool fees",
-  { hours: 1 },
+  { minutes: 5 },
   internal.cronHealth.snapshotPoolFeesWithHealth,
 );
 

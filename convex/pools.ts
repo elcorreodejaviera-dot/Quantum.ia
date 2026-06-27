@@ -368,9 +368,10 @@ export const patchPoolLifetimeMeta = internalMutation({
 });
 
 // (JAV-120) Inserta un snapshot de fees del pool y poda los viejos. Guarda los componentes BRUTOS
-// (tokensOwed/collected/principalDebt) + snapshotKey + safeHeadBlock + aggregatesComplete; el neteo y la
-// valuación USD se hacen al LEER (F3). NO money-path. Idempotencia: no aplica (serie temporal append-only),
-// el cron corre 1/h. `at` se sella aquí (Date.now()) para mantener el writer/action sin estado de tiempo.
+// (tokensOwed/collected/principalDebt) + snapshotKey + safeHeadBlock + prueba opcional de cobertura de
+// agregados; el neteo y la valuación USD se hacen al LEER (F3). NO money-path. Idempotencia: no aplica
+// (serie temporal append-only), el cron corre 1/h. `at` se sella aquí (Date.now()) para mantener el
+// writer/action sin estado de tiempo.
 const FEE_SNAPSHOT_RETENTION_MS = 10 * 24 * 60 * 60 * 1000;   // ~10 días: cubre la ventana de 24h + margen
 
 export const insertPoolFeeSnapshot = internalMutation({
@@ -385,6 +386,7 @@ export const insertPoolFeeSnapshot = internalMutation({
     snapshotKey: v.string(),
     safeHeadBlock: v.number(),
     aggregatesComplete: v.boolean(),
+    aggregatesSafeThroughBlock: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const at = Date.now();

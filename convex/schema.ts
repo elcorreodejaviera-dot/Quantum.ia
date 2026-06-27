@@ -122,12 +122,12 @@ export default defineSchema({
   // componentes BRUTOS, NO un "fee" ya armado, y NO se cachea USD (se valúa a spot al mostrar).
   // - tokensOwed*Raw: cobrable live (collect() simulado, RPC público — NO depende de Alchemy). BRUTO:
   //   incluye principal liberado por Decrease; se netea con principalDebt al leer.
-  // - collected*Raw / principalDebt*Raw: agregados cacheados de `pools` al momento; "" si ausentes →
-  //   aggregatesComplete=false (el status nunca puede ser "ok" sin los cuatro).
+  // - collected*Raw / principalDebt*Raw: agregados cacheados de `pools` al momento; "" si ausentes.
   // - snapshotKey: huella de la posición vía readPositionSnapshotKey (liquidity|feeGrowthInside|tokensOwed).
   //   Si difiere entre ref y now hubo increase/decrease/collect → certificación por eventos (getLogs) para "ok".
   // - safeHeadBlock: bloque finalizado al insertar → rango exacto de getLogs en la ventana (sin timestamp→block).
-  // - aggregatesComplete: los cuatro agregados raw estaban presentes (gate de "ok").
+  // - aggregatesComplete: los agregados vienen de un lifetime backfilled y cubren este safeHeadBlock.
+  // - aggregatesSafeThroughBlock: prueba de cobertura del cache; ausente en snapshots viejos → no certificar.
   pool_fee_snapshots: defineTable({
     poolId: v.id("pools"),
     at: v.number(),
@@ -140,6 +140,7 @@ export default defineSchema({
     snapshotKey: v.string(),
     safeHeadBlock: v.number(),
     aggregatesComplete: v.boolean(),
+    aggregatesSafeThroughBlock: v.optional(v.number()),
   }).index("by_pool_at", ["poolId", "at"]),
 
   // (JAV-40 #15) Historial de cierres/reaperturas de pools. El doc de pools refleja el ESTADO

@@ -1100,12 +1100,15 @@ const FEE24H_GETLOGS_BUDGET = 2000;                   // tope de requests getLog
 // lee los eventos de [refSnap.safeHeadBlock+1, nowSnap.safeHeadBlock] por RPC PÚBLICO (range-halving) y
 // replica la contabilidad principal/fee (igual que computeLifetimeAggregates) PARTIENDO de la deuda del
 // ref. fees_window = ΔfeesCollected + max(owed_now−debt_now,0) − max(owed_ref−debt_ref,0). Devuelve los
-// raw por token o null si NO se puede certificar (sin agregados base, RPC incompleto/transporte, decode no
-// estricto, 0 eventos pese a key cambiada, o resultado negativo). null ⇒ el caller cae a `partial`.
+// raw por token o null si NO se puede certificar (sin agregados base probados para el safeHead del ref,
+// RPC incompleto/transporte, decode no estricto, 0 eventos pese a key cambiada, o resultado negativo).
+// null ⇒ el caller cae a `partial`.
 async function reconcileWindowFees(
   rpcs: string[], nft: string, tokenId: number, refSnap: any, nowSnap: any,
 ): Promise<{ fee0: bigint; fee1: bigint } | null> {
   if (!refSnap.aggregatesComplete) return null;   // sin principalDebt base no se puede atribuir principal vs fee
+  if (typeof refSnap.aggregatesSafeThroughBlock !== "number" ||
+      refSnap.aggregatesSafeThroughBlock < refSnap.safeHeadBlock) return null; // snapshots viejos/stale no certifican
   let debtRef0: bigint, debtRef1: bigint, owedRef0: bigint, owedRef1: bigint, owedNow0: bigint, owedNow1: bigint;
   try {
     debtRef0 = BigInt(refSnap.principalDebt0Raw); debtRef1 = BigInt(refSnap.principalDebt1Raw);
@@ -1452,9 +1455,10 @@ export const refreshAllPoolLifetimes = internalAction({
 
 // (JAV-120) Writer de snapshots de fees para "Fees 24h" REAL. Por cada pool con tokenId lee, vía RPC
 // PÚBLICO (NO Alchemy): el cobrable live (collect() simulado = tokensOwed BRUTO), la snapshotKey estructural
-// y el safeHead. Guarda eso + los agregados cacheados (collected/principalDebt; "" si ausentes →
-// aggregatesComplete=false). NO netea ni valúa aquí: el neteo (collected + max(owed−debt,0)) y el USD se
-// hacen al LEER (F3). NO money-path: fetchUncollectedFeesRaw es un eth_call (simulación, no envía tx).
+// y el safeHead. Guarda eso + los agregados cacheados (collected/principalDebt); aggregatesComplete SOLO
+// es true si el cache lifetime está backfilled y cubre este safeHead. NO netea ni valúa aquí: el neteo
+// (collected + max(owed−debt,0)) y el USD se hacen al LEER (F3). NO money-path: fetchUncollectedFeesRaw es
+// un eth_call (simulación, no envía tx).
 async function snapshotOnePoolFees(ctx: any, pool: any): Promise<"inserted" | "unavailable"> {
   const rpcs = RPC[pool.network];
   const nft = NFT_MANAGER[pool.network];
@@ -1473,19 +1477,29 @@ async function snapshotOnePoolFees(ctx: any, pool: any): Promise<"inserted" | "u
   if (!owed) return "unavailable";
   const snapshotKey = await readPositionSnapshotKey(rpcs, nft, pool.tokenId, blockTag);
   if (snapshotKey == null) return "unavailable";
-  // Agregados cacheados (faltan si nunca se back-filleó): "" → aggregatesComplete=false (gate de "ok" en F3).
+  // Agregados cacheados. Campos presentes no bastan: para certificar F4, la deuda base debe venir de un
+  // backfill histórico y estar calculada al menos hasta el safeHead exacto del snapshot.
   const collected0Raw = pool.feesCollectedRaw0 ?? "";
   const collected1Raw = pool.feesCollectedRaw1 ?? "";
   const principalDebt0Raw = pool.principalDebt0 ?? "";
   const principalDebt1Raw = pool.principalDebt1 ?? "";
-  const aggregatesComplete =
+  const hasAggregateFields =
     collected0Raw !== "" && collected1Raw !== "" && principalDebt0Raw !== "" && principalDebt1Raw !== "";
+  const aggregatesSafeThroughBlock =
+    hasAggregateFields &&
+    pool.feesLifetimeBackfilledAt != null &&
+    typeof pool.feesLifetimeCursorBlock === "number" &&
+    pool.feesLifetimeCursorBlock >= safeHead
+      ? safeHead
+      : undefined;
+  const aggregatesComplete = aggregatesSafeThroughBlock !== undefined;
   await ctx.runMutation(internal.pools.insertPoolFeeSnapshot, {
     poolId: pool._id,
     tokensOwed0Raw: owed.amount0Raw.toString(),
     tokensOwed1Raw: owed.amount1Raw.toString(),
     collected0Raw, collected1Raw, principalDebt0Raw, principalDebt1Raw,
     snapshotKey, safeHeadBlock: safeHead, aggregatesComplete,
+    ...(aggregatesSafeThroughBlock !== undefined ? { aggregatesSafeThroughBlock } : {}),
   });
   return "inserted";
 }

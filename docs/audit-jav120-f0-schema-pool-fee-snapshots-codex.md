@@ -37,7 +37,7 @@ Ninguno.
   - formula del plan: `feesCollectedRaw + max(tokensOwedRaw - principalDebtRaw, 0)` en `docs/plan-fees24h-real.md:73-79`.
 - `snapshotKey: v.string()` esta alineado con el helper real `readPositionSnapshotKey`, que compone `liquidity|feeGrowthInside0|feeGrowthInside1|tokensOwed0|tokensOwed1` en `convex/actions/poolScanner.ts:464-480`.
 - `safeHeadBlock: v.number()` resuelve la condicion previa de F4: rango exacto de `getLogs` sin timestamp->block, segun `docs/plan-fees24h-real.md:121-123` y `docs/plan-fees24h-real.md:219-222`.
-- `aggregatesComplete: v.boolean()` alcanza para gatear `status=ok` junto con `snapshotKey`, segun `docs/plan-fees24h-real.md:81-95` y `docs/plan-fees24h-real.md:150-152`.
+- `aggregatesComplete: v.boolean()` participa del gate de `status=ok` junto con `snapshotKey`, segun `docs/plan-fees24h-real.md:81-95` y `docs/plan-fees24h-real.md:150-152`. **Nota (post-F4 r2):** por si solo NO basta; el contrato se refino con `aggregatesSafeThroughBlock` (anadido en `bda6470`) y F4 certifica `ok` solo si `aggregatesSafeThroughBlock >= safeHeadBlock` (la deuda base esta probada a ese bloque exacto, recomputada desde `pool_fee_events`).
 - Busqueda fuera de docs: `pool_fee_snapshots` aparece solo en `convex/schema.ts:131`. No hay query, mutation, internalAction, cron ni UI que lea o escriba esta tabla todavia.
 - `convex/crons.ts:70-81` conserva solo los crons existentes de lifetime y poda de engine events; no hay cron nuevo para snapshots en Fase 0.
 - El indice `by_pool_at ["poolId", "at"]` sirve para:

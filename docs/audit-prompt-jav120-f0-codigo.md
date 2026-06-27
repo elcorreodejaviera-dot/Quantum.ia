@@ -9,6 +9,10 @@ Audita el **código** del commit `649bdc6` (rama `elcorreodejaviera/jav-120-fees
   `poolId`, `at`, `tokensOwed0/1Raw`, `collected0/1Raw`, `principalDebt0/1Raw`, `snapshotKey` (string),
   `safeHeadBlock` (number), `aggregatesComplete` (bool). Comentario explica el neteo-al-leer y el rol de
   cada campo.
+  > Nota (post-F4 r2): el contrato de certificación se refinó después con
+  > `aggregatesSafeThroughBlock` (`v.optional(v.number())`, añadido en `bda6470`). `aggregatesComplete`
+  > **no** basta por sí solo: F4 certifica `ok` solo si `aggregatesSafeThroughBlock ≥ safeHeadBlock`. El
+  > schema actual (`convex/schema.ts`) ya incluye ese campo.
 - Docs del plan + auditorías (no código).
 
 ## Verifica GO/NO-GO
@@ -20,7 +24,8 @@ Audita el **código** del commit `649bdc6` (rama `elcorreodejaviera/jav-120-fees
 3. **Índice**: ¿`by_pool_at ["poolId","at"]` sirve para (a) buscar el ref "más nuevo ≤ now−24h" y (b) podar
    por antigüedad? ¿Falta algún índice para la Fase 1/3?
 4. **Diseño consistente con el plan v3**: ¿los campos alcanzan para el neteo NETO al leer
-   (`collected + max(tokensOwed − principalDebt, 0)`), la regla de status por `snapshotKey`/`aggregatesComplete`,
+   (`collected + max(tokensOwed − principalDebt, 0)`), la regla de status por `snapshotKey` +
+   `aggregatesSafeThroughBlock ≥ safeHeadBlock` (no solo `aggregatesComplete`),
    la tolerancia de antigüedad (usa `at`) y el `getLogs` exacto de F4 (usa `safeHeadBlock`)? ¿Sobra o falta
    algún campo?
 5. **Sin efectos**: confirmar que NO es money-path, NO hay deploy de lógica, y que `codegen`/`typecheck`

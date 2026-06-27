@@ -548,13 +548,15 @@ function hexToUtf8(hexData: string, offset: number): string {
 // `ok` = símbolo Y decimals leídos de forma fiable (no el default silencioso "???"/18). Los
 // callers de liquidez ignoran `ok` (comportamiento intacto); el cálculo de fees lo exige true
 // para no convertir a USD con metadata inventada (Codex: sin defaults silenciosos).
-async function tokenInfo(rpc: string, addr: string): Promise<{ symbol: string; decimals: number; ok: boolean }> {
+// (CodeRabbit) rpcs[] con fallback, no un único endpoint: la metadata del token no debe degradar el
+// resultado a `unavailable` solo porque rpcs[0] esté caído mientras los demás siguen sanos.
+async function tokenInfo(rpcs: string[], addr: string): Promise<{ symbol: string; decimals: number; ok: boolean }> {
   let symbol = "???";
   let decimals = 18;
   let symbolOk = false;
   let decimalsOk = false;
   try {
-    const raw = (await rpcCall(rpc, addr, "0x95d89b41")).slice(2);
+    const raw = (await rpcCallWithFallback(rpcs, addr, "0x95d89b41")).slice(2);
     if (raw.length >= 128) {
       const s = hexToUtf8(raw, 0);
       if (s) { symbol = s; symbolOk = true; }
@@ -571,7 +573,7 @@ async function tokenInfo(rpc: string, addr: string): Promise<{ symbol: string; d
     }
   } catch {}
   try {
-    const d = parseInt((await rpcCall(rpc, addr, "0x313ce567")).slice(2), 16);
+    const d = parseInt((await rpcCallWithFallback(rpcs, addr, "0x313ce567")).slice(2), 16);
     if (Number.isInteger(d) && d >= 0 && d <= 36) { decimals = d; decimalsOk = true; }
   } catch {}
   return { symbol, decimals, ok: symbolOk && decimalsOk };
@@ -604,8 +606,8 @@ async function scanPositionCore(network: string, tokenId: number) {
     if (liquidity === 0n) throw new Error("Posición cerrada (liquidez = 0).");
 
     const [t0, t1] = await Promise.all([
-      tokenInfo(rpcs[0], token0addr),
-      tokenInfo(rpcs[0], token1addr),
+      tokenInfo(rpcs, token0addr),
+      tokenInfo(rpcs, token1addr),
     ]);
 
     // Prices at range bounds
@@ -876,7 +878,7 @@ export const fetchPositionLiquidity = action({
     let t0: { symbol: string; decimals: number; ok: boolean };
     let t1: { symbol: string; decimals: number; ok: boolean };
     try {
-      [t0, t1] = await Promise.all([tokenInfo(rpcs[0], token0addr), tokenInfo(rpcs[0], token1addr)]);
+      [t0, t1] = await Promise.all([tokenInfo(rpcs, token0addr), tokenInfo(rpcs, token1addr)]);
     } catch { return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd: null }; }
 
     // Bloque INDEPENDIENTE de fees: no depende del flujo/early-returns de la liquidez ni del
@@ -1188,7 +1190,7 @@ export const getPoolFees24h = action({
     const token0addr = addrAt(posRaw, 2); const token1addr = addrAt(posRaw, 3);
     let t0: { symbol: string; decimals: number; ok: boolean };
     let t1: { symbol: string; decimals: number; ok: boolean };
-    try { [t0, t1] = await Promise.all([tokenInfo(rpcs[0], token0addr), tokenInfo(rpcs[0], token1addr)]); }
+    try { [t0, t1] = await Promise.all([tokenInfo(rpcs, token0addr), tokenInfo(rpcs, token1addr)]); }
     catch { return fail("unavailable", refAgeMs, windowHours); }
 
     // Delta de fees RAW por token según haya o no cambio estructural en la ventana.

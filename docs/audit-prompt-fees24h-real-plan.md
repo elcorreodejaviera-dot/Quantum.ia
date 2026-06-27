@@ -13,17 +13,20 @@ inerte (`fetchUncollectedFeesRaw` = collect() simulado en RPC público SIN Alche
 `feeShareRatio`). Todo read-only/display.
 
 ## Verifica GO/NO-GO (sé escéptico; lee el código citado en el plan)
-1. **Corrección del "real"**: ¿`fees_24h = Δ(collected+uncollected)` mide bien las fees generadas, sin
-   double-count ni contaminación por precio? El plan valúa el delta RAW a spot al mostrar (no cachea USD).
-   ¿Correcto el manejo de `principalDebt` (Decrease libera principal que infla tokensOwed)? Ver
-   `poolScanner.ts:888-903`.
-2. **Caso collects sin Alchemy**: un `collect()` baja uncollected sin ser pérdida. El plan clampa el delta
-   negativo a estado `partial`. ¿Es honesto y suficiente? ¿El getLogs estrecho (Fase 4) en RPC público es
-   viable o debe descartarse? ¿Hay un caso donde `partial` engañe al usuario?
+1. **Corrección del "real"**: ¿`fees_24h = feesAccum(now) − feesAccum(ref)` con
+   `feesAccum = collected + max(tokensOwed − principalDebt, 0)` mide bien las fees generadas, sin double-count
+   ni contaminación por precio? El plan valúa el delta RAW a spot al mostrar (no cachea USD). ¿Correcto el
+   manejo de `principalDebt` (Decrease libera principal que infla tokensOwed)? Ver `poolScanner.ts:888-903`.
+2. **Caso collects sin Alchemy**: un `collect()` baja uncollected sin ser pérdida; pero **un delta positivo
+   también puede subcontar** si la `snapshotKey` cambió (ej: cobra y regenera → `collected` no avanza). No
+   basta clampar negativos: si la key cambió, certificar `ok` exige los eventos completos de la ventana
+   (Fase 4, getLogs estrecho RPC público); si no → `partial`. ¿Es honesto y suficiente? ¿El getLogs estrecho
+   es viable o debe descartarse? ¿Hay un caso donde `partial` engañe al usuario?
 3. **Snapshots**: tabla/índice (`by_pool_at`), elección del ref "más nuevo ≤ now−24h", bootstrap
    `warming_up`, retención/poda. ¿Sin interpolación es aceptable en v1? ¿Riesgos de huecos si el cron falla?
-4. **Fallback `warming_up`**: mostrar run-rate **concentrado** (`fees1d*feeShareRatio/valor`) etiquetado
-   "Estimado". ¿Aceptable como transición o el usuario (que quiere REAL) preferiría `—`? ¿`feeShareStatus`
+4. **Fallback `warming_up`**: mostrar el **valor USD 24h concentrado** `estimatedFees24hUsd = fees1d *
+   feeShareRatio` (NO la APR `estimatedFeeApr = fees24hUsd / valor`, que es una tasa) etiquetado "Estimado".
+   ¿Aceptable como transición o el usuario (que quiere REAL) preferiría `—`? ¿`feeShareStatus`
    `out_of_range`/`inconsistent` correctamente → `—`?
 5. **Money-path**: confirmar que TODO es read-only/display: `fetchUncollectedFeesRaw` es `eth_call`
    (simulación, no envía tx); el writer solo inserta snapshots; la UI solo lee. ¿Algo toca ejecución/margen?

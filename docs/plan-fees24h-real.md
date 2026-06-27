@@ -71,17 +71,18 @@ Codex antes de pushear ([[flujo-codex-antes-de-push]]).
 > si no contaría principal como fee.
 
 Acumulador NETO de fees por token (raw), idéntico a lifetime:
-```
+```text
 feesAccumRaw(t)  = feesCollectedRaw(t) + max(tokensOwedRaw(t) − principalDebtRaw(t), 0)   // por token0 y token1
 fees_24h         = feesAccumRaw(now) − feesAccumRaw(now − 24h)                            // por token, luego a USD
 ```
 El **delta raw** se valúa a spot al mostrar (patrón existente: cantidad exacta, USD aproximado —
 `schema.ts:74`, "el USD NO se cachea").
 
-**Regla de status (Codex ALTO#1 + ALTO#2):** `status = ok` SOLO si en AMBOS extremos (ref y now) están
-presentes los 4 agregados (`feesCollectedRaw0/1`, `principalDebt0/1`) **y** se puede certificar que no hubo
-cambios de posición no capturados (ver §2 `snapshotKey`). Si falta cualquier agregado o hay cambio no
-certificado → `partial`/`unavailable`, **nunca `ok`**.
+**Regla de status (Codex ALTO#1 + ALTO#2 + F4-r2):** `status = ok` SOLO si la deuda base del ref está
+**probada hasta su `safeHeadBlock` exacto** (`aggregatesSafeThroughBlock ≥ safeHeadBlock`; no basta que los
+4 raw existan: el cache lifetime vale a `cursorBlock ≥ safeHead`, así que F4 recomputa la deuda a `safeHead`
+desde `pool_fee_events`) **y** se puede certificar que no hubo cambios de posición no capturados (ver §2
+`snapshotKey`). Si falta la prueba o hay cambio no certificado → `partial`/`unavailable`, **nunca `ok`**.
 
 Casos:
 - **Sin cambios de posición en la ventana** (la `snapshotKey` no cambió): `feesCollected`/`principalDebt`
@@ -98,16 +99,17 @@ Casos:
 
 ## 2. Snapshots (tabla nueva, poblada por el cron de 1h)
 
-```
+```ts
 pool_fee_snapshots: defineTable({
   poolId: v.id("pools"),
   at: v.number(),
-  tokensOwed0Raw: v.string(), tokensOwed1Raw: v.string(),   // collect() simulado (RPC público) — BRUTO
-  collected0Raw:  v.string(), collected1Raw:  v.string(),   // feesCollectedRaw0/1 al momento (o "" si ausente)
-  principalDebt0Raw: v.string(), principalDebt1Raw: v.string(), // principalDebt0/1 al momento (o "")
+  tokensOwed0Raw: v.string(), tokensOwed1Raw: v.string(),   // collect() simulado (RPC público) — BRUTO, a safeHeadBlock
+  collected0Raw:  v.string(), collected1Raw:  v.string(),   // feesCollectedRaw0/1 a safeHeadBlock exacto (o "" si ausente)
+  principalDebt0Raw: v.string(), principalDebt1Raw: v.string(), // principalDebt0/1 a safeHeadBlock exacto (o "")
   snapshotKey: v.string(),    // = readPositionSnapshotKey() EXACTO (ver abajo). Cambia con increase/decrease/collect
   safeHeadBlock: v.number(),  // (Codex v2 MEDIO#1) bloque seguro/finalizado al insertar → rango exacto para getLogs en F4
-  aggregatesComplete: v.boolean(), // true solo si los 4 agregados raw estaban presentes (else status no puede ser ok)
+  aggregatesComplete: v.boolean(), // true SOLO si aggregatesSafeThroughBlock está presente (no basta que los raw existan)
+  aggregatesSafeThroughBlock: v.optional(v.number()), // bloque hasta el que la deuda base está PROBADA; certifica F4 solo si ≥ safeHeadBlock
 }).index("by_pool_at", ["poolId", "at"])
 ```
 - **Guarda los componentes, neteo al leer** (Codex ALTO#1): se guardan `tokensOwed` BRUTO + `collected` +

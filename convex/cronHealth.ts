@@ -150,6 +150,15 @@ export const refreshPoolLifetimesWithHealth = internalAction({
     () => ctx.runAction(internal.actions.poolScanner.refreshAllPoolLifetimes, {})),
 });
 
+// (JAV-120) Snapshot horario de fees por posición (best-effort): alimenta "Fees 24h" REAL como Δ entre
+// snapshots. NO es money-path; su fallo no afecta cobertura ni órdenes. Independiente del cron de lifetime
+// (no depende de Alchemy: lee el cobrable live por RPC público).
+export const snapshotPoolFeesWithHealth = internalAction({
+  args: {},
+  handler: async (ctx): Promise<any> => withCronHealth(ctx, "snapshot pool fees",
+    () => ctx.runAction(internal.actions.poolScanner.snapshotPoolFees, {})),
+});
+
 // (OBS-3b) Poda diaria de engine_events (best-effort vía withCronHealth, no afecta money-path).
 export const pruneEngineEventsWithHealth = internalAction({
   args: {},

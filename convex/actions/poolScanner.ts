@@ -77,16 +77,18 @@ const RPC_TIMEOUT_MS = 8_000;
 // una respuesta determinista de la cadena, no una indisponibilidad del RPC.
 class RpcRevertError extends Error {}
 
-async function rpcCall(url: string, to: string, data: string, from?: string): Promise<string> {
+async function rpcCall(url: string, to: string, data: string, from?: string, block: string = "latest"): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
   try {
     // `from` opcional: necesario para simular collect() (guard isAuthorizedForToken con msg.sender).
+    // `block` opcional (default "latest"): permite fijar la lectura a un bloque exacto (JAV-120: leer
+    // tokensOwed/snapshotKey en el MISMO safeHead que se guarda → consistencia con el rango de getLogs).
     const callObj = from ? { to, data, from } : { to, data };
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", method: "eth_call", params: [callObj, "latest"], id: 1 }),
+      body: JSON.stringify({ jsonrpc: "2.0", method: "eth_call", params: [callObj, block], id: 1 }),
       signal: controller.signal,
     });
     if (!res.ok) throw new Error(`RPC ${url} respondió ${res.status} ${res.statusText}`);
@@ -109,11 +111,11 @@ async function rpcCall(url: string, to: string, data: string, from?: string): Pr
   }
 }
 
-async function rpcCallWithFallback(urls: string[], to: string, data: string, from?: string): Promise<string> {
+async function rpcCallWithFallback(urls: string[], to: string, data: string, from?: string, block: string = "latest"): Promise<string> {
   let lastErr: unknown;
   let revertErr: RpcRevertError | undefined;
   for (const url of urls) {
-    try { return await rpcCall(url, to, data, from); }
+    try { return await rpcCall(url, to, data, from, block); }
     catch (e) {
       lastErr = e;
       // Un revert es determinista (todos los endpoints darían lo mismo); tiene
@@ -464,10 +466,10 @@ async function fillBlockHashes(rpcs: string[], logs: RpcLog[]): Promise<RpcLog[]
 // (JAV-117) Snapshot estructural de positions(): liquidity + feeGrowthInside0/1Last + tokensOwed0/1
 // ALMACENADOS (slots 7..11). Estos solo cambian al modificar la posición (Increase/Decrease/Collect),
 // NO con la acumulación pasiva de fees → key igual ⟺ no hubo evento desde el último ciclo.
-async function readPositionSnapshotKey(rpcs: string[], nft: string, tokenId: number): Promise<string | null> {
+async function readPositionSnapshotKey(rpcs: string[], nft: string, tokenId: number, block: string = "latest"): Promise<string | null> {
   let posRaw: string;
   try {
-    posRaw = (await rpcCallWithFallback(rpcs, nft, "0x99fbab88" + pad(BigInt(tokenId)))).slice(2);
+    posRaw = (await rpcCallWithFallback(rpcs, nft, "0x99fbab88" + pad(BigInt(tokenId)), undefined, block)).slice(2);
   } catch { return null; }
   if (posRaw.length < 64 * 12) return null;
   try {
@@ -546,13 +548,15 @@ function hexToUtf8(hexData: string, offset: number): string {
 // `ok` = símbolo Y decimals leídos de forma fiable (no el default silencioso "???"/18). Los
 // callers de liquidez ignoran `ok` (comportamiento intacto); el cálculo de fees lo exige true
 // para no convertir a USD con metadata inventada (Codex: sin defaults silenciosos).
-async function tokenInfo(rpc: string, addr: string): Promise<{ symbol: string; decimals: number; ok: boolean }> {
+// (CodeRabbit) rpcs[] con fallback, no un único endpoint: la metadata del token no debe degradar el
+// resultado a `unavailable` solo porque rpcs[0] esté caído mientras los demás siguen sanos.
+async function tokenInfo(rpcs: string[], addr: string): Promise<{ symbol: string; decimals: number; ok: boolean }> {
   let symbol = "???";
   let decimals = 18;
   let symbolOk = false;
   let decimalsOk = false;
   try {
-    const raw = (await rpcCall(rpc, addr, "0x95d89b41")).slice(2);
+    const raw = (await rpcCallWithFallback(rpcs, addr, "0x95d89b41")).slice(2);
     if (raw.length >= 128) {
       const s = hexToUtf8(raw, 0);
       if (s) { symbol = s; symbolOk = true; }
@@ -569,7 +573,7 @@ async function tokenInfo(rpc: string, addr: string): Promise<{ symbol: string; d
     }
   } catch {}
   try {
-    const d = parseInt((await rpcCall(rpc, addr, "0x313ce567")).slice(2), 16);
+    const d = parseInt((await rpcCallWithFallback(rpcs, addr, "0x313ce567")).slice(2), 16);
     if (Number.isInteger(d) && d >= 0 && d <= 36) { decimals = d; decimalsOk = true; }
   } catch {}
   return { symbol, decimals, ok: symbolOk && decimalsOk };
@@ -602,8 +606,8 @@ async function scanPositionCore(network: string, tokenId: number) {
     if (liquidity === 0n) throw new Error("Posición cerrada (liquidez = 0).");
 
     const [t0, t1] = await Promise.all([
-      tokenInfo(rpcs[0], token0addr),
-      tokenInfo(rpcs[0], token1addr),
+      tokenInfo(rpcs, token0addr),
+      tokenInfo(rpcs, token1addr),
     ]);
 
     // Prices at range bounds
@@ -687,10 +691,10 @@ function valueFeesUsd(
 // cobrable ACTUAL, no un checkpoint viejo. Simulación sin persistencia (from=owner para el guard).
 // Devuelve {amount0Raw, amount1Raw} o null (fallo RPC/decodificación/corrupto → null, nunca 0 inventado).
 async function fetchUncollectedFeesRaw(
-  rpcs: string[], nft: string, tokenId: number,
+  rpcs: string[], nft: string, tokenId: number, block: string = "latest",
 ): Promise<{ amount0Raw: bigint; amount1Raw: bigint } | null> {
   try {
-    const ownerRaw = (await rpcCallWithFallback(rpcs, nft, "0x6352211e" + pad(BigInt(tokenId)))).slice(2);
+    const ownerRaw = (await rpcCallWithFallback(rpcs, nft, "0x6352211e" + pad(BigInt(tokenId)), undefined, block)).slice(2);
     if (ownerRaw.length < 64) return null;
     const owner = "0x" + ownerRaw.slice(24);
 
@@ -700,7 +704,7 @@ async function fetchUncollectedFeesRaw(
       + owner.slice(2).padStart(64, "0")
       + pad(MAX_U128)
       + pad(MAX_U128);
-    const res = (await rpcCallWithFallback(rpcs, nft, data, owner)).slice(2);
+    const res = (await rpcCallWithFallback(rpcs, nft, data, owner, block)).slice(2);
     if (res.length < 128) return null;
     const amount0Raw = uintAt(res, 0);
     const amount1Raw = uintAt(res, 1);
@@ -874,7 +878,7 @@ export const fetchPositionLiquidity = action({
     let t0: { symbol: string; decimals: number; ok: boolean };
     let t1: { symbol: string; decimals: number; ok: boolean };
     try {
-      [t0, t1] = await Promise.all([tokenInfo(rpcs[0], token0addr), tokenInfo(rpcs[0], token1addr)]);
+      [t0, t1] = await Promise.all([tokenInfo(rpcs, token0addr), tokenInfo(rpcs, token1addr)]);
     } catch { return { liquidityUsd: 0, exposure: 0, feesUncollectedUsd: null }; }
 
     // Bloque INDEPENDIENTE de fees: no depende del flujo/early-returns de la liquidez ni del
@@ -1078,6 +1082,138 @@ export const fetchPositionLiquidity = action({
       revertVaultActive,
       revertLoanKnown,
     };
+  },
+});
+
+// (JAV-120 F3) "Fees 24h" REAL por posición = Δ(fees acumuladas netas) entre el snapshot "ahora" y el
+// "referencia" (≥24h). Usa SOLO snapshots almacenados en ambos extremos (consistencia de bloque + barato;
+// nada de RPC de cobrable en la lectura). Authz owner/admin vía getFees24hWindowInternal. Read-only/display.
+// Estados: ok | warming_up (sin ref ≥24h) | stale (ref > 26h, hueco de cron) | partial (cambió la posición
+// en la ventana → lo cierra F4 con eventos) | unavailable (sin snapshot / metadata / red).
+// NETO: con snapshotKey IGUAL no hubo collect/increase/decrease ⇒ collected y principalDebt son constantes
+// y CANCELAN en el delta ⇒ fees24h = owed_now − owed_ref (≥0 por crecimiento pasivo). feeShareStatus NO
+// gatea este valor real (Codex v2 MEDIO#2): una posición hoy fuera de rango pudo generar fees en la ventana.
+const FEE24H_WINDOW_MS = 24 * 60 * 60 * 1000;
+const FEE24H_MAX_REF_AGE_MS = 26 * 60 * 60 * 1000;   // ventana nowSnap−refSnap: 24h..26h; más → stale (hueco)
+const FEE24H_MAX_NOW_AGE_MS = 2 * 60 * 60 * 1000;    // frescura: nowSnap debe ser ≤2h viejo (cron horario)
+const FEE24H_GETLOGS_BUDGET = 2000;                   // tope de requests getLogs por reconciliación (one-off)
+
+// (JAV-120 F4) Reconcilia las fees de la ventana cuando la posición cambió (collect/increase/decrease):
+// lee los eventos de [refSnap.safeHeadBlock+1, nowSnap.safeHeadBlock] por RPC PÚBLICO (range-halving) y
+// replica la contabilidad principal/fee (igual que computeLifetimeAggregates) PARTIENDO de la deuda del
+// ref. fees_window = ΔfeesCollected + max(owed_now−debt_now,0) − max(owed_ref−debt_ref,0). Devuelve los
+// raw por token o null si NO se puede certificar (sin agregados base probados para el safeHead del ref,
+// RPC incompleto/transporte, decode no estricto, 0 eventos pese a key cambiada, o resultado negativo).
+// null ⇒ el caller cae a `partial`.
+async function reconcileWindowFees(
+  rpcs: string[], nft: string, tokenId: number, refSnap: any, nowSnap: any,
+): Promise<{ fee0: bigint; fee1: bigint } | null> {
+  if (!refSnap.aggregatesComplete) return null;   // sin principalDebt base no se puede atribuir principal vs fee
+  if (typeof refSnap.aggregatesSafeThroughBlock !== "number" ||
+      refSnap.aggregatesSafeThroughBlock < refSnap.safeHeadBlock) return null; // snapshots viejos/stale no certifican
+  let debtRef0: bigint, debtRef1: bigint, owedRef0: bigint, owedRef1: bigint, owedNow0: bigint, owedNow1: bigint;
+  try {
+    debtRef0 = BigInt(refSnap.principalDebt0Raw); debtRef1 = BigInt(refSnap.principalDebt1Raw);
+    owedRef0 = BigInt(refSnap.tokensOwed0Raw); owedRef1 = BigInt(refSnap.tokensOwed1Raw);
+    owedNow0 = BigInt(nowSnap.tokensOwed0Raw); owedNow1 = BigInt(nowSnap.tokensOwed1Raw);
+  } catch { return null; }
+  const from = refSnap.safeHeadBlock + 1;
+  const to = nowSnap.safeHeadBlock;
+  if (to < from) return null;
+  const tokenIdTopic = "0x" + pad(BigInt(tokenId));
+  const fetcher: RangeFetcher = (lo, hi) => getLogsRangeMulti(rpcs, nft, tokenIdTopic, lo, hi);
+  let scan: { logs: RpcLog[]; complete: boolean };
+  try { scan = await getLogsAdaptive(fetcher, from, to, to - from + 1, FEE24H_GETLOGS_BUDGET); }
+  catch { return null; }                 // transporte/proveedor → no certificar
+  if (!scan.complete) return null;       // presupuesto agotado → no certificar (evita ventana parcial)
+  // Decode ESTRICTO: el getLogs ya filtró por topic0 conocido + tokenId; un null = log malformado → abortar
+  // (no subcontar). 0 eventos pese a key cambiada = inconsistencia (RPC perdió algo) → no certificar.
+  const decoded = scan.logs.map(decodePoolFeeLog);
+  if (decoded.some((e) => e === null)) return null;
+  if (decoded.length === 0) return null;
+  const events = (decoded as NonNullable<ReturnType<typeof decodePoolFeeLog>>[])
+    .sort((a, b) => a.blockNumber - b.blockNumber || a.logIndex - b.logIndex);
+  let debt0 = debtRef0, debt1 = debtRef1, dC0 = 0n, dC1 = 0n;
+  for (const e of events) {
+    let a0: bigint, a1: bigint;
+    try { a0 = BigInt(e.amount0Raw); a1 = BigInt(e.amount1Raw); } catch { return null; }
+    if (e.eventType === "decrease") { debt0 += a0; debt1 += a1; }
+    else if (e.eventType === "collect") {
+      const p0 = a0 < debt0 ? a0 : debt0; debt0 -= p0; dC0 += a0 - p0;
+      const p1 = a1 < debt1 ? a1 : debt1; debt1 -= p1; dC1 += a1 - p1;
+    }
+    // "increase": principal activo, no afecta fee ni deuda cobrable.
+  }
+  const unNow0 = owedNow0 > debt0 ? owedNow0 - debt0 : 0n;
+  const unNow1 = owedNow1 > debt1 ? owedNow1 - debt1 : 0n;
+  const unRef0 = owedRef0 > debtRef0 ? owedRef0 - debtRef0 : 0n;
+  const unRef1 = owedRef1 > debtRef1 ? owedRef1 - debtRef1 : 0n;
+  const fee0 = dC0 + unNow0 - unRef0;
+  const fee1 = dC1 + unNow1 - unRef1;
+  if (fee0 < 0n || fee1 < 0n) return null;   // inconsistencia → no certificar
+  return { fee0, fee1 };
+}
+
+export const getPoolFees24h = action({
+  args: { poolId: v.id("pools"), priceUsd: v.number() },
+  handler: async (ctx, { poolId, priceUsd }): Promise<{
+    fees24hUsd: number | null; status: string; refAgeMs: number | null;
+    windowHours: number | null; hoursUntilReady: number | null;
+  }> => {
+    await requireAuth(ctx);   // (JAV-38 #8) action pública: no consumir RPC/getLogs sin auth (F4 reconcilia hasta 2000 getLogs)
+    const fail = (status: string, refAgeMs: number | null = null, windowHours: number | null = null) =>
+      ({ fees24hUsd: null, status, refAgeMs, windowHours, hoursUntilReady: null });
+
+    const d = await ctx.runQuery(internal.pools.getFees24hWindowInternal, { poolId });
+    const { tokenId, network, serverNow, oldestAt, nowSnap, refSnap } = d;
+    const rpcs = RPC[network]; const nft = NFT_MANAGER[network];
+    if (tokenId == null || !rpcs || !nft) return fail("unavailable");
+    if (!nowSnap) return fail("unavailable");
+    // Frescura: si el último snapshot es viejo, el cron está caído → los datos no son "de ahora".
+    if (serverNow - nowSnap.at > FEE24H_MAX_NOW_AGE_MS) return fail("stale");
+    if (!refSnap) {
+      // Aún no hay snapshot ≥24h MÁS VIEJO que el actual: warming_up. Countdown anclado en nowSnap.at.
+      const hoursUntilReady = oldestAt != null
+        ? Math.max(0, Math.ceil((FEE24H_WINDOW_MS - (nowSnap.at - oldestAt)) / 3_600_000))
+        : 24;
+      return { fees24hUsd: null, status: "warming_up", refAgeMs: null, windowHours: null, hoursUntilReady };
+    }
+    // Ventana = nowSnap.at − refSnap.at, SIEMPRE ≥24h (el ref se ancló en nowSnap.at−24h). Tope 26h → stale.
+    const refAgeMs = nowSnap.at - refSnap.at;
+    const windowHours = Math.round((refAgeMs / 3_600_000) * 10) / 10;
+    if (refAgeMs > FEE24H_MAX_REF_AGE_MS) return fail("stale", refAgeMs, windowHours);
+
+    // Metadata de tokens (decimales/símbolo) para valuar el delta a spot. Constante por pool.
+    let posRaw: string;
+    try { posRaw = (await rpcCallWithFallback(rpcs, nft, "0x99fbab88" + pad(BigInt(tokenId)))).slice(2); }
+    catch { return fail("unavailable", refAgeMs, windowHours); }
+    if (posRaw.length < 64 * 12) return fail("unavailable", refAgeMs, windowHours);
+    const token0addr = addrAt(posRaw, 2); const token1addr = addrAt(posRaw, 3);
+    let t0: { symbol: string; decimals: number; ok: boolean };
+    let t1: { symbol: string; decimals: number; ok: boolean };
+    try { [t0, t1] = await Promise.all([tokenInfo(rpcs, token0addr), tokenInfo(rpcs, token1addr)]); }
+    catch { return fail("unavailable", refAgeMs, windowHours); }
+
+    // Delta de fees RAW por token según haya o no cambio estructural en la ventana.
+    let fee0: bigint, fee1: bigint;
+    if (nowSnap.snapshotKey === refSnap.snapshotKey) {
+      // Sin cambios (sin collect/increase/decrease) ⇒ collected y principalDebt constantes, cancelan ⇒
+      // fees = owed_now − owed_ref (≥0 por crecimiento pasivo). Negativo no debería ocurrir → partial.
+      try {
+        const a0 = BigInt(nowSnap.tokensOwed0Raw) - BigInt(refSnap.tokensOwed0Raw);
+        const a1 = BigInt(nowSnap.tokensOwed1Raw) - BigInt(refSnap.tokensOwed1Raw);
+        if (a0 < 0n || a1 < 0n) return fail("partial", refAgeMs, windowHours);
+        fee0 = a0; fee1 = a1;
+      } catch { return fail("unavailable", refAgeMs, windowHours); }
+    } else {
+      // (F4) Hubo collect/increase/decrease → reconciliar con los eventos de la ventana (getLogs RPC público).
+      const r = await reconcileWindowFees(rpcs, nft, tokenId, refSnap, nowSnap);
+      if (!r) return fail("partial", refAgeMs, windowHours);   // sin agregados base / RPC incompleto → no certificar
+      fee0 = r.fee0; fee1 = r.fee1;
+    }
+    const fees24hUsd = valueFeesUsd(fee0, fee1, t0, t1, priceUsd);
+    if (fees24hUsd == null) return fail("unavailable", refAgeMs, windowHours);
+    return { fees24hUsd, status: "ok", refAgeMs, windowHours, hoursUntilReady: null };
   },
 });
 
@@ -1314,6 +1450,84 @@ export const refreshAllPoolLifetimes = internalAction({
       for (const r of results) {
         if (r.status === "fulfilled") counts[r.value]++;
         else { counts.errored++; console.error("refreshAllPoolLifetimes: worker rechazado", r.reason); }
+      }
+    }
+    return { total: targets.length, ...counts };
+  },
+});
+
+// (JAV-120) Writer de snapshots de fees para "Fees 24h" REAL. Por cada pool con tokenId lee, vía RPC
+// PÚBLICO (NO Alchemy): el cobrable live (collect() simulado = tokensOwed BRUTO), la snapshotKey estructural
+// y el safeHead. Guarda eso + los agregados cacheados (collected/principalDebt); aggregatesComplete SOLO
+// es true si el cache lifetime está backfilled y cubre este safeHead. NO netea ni valúa aquí: el neteo
+// (collected + max(owed−debt,0)) y el USD se hacen al LEER (F3). NO money-path: fetchUncollectedFeesRaw es
+// un eth_call (simulación, no envía tx).
+async function snapshotOnePoolFees(ctx: any, pool: any): Promise<"inserted" | "unavailable"> {
+  const rpcs = RPC[pool.network];
+  const nft = NFT_MANAGER[pool.network];
+  if (!rpcs || !nft || pool.tokenId == null) return "unavailable";
+  // (Codex F1 ALTO#1) Fijar el bloque PRIMERO y leer tokensOwed + snapshotKey EN ESE MISMO bloque (no en
+  // "latest") → el snapshot representa exactamente safeHeadBlock, que F4 usa como frontera de getLogs.
+  // safeHead = latest − confirmaciones (reorg-safe; ~minutos atrás, dentro del estado de cualquier full node).
+  const latest = await getLatestBlock(rpcs);
+  if (latest == null) return "unavailable";
+  const conf = CONFIRMATIONS[pool.network] ?? 20;
+  const safeHead = latest - conf;
+  if (safeHead <= 0) return "unavailable";
+  const blockTag = "0x" + safeHead.toString(16);
+  // Si falta CUALQUIERA de los 2 (cobrable / key) leídos en safeHead → no insertar (snapshot no certificable).
+  const owed = await fetchUncollectedFeesRaw(rpcs, nft, pool.tokenId, blockTag);
+  if (!owed) return "unavailable";
+  const snapshotKey = await readPositionSnapshotKey(rpcs, nft, pool.tokenId, blockTag);
+  if (snapshotKey == null) return "unavailable";
+  // Agregados base para certificar F4. El cache lifetime (pool.principalDebt*) vale a `feesLifetimeCursorBlock`,
+  // que solo se garantiza ≥ safeHead: si cursor > safeHead, un Decrease/Collect en (safeHead, cursor] ya está
+  // horneado en el cache y el replay de F4 (desde safeHead+1) lo contaría dos veces → deuda/atribución erróneas.
+  // Por eso, cuando el backfill cubre el safeHead exacto, RECOMPUTAMOS deuda/collected a esa altura DESDE la
+  // tabla de eventos (fuente de verdad) → el snapshot queda auto-consistente (deuda alineada con owed/ventana).
+  let collected0Raw = pool.feesCollectedRaw0 ?? "";
+  let collected1Raw = pool.feesCollectedRaw1 ?? "";
+  let principalDebt0Raw = pool.principalDebt0 ?? "";
+  let principalDebt1Raw = pool.principalDebt1 ?? "";
+  let aggregatesSafeThroughBlock: number | undefined = undefined;
+  const backfillCoversSafeHead =
+    pool.feesLifetimeBackfilledAt != null &&
+    typeof pool.feesLifetimeCursorBlock === "number" &&
+    pool.feesLifetimeCursorBlock >= safeHead;
+  if (backfillCoversSafeHead) {
+    const at = await ctx.runQuery(internal.pools.getPoolAggregatesAtBlockInternal, {
+      poolId: pool._id, throughBlock: safeHead,
+    });
+    if (at) {
+      collected0Raw = at.feesCollectedRaw0; collected1Raw = at.feesCollectedRaw1;
+      principalDebt0Raw = at.principalDebt0; principalDebt1Raw = at.principalDebt1;
+      aggregatesSafeThroughBlock = safeHead;   // deuda probada a ESTE safeHead exacto
+    }
+  }
+  const aggregatesComplete = aggregatesSafeThroughBlock !== undefined;
+  await ctx.runMutation(internal.pools.insertPoolFeeSnapshot, {
+    poolId: pool._id,
+    tokensOwed0Raw: owed.amount0Raw.toString(),
+    tokensOwed1Raw: owed.amount1Raw.toString(),
+    collected0Raw, collected1Raw, principalDebt0Raw, principalDebt1Raw,
+    snapshotKey, safeHeadBlock: safeHead, aggregatesComplete,
+    ...(aggregatesSafeThroughBlock !== undefined ? { aggregatesSafeThroughBlock } : {}),
+  });
+  return "inserted";
+}
+
+export const snapshotPoolFees = internalAction({
+  args: {},
+  handler: async (ctx): Promise<any> => {
+    const pools = await ctx.runQuery(internal.pools.listPoolsInternal);
+    const targets = pools.filter((p: any) => p.tokenId && RPC[p.network] && NFT_MANAGER[p.network]);
+    const counts = { inserted: 0, unavailable: 0, errored: 0 };
+    for (let i = 0; i < targets.length; i += POOL_SCAN_CONCURRENCY) {
+      const batch = targets.slice(i, i + POOL_SCAN_CONCURRENCY);
+      const results = await Promise.allSettled(batch.map((p: any) => snapshotOnePoolFees(ctx, p)));
+      for (const r of results) {
+        if (r.status === "fulfilled") counts[r.value]++;
+        else { counts.errored++; console.error("snapshotPoolFees: worker rechazado", r.reason); }
       }
     }
     return { total: targets.length, ...counts };

@@ -116,6 +116,33 @@ export default defineSchema({
     .index("by_pool_log", ["poolId", "txHash", "logIndex"])  // búsqueda para upsert idempotente (NO constraint)
     .index("by_pool_block", ["poolId", "blockNumber"]),       // recomputar/limpiar por reorg
 
+  // (JAV-120) Snapshots horarios de fees por posición → "Fees 24h" REAL = Δ(feesAccum) entre el snapshot
+  // de ahora y el ref ≥24h. feesAccum NETO se computa al LEER: feesCollectedRaw + max(tokensOwedRaw −
+  // principalDebtRaw, 0) por token (mismo neteo que lifetime, poolScanner). Por eso se guardan los
+  // componentes BRUTOS, NO un "fee" ya armado, y NO se cachea USD (se valúa a spot al mostrar).
+  // - tokensOwed*Raw: cobrable live (collect() simulado, RPC público — NO depende de Alchemy). BRUTO:
+  //   incluye principal liberado por Decrease; se netea con principalDebt al leer.
+  // - collected*Raw / principalDebt*Raw: agregados cacheados de `pools` al momento; "" si ausentes.
+  // - snapshotKey: huella de la posición vía readPositionSnapshotKey (liquidity|feeGrowthInside|tokensOwed).
+  //   Si difiere entre ref y now hubo increase/decrease/collect → certificación por eventos (getLogs) para "ok".
+  // - safeHeadBlock: bloque finalizado al insertar → rango exacto de getLogs en la ventana (sin timestamp→block).
+  // - aggregatesComplete: los agregados vienen de un lifetime backfilled y cubren este safeHeadBlock.
+  // - aggregatesSafeThroughBlock: prueba de cobertura del cache; ausente en snapshots viejos → no certificar.
+  pool_fee_snapshots: defineTable({
+    poolId: v.id("pools"),
+    at: v.number(),
+    tokensOwed0Raw: v.string(),
+    tokensOwed1Raw: v.string(),
+    collected0Raw: v.string(),
+    collected1Raw: v.string(),
+    principalDebt0Raw: v.string(),
+    principalDebt1Raw: v.string(),
+    snapshotKey: v.string(),
+    safeHeadBlock: v.number(),
+    aggregatesComplete: v.boolean(),
+    aggregatesSafeThroughBlock: v.optional(v.number()),
+  }).index("by_pool_at", ["poolId", "at"]),
+
   // (JAV-40 #15) Historial de cierres/reaperturas de pools. El doc de pools refleja el ESTADO
   // actual (closed/closedAt); esta tabla preserva la secuencia de eventos aunque closedAt se limpie.
   pool_events: defineTable({

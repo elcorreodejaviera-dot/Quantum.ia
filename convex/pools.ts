@@ -289,6 +289,24 @@ export const getPoolLifetimeStateInternal = internalQuery({
   },
 });
 
+// (JAV-120 F4) Agregados (collected/principalDebt) computados a una altura EXACTA desde la tabla de eventos
+// (fuente de verdad). El snapshot writer lo usa para guardar la deuda base AL safeHead exacto del snapshot,
+// NO la del cache lifetime (que vale a `feesLifetimeCursorBlock`, ≥ safeHead): si cursor > safeHead, un
+// Decrease/Collect en (safeHead, cursor] ya estaría horneado en el cache y el replay de F4 (que arranca en
+// safeHead+1) lo contaría dos veces. Requiere que el backfill cubra [inception, throughBlock] sin huecos
+// (lo garantiza el caller: backfilledAt != null && cursorBlock >= throughBlock). null si algún raw corrupto.
+export const getPoolAggregatesAtBlockInternal = internalQuery({
+  args: { poolId: v.id("pools"), throughBlock: v.number() },
+  handler: async (ctx, { poolId, throughBlock }) => {
+    const events = await ctx.db
+      .query("pool_fee_events")
+      .withIndex("by_pool_block", q => q.eq("poolId", poolId).lte("blockNumber", throughBlock))
+      .collect();
+    try { return computeLifetimeAggregates(events); }
+    catch { return null; }   // raw inválido → no certificar (igual que el recompute lifetime)
+  },
+});
+
 // (ALTO-1) Reemplazo ATÓMICO de una ventana de eventos + recompute. Se llama SOLO con eventos ya leídos
 // con éxito de `[fromBlock, toBlock]` (una sola transacción Convex): borra esa ventana, reinserta la rama
 // canónica (dedupe por lote), recomputa agregados DESDE LA TABLA y persiste cursor/estado. Como NUNCA se
@@ -364,6 +382,81 @@ export const patchPoolLifetimeMeta = internalMutation({
     if (snapshotKey !== undefined) patch.lifetimeSnapshotKey = snapshotKey;
     if (backfilledAt !== undefined) patch.feesLifetimeBackfilledAt = backfilledAt;
     await ctx.db.patch(poolId, patch);
+  },
+});
+
+// (JAV-120) Inserta un snapshot de fees del pool y poda los viejos. Guarda los componentes BRUTOS
+// (tokensOwed/collected/principalDebt) + snapshotKey + safeHeadBlock + prueba opcional de cobertura de
+// agregados; el neteo y la valuación USD se hacen al LEER (F3). NO money-path. Idempotencia: no aplica
+// (serie temporal append-only), el cron corre 1/h. `at` se sella aquí (Date.now()) para mantener el
+// writer/action sin estado de tiempo.
+const FEE_SNAPSHOT_RETENTION_MS = 10 * 24 * 60 * 60 * 1000;   // ~10 días: cubre la ventana de 24h + margen
+
+export const insertPoolFeeSnapshot = internalMutation({
+  args: {
+    poolId: v.id("pools"),
+    tokensOwed0Raw: v.string(),
+    tokensOwed1Raw: v.string(),
+    collected0Raw: v.string(),
+    collected1Raw: v.string(),
+    principalDebt0Raw: v.string(),
+    principalDebt1Raw: v.string(),
+    snapshotKey: v.string(),
+    safeHeadBlock: v.number(),
+    aggregatesComplete: v.boolean(),
+    aggregatesSafeThroughBlock: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const at = Date.now();
+    await ctx.db.insert("pool_fee_snapshots", { ...args, at });
+    // Poda por antigüedad (inline, por pool). El índice by_pool_at acota el barrido a ESTE pool.
+    const cutoff = at - FEE_SNAPSHOT_RETENTION_MS;
+    const stale = await ctx.db
+      .query("pool_fee_snapshots")
+      .withIndex("by_pool_at", q => q.eq("poolId", args.poolId).lt("at", cutoff))
+      .collect();
+    for (const s of stale) await ctx.db.delete(s._id);
+  },
+});
+
+// (JAV-120 F3) Datos para "Fees 24h" real: valida acceso (owner/admin) y devuelve los snapshots de los
+// extremos de la ventana — el más reciente ("ahora") y el más nuevo con at ≤ now−24h ("referencia") — más
+// el más viejo (para el countdown de warming_up). Read-only. La valuación USD se hace en la action (RPC).
+const FEE24H_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+export const getFees24hWindowInternal = internalQuery({
+  args: { poolId: v.id("pools") },
+  handler: async (ctx, { poolId }) => {
+    const user = await requireUser(ctx);
+    const pool = await ctx.db.get(poolId);
+    if (!pool) throw new Error("Pool no encontrado.");
+    if (pool.userId !== user._id && user.role !== "admin") throw new Error("Sin permiso para ver este pool.");
+    const serverNow = Date.now();
+    const nowSnap = await ctx.db
+      .query("pool_fee_snapshots")
+      .withIndex("by_pool_at", q => q.eq("poolId", poolId))
+      .order("desc").first();
+    // (Codex F3 ALTO) El ref se ancla en nowSnap.at − 24h (NO en serverNow): así la ventana se mide entre
+    // dos puntos de datos REALES y es SIEMPRE ≥24h. Anclar en serverNow podía dar ventana <24h (o 0h con
+    // nowSnap===refSnap si el cron murió) y reportar ok engañoso.
+    const refSnap = nowSnap
+      ? await ctx.db
+          .query("pool_fee_snapshots")
+          .withIndex("by_pool_at", q => q.eq("poolId", poolId).lte("at", nowSnap.at - FEE24H_WINDOW_MS))
+          .order("desc").first()
+      : null;
+    const oldestSnap = await ctx.db
+      .query("pool_fee_snapshots")
+      .withIndex("by_pool_at", q => q.eq("poolId", poolId))
+      .order("asc").first();
+    return {
+      tokenId: pool.tokenId ?? null,
+      network: pool.network,
+      serverNow,
+      oldestAt: oldestSnap?.at ?? null,
+      nowSnap: nowSnap ?? null,
+      refSnap: refSnap ?? null,
+    };
   },
 });
 

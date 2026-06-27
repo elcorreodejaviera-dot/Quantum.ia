@@ -60,17 +60,41 @@ function formatPrice(pair, value) {
   return value.toLocaleString('en-US', { maximumFractionDigits: max });
 }
 
+// (JAV-120) "Fees 24h" de una posición: REAL medido (Δ snapshots on-chain) si el backend lo certifica
+// `ok`; si no, ESTIMADO concentrado (fees1d · feeShareRatio), que respeta la concentración del rango.
+// NUNCA el prorrateo pool-wide (fees1d · liquidez/TVL), que era el bug original (subestimaba).
+// Devuelve { usd, real, status }: usd=null si no hay base; real=true solo si es el medido.
+function poolFees24h(pool) {
+  const r = pool.fees24hReal;
+  if (r && r.status === 'ok' && Number.isFinite(r.fees24hUsd)) {
+    return { usd: r.fees24hUsd, real: true, status: 'ok' };
+  }
+  if (Number.isFinite(pool.feeShareRatio) && pool.feeShareRatio > 0 && Number.isFinite(pool.fees1d)) {
+    return { usd: pool.fees1d * pool.feeShareRatio, real: false, status: r?.status ?? 'estimate' };
+  }
+  return { usd: null, real: false, status: r?.status ?? 'unavailable' };
+}
+
 function Summary({ pools, bots }) {
   const accounts = useQuery(api.hlCredentials.list) ?? [];
   const totalLiquidity = pools.reduce((sum, pool) => sum + pool.liquidity, 0);
-  // Fees del USUARIO: su parte proporcional en cada pool (misma fórmula que el PoolCard),
-  // no el fee total del pool de DeFiLlama — así coincide con lo que se ve en cada tarjeta.
-  const fees = pools.reduce((sum, pool) => {
-    const fee1d = pool.fees1d ?? pool.fees24h ?? 0;
-    const tvl = pool.tvl ?? 0;
-    const share = tvl > 0 && pool.liquidity > 0 ? pool.liquidity / tvl : 0;
-    return sum + fee1d * share;
-  }, 0);
+  // (JAV-120) Fees 24h del USUARIO por posición: REAL medido cuando el backend lo certifica, si no estimado
+  // concentrado (ver poolFees24h). Antes era el prorrateo pool-wide (bug: subestimaba). Tres estados
+  // agregados (Codex F5): datos ausentes/parciales NUNCA deben mostrarse como "$0 Real" → si no hay ningún
+  // valor usable se muestra "—"; "Real (on-chain)" solo si TODAS las posiciones tienen el medido.
+  const feesParts = pools.map(poolFees24h);
+  const feesKnown = feesParts.filter((f) => f.usd != null);
+  const fees = feesKnown.reduce((sum, f) => sum + f.usd, 0);
+  const feesHasUnknown = feesKnown.length < feesParts.length;
+  const feesRealCount = feesKnown.filter((f) => f.real).length;
+  const feesEstCount = feesKnown.length - feesRealCount;
+  // Subtítulo honesto: "Real" SOLO con ≥1 posición medida; "+ estimado" SOLO si hay estimadas; "acumulando"
+  // si quedan posiciones sin valor. Sin medidas → "Estimado". Sin nada usable → "Sin datos".
+  const feesValue = feesKnown.length === 0 ? '—' : formatUsd(fees);
+  const feesSub = feesKnown.length === 0 ? 'Sin datos aún'
+    : feesRealCount === 0 ? (feesHasUnknown ? 'Estimado / acumulando' : 'Estimado')
+    : feesEstCount === 0 ? (feesHasUnknown ? 'Real / acumulando' : 'Real (on-chain)')
+    : 'Real + estimado';
   const avgApy = pools.length > 0
     ? pools.reduce((sum, pool) => sum + (pool.apy ?? 0), 0) / pools.length
     : 0;
@@ -78,7 +102,7 @@ function Summary({ pools, bots }) {
   return (
     <div className="summary-grid">
       <SummaryItem label="Liquidez monitoreada" value={formatUsd(totalLiquidity)} sub={`${pools.length} pools activos`} />
-      <SummaryItem label="Fees 24h (tu parte)" value={formatUsd(fees)} sub="Estimado por posición" />
+      <SummaryItem label="Fees 24h (tu parte)" value={feesValue} sub={feesSub} />
       <SummaryItem
         label="APY promedio"
         value={pools.length > 0 ? `${avgApy.toFixed(1)}%` : '—'}
@@ -103,14 +127,10 @@ function NetworkLiquidity({ pools }) {
   const byNetwork = ['Ethereum', 'Arbitrum', 'Base', 'Optimism'].map((network) => {
     const networkPools = pools.filter((pool) => pool.network === network);
     const liquidity = networkPools.reduce((sum, pool) => sum + pool.liquidity, 0);
-    // Fees diarios = parte PROPORCIONAL del usuario (no el fee pool-wide de Uniswap). Coherente con
-    // "Liquidez monitoreada" y con la Proyección fees de la PoolCard (userFees1d = fees1d · liquidity/tvl).
-    const fees24h = networkPools.reduce((sum, pool) => {
-      const fees1d = pool.fees1d ?? pool.fees24h ?? 0;
-      const tvl = pool.tvl ?? 0;
-      const userShare = tvl > 0 && pool.liquidity > 0 ? pool.liquidity / tvl : 0;
-      return sum + fees1d * userShare;
-    }, 0);
+    // (JAV-120) Fees 24h del usuario: real medido o estimado concentrado (poolFees24h), no pool-wide.
+    // null si NINGUNA posición de la red tiene valor usable (Codex F5: no mostrar $0 por dato ausente).
+    const fees24hKnown = networkPools.map(poolFees24h).filter((f) => f.usd != null);
+    const fees24h = fees24hKnown.length ? fees24hKnown.reduce((sum, f) => sum + f.usd, 0) : null;
     const avgApy = networkPools.length
       ? networkPools.reduce((sum, pool) => sum + (pool.apy ?? 0), 0) / networkPools.length
       : 0;
@@ -132,7 +152,7 @@ function NetworkLiquidity({ pools }) {
             </div>
             <div className="network-value">{formatUsd(item.liquidity)}</div>
             <div className="network-meta">
-              <span>Fees diarios <strong>{formatUsd(item.fees24h)}</strong></span>
+              <span>Fees diarios <strong>{item.fees24h != null ? formatUsd(item.fees24h) : '—'}</strong></span>
               <span>APY prom. <strong>{item.avgApy.toFixed(1)}%</strong></span>
             </div>
           </div>
@@ -425,10 +445,13 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
   const feeApr = tvl > 0 ? (fees1d / tvl) * 365 * 100 : null;
   const totalApy = displayApy;
   const capitalApr = feeApr != null ? totalApy - feeApr : null;
-  // Fees estimadas del usuario — proporcional a su posición dentro del pool total
+  // Fracción del usuario dentro del pool (solo para el subtítulo informativo "% del pool").
   const userLiquidity = pool.liquidity;
   const userShare = tvl > 0 && userLiquidity > 0 ? userLiquidity / tvl : null;
-  const userFees1d = userShare != null ? fees1d * userShare : null;
+  // (JAV-120) Fees 24h de TU posición: real medido (Δ snapshots) si el backend lo certifica `ok`, si no
+  // estimado CONCENTRADO (fees1d·feeShareRatio); nunca pool-wide (era el bug). Base de la proyección.
+  const fees24h = poolFees24h(pool);
+  const dailyFeesUsd = fees24h.usd;
 
   // (JAV-58 Fase D) Cabecera de métricas estilo DefiSuite: VALOR LP · ENTRY · PNL · APR · FEE APR · FEES.
   // Solo cuando hay posición LP REAL on-chain (liquidityReal). PNL = capital ganado + fees:
@@ -442,6 +465,9 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
   // Una posición en rango estrecho rinde más que el promedio pool-wide. Cae a feeApr pool-wide si no hay dato.
   const concentratedFeeApr = (Number.isFinite(pool.feeShareRatio) && pool.feeShareRatio > 0 && Number.isFinite(mValorLP) && mValorLP > 0)
     ? (fees1d * pool.feeShareRatio / mValorLP) * 365 * 100 : null;
+  // (JAV-120) APR implícito del fees 24h efectivo (real o estimado) para periodizar la proyección.
+  const dailyFeeApr = (Number.isFinite(dailyFeesUsd) && Number.isFinite(mValorLP) && mValorLP > 0)
+    ? (dailyFeesUsd / mValorLP) * 365 * 100 : concentratedFeeApr;
   // (Codex) Decidir según el STATUS AUTORITATIVO del backend (in-range desde el mismo slot0), NO desde
   // pool.status del front (precio live, otra fuente). out_of_range/inconsistent → '—' (no inflar);
   // unavailable/legacy → cae al fee APR pool-wide; ok → concentrado.
@@ -607,7 +633,7 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
             : <span className="range-chart-no-pos">Posición LP no disponible</span>
           }
           {pool.feesUncollectedUsd != null && (
-            <><span title="Comisiones de TU posición pendientes de cobrar (en vivo desde Uniswap). Distinto de 'Fees 24h' (del pool entero)." style={{ cursor: 'help' }}>Fees</span><strong className="positive">{formatUsdCompact(pool.feesUncollectedUsd)}</strong></>
+            <><span title="Comisiones de TU posición pendientes de cobrar (stock acumulado, en vivo desde Uniswap). Distinto de 'Fees 24h' (lo generado en el día)." style={{ cursor: 'help' }}>Fees</span><strong className="positive">{formatUsdCompact(pool.feesUncollectedUsd)}</strong></>
           )}
           {hasPrice && (
             <span className="range-chart-pct">
@@ -642,21 +668,31 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
         <summary className="pool-pnl-toggle">Proyección fees</summary>
         <div className="pool-pnl-body">
 
-          {/* PROYECCIÓN FEES — fracción del usuario en los fees de la red */}
+          {/* (JAV-120) FEES 24h + proyección. La base diaria es el valor REAL medido on-chain (Δ snapshots)
+              cuando el backend lo certifica `ok`; si no, el estimado CONCENTRADO (fees1d·feeShareRatio).
+              NUNCA el prorrateo pool-wide (era el bug que subestimaba). Semanal/Mensual/Anual son proyección. */}
           <div className="pool-pnl-section">
             <div className="pool-pnl-section-title">
-              Fees estimadas (tu posición
-              {userShare != null ? ` · ${(userShare * 100).toFixed(3)}% del pool` : ''})
+              Fees 24h {fees24h.real ? '(real on-chain)' : '(estimado)'}
+              {userShare != null ? ` · ${(userShare * 100).toFixed(3)}% del pool` : ''}
             </div>
+            {pool.fees24hReal?.status === 'warming_up' && (
+              <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
+                Acumulando datos para la medición real{pool.fees24hReal.hoursUntilReady != null ? ` (faltan ~${pool.fees24hReal.hoursUntilReady}h)` : ''}…
+              </div>
+            )}
             <div className="pool-pnl-grid pool-pnl-grid-4">
-              <Metric label="Diario"
-                value={userFees1d != null ? <span className="positive">{formatUsdCompact(userFees1d)} ({feeApr != null ? (feeApr / 365).toFixed(3) : '0.000'}%)</span> : '—'} />
-              <Metric label="Semanal"
-                value={userFees1d != null ? <span className="positive">{formatUsdCompact(userFees1d * 7)} ({feeApr != null ? (feeApr / 52).toFixed(2) : '0.00'}%)</span> : '—'} />
-              <Metric label="Mensual"
-                value={userFees1d != null ? <span className="positive">{formatUsdCompact(userFees1d * 30)} ({feeApr != null ? (feeApr / 12).toFixed(2) : '0.00'}%)</span> : '—'} />
-              <Metric label="Anual"
-                value={userFees1d != null ? <span className="positive">{formatUsdCompact(userFees1d * 365)} ({feeApr != null ? feeApr.toFixed(1) : '0.0'}%)</span> : '—'} />
+              <Metric label={fees24h.real ? 'Diario (real)' : 'Diario (est.)'}
+                title={fees24h.real
+                  ? `Medido on-chain: comisiones generadas en las últimas ~${pool.fees24hReal?.windowHours ?? 24}h.`
+                  : 'Estimado por la concentración de tu rango (fees del pool · tu cuota de liquidez activa). Aún sin medición real de 24h.'}
+                value={dailyFeesUsd != null ? <span className="positive">{fees24h.real ? '' : '≈ '}{formatUsdCompact(dailyFeesUsd)} ({dailyFeeApr != null ? (dailyFeeApr / 365).toFixed(3) : '0.000'}%)</span> : '—'} />
+              <Metric label="Semanal (proy.)"
+                value={dailyFeesUsd != null ? <span className="positive">≈ {formatUsdCompact(dailyFeesUsd * 7)} ({dailyFeeApr != null ? (dailyFeeApr / 52).toFixed(2) : '0.00'}%)</span> : '—'} />
+              <Metric label="Mensual (proy.)"
+                value={dailyFeesUsd != null ? <span className="positive">≈ {formatUsdCompact(dailyFeesUsd * 30)} ({dailyFeeApr != null ? (dailyFeeApr / 12).toFixed(2) : '0.00'}%)</span> : '—'} />
+              <Metric label="Anual (proy.)"
+                value={dailyFeesUsd != null ? <span className="positive">≈ {formatUsdCompact(dailyFeesUsd * 365)} ({dailyFeeApr != null ? dailyFeeApr.toFixed(1) : '0.0'}%)</span> : '—'} />
             </div>
           </div>
 
@@ -3766,26 +3802,40 @@ function Dashboard({ user, onLogout, userId }) {
   const positionFetchedRef = React.useRef({});
   const POSITION_TTL_MS = 30 * 1000;
 
+  // (JAV-120) "Fees 24h" REAL por posición (Δ snapshots). TTL más largo: cambia como mucho 1/h (cron).
+  const fetchFees24hAction = useAction(api.actions.poolScanner.getPoolFees24h);
+  const [fees24hData, setFees24hData] = React.useState({});
+  const fees24hFetchedRef = React.useRef({});
+  const FEES24H_TTL_MS = 5 * 60 * 1000;
+
   React.useEffect(() => {
     if (!poolsFromDb?.length || !Object.keys(prices).length) return;
     const now = Date.now();
     for (const p of poolsFromDb) {
       if (!p.tokenId) continue;
       const key = String(p._id);
-      if (now - (positionFetchedRef.current[key] ?? 0) < POSITION_TTL_MS) continue;
       const asset = normalizeAsset(p.pair?.split('/')[0]);
       const priceUsd = prices[asset];
       if (!priceUsd) continue;
-      positionFetchedRef.current[key] = now;
-      fetchPositionAction({
-        tokenId: p.tokenId, network: p.network, priceUsd,
-        poolAddress: p.poolAddress ?? undefined, entryPriceUsd: p.entryPrice ?? undefined,
-        // (JAV-117) agregados lifetime cacheados → feesLifetimeUsd en vivo (valuación a spot).
-        feesCollectedRaw0: p.feesCollectedRaw0 ?? undefined, feesCollectedRaw1: p.feesCollectedRaw1 ?? undefined,
-        principalDebt0: p.principalDebt0 ?? undefined, principalDebt1: p.principalDebt1 ?? undefined,
-      })
-        .then(result => { setPositionData(prev => ({ ...prev, [p._id]: result })); })
-        .catch(() => { delete positionFetchedRef.current[key]; });
+      if (now - (positionFetchedRef.current[key] ?? 0) >= POSITION_TTL_MS) {
+        positionFetchedRef.current[key] = now;
+        fetchPositionAction({
+          tokenId: p.tokenId, network: p.network, priceUsd,
+          poolAddress: p.poolAddress ?? undefined, entryPriceUsd: p.entryPrice ?? undefined,
+          // (JAV-117) agregados lifetime cacheados → feesLifetimeUsd en vivo (valuación a spot).
+          feesCollectedRaw0: p.feesCollectedRaw0 ?? undefined, feesCollectedRaw1: p.feesCollectedRaw1 ?? undefined,
+          principalDebt0: p.principalDebt0 ?? undefined, principalDebt1: p.principalDebt1 ?? undefined,
+        })
+          .then(result => { setPositionData(prev => ({ ...prev, [p._id]: result })); })
+          .catch(() => { delete positionFetchedRef.current[key]; });
+      }
+      // (JAV-120) Fees 24h real: Δ de snapshots almacenados, valuado al precio live.
+      if (now - (fees24hFetchedRef.current[key] ?? 0) >= FEES24H_TTL_MS) {
+        fees24hFetchedRef.current[key] = now;
+        fetchFees24hAction({ poolId: p._id, priceUsd })
+          .then(result => { setFees24hData(prev => ({ ...prev, [p._id]: result })); })
+          .catch(() => { delete fees24hFetchedRef.current[key]; });
+      }
     }
   }, [poolsFromDb, prices]);
 
@@ -3837,6 +3887,7 @@ function Dashboard({ user, onLogout, userId }) {
         max: p.maxRange,
         apy: p.apy ?? null,
         fees24h: p.fees1d ?? 0,
+        fees24hReal: fees24hData[p._id] ?? null,   // (JAV-120) { fees24hUsd, status, refAgeMs, windowHours, hoursUntilReady }
         price: prices[asset] ?? null,
         funding: funding[asset] ?? null,
         // Posición LP real del usuario sobreescribe los 0 iniciales cuando está disponible
@@ -3870,7 +3921,7 @@ function Dashboard({ user, onLogout, userId }) {
         })(),
       };
     });
-  }, [poolsFromDb, prices, funding, positionData]);
+  }, [poolsFromDb, prices, funding, positionData, fees24hData]);
 
   React.useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);

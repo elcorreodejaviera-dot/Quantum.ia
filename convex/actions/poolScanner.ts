@@ -1094,6 +1094,60 @@ export const fetchPositionLiquidity = action({
 const FEE24H_WINDOW_MS = 24 * 60 * 60 * 1000;
 const FEE24H_MAX_REF_AGE_MS = 26 * 60 * 60 * 1000;   // ventana nowSnap−refSnap: 24h..26h; más → stale (hueco)
 const FEE24H_MAX_NOW_AGE_MS = 2 * 60 * 60 * 1000;    // frescura: nowSnap debe ser ≤2h viejo (cron horario)
+const FEE24H_GETLOGS_BUDGET = 2000;                   // tope de requests getLogs por reconciliación (one-off)
+
+// (JAV-120 F4) Reconcilia las fees de la ventana cuando la posición cambió (collect/increase/decrease):
+// lee los eventos de [refSnap.safeHeadBlock+1, nowSnap.safeHeadBlock] por RPC PÚBLICO (range-halving) y
+// replica la contabilidad principal/fee (igual que computeLifetimeAggregates) PARTIENDO de la deuda del
+// ref. fees_window = ΔfeesCollected + max(owed_now−debt_now,0) − max(owed_ref−debt_ref,0). Devuelve los
+// raw por token o null si NO se puede certificar (sin agregados base, RPC incompleto/transporte, decode no
+// estricto, 0 eventos pese a key cambiada, o resultado negativo). null ⇒ el caller cae a `partial`.
+async function reconcileWindowFees(
+  rpcs: string[], nft: string, tokenId: number, refSnap: any, nowSnap: any,
+): Promise<{ fee0: bigint; fee1: bigint } | null> {
+  if (!refSnap.aggregatesComplete) return null;   // sin principalDebt base no se puede atribuir principal vs fee
+  let debtRef0: bigint, debtRef1: bigint, owedRef0: bigint, owedRef1: bigint, owedNow0: bigint, owedNow1: bigint;
+  try {
+    debtRef0 = BigInt(refSnap.principalDebt0Raw); debtRef1 = BigInt(refSnap.principalDebt1Raw);
+    owedRef0 = BigInt(refSnap.tokensOwed0Raw); owedRef1 = BigInt(refSnap.tokensOwed1Raw);
+    owedNow0 = BigInt(nowSnap.tokensOwed0Raw); owedNow1 = BigInt(nowSnap.tokensOwed1Raw);
+  } catch { return null; }
+  const from = refSnap.safeHeadBlock + 1;
+  const to = nowSnap.safeHeadBlock;
+  if (to < from) return null;
+  const tokenIdTopic = "0x" + pad(BigInt(tokenId));
+  const fetcher: RangeFetcher = (lo, hi) => getLogsRangeMulti(rpcs, nft, tokenIdTopic, lo, hi);
+  let scan: { logs: RpcLog[]; complete: boolean };
+  try { scan = await getLogsAdaptive(fetcher, from, to, to - from + 1, FEE24H_GETLOGS_BUDGET); }
+  catch { return null; }                 // transporte/proveedor → no certificar
+  if (!scan.complete) return null;       // presupuesto agotado → no certificar (evita ventana parcial)
+  // Decode ESTRICTO: el getLogs ya filtró por topic0 conocido + tokenId; un null = log malformado → abortar
+  // (no subcontar). 0 eventos pese a key cambiada = inconsistencia (RPC perdió algo) → no certificar.
+  const decoded = scan.logs.map(decodePoolFeeLog);
+  if (decoded.some((e) => e === null)) return null;
+  if (decoded.length === 0) return null;
+  const events = (decoded as NonNullable<ReturnType<typeof decodePoolFeeLog>>[])
+    .sort((a, b) => a.blockNumber - b.blockNumber || a.logIndex - b.logIndex);
+  let debt0 = debtRef0, debt1 = debtRef1, dC0 = 0n, dC1 = 0n;
+  for (const e of events) {
+    let a0: bigint, a1: bigint;
+    try { a0 = BigInt(e.amount0Raw); a1 = BigInt(e.amount1Raw); } catch { return null; }
+    if (e.eventType === "decrease") { debt0 += a0; debt1 += a1; }
+    else if (e.eventType === "collect") {
+      const p0 = a0 < debt0 ? a0 : debt0; debt0 -= p0; dC0 += a0 - p0;
+      const p1 = a1 < debt1 ? a1 : debt1; debt1 -= p1; dC1 += a1 - p1;
+    }
+    // "increase": principal activo, no afecta fee ni deuda cobrable.
+  }
+  const unNow0 = owedNow0 > debt0 ? owedNow0 - debt0 : 0n;
+  const unNow1 = owedNow1 > debt1 ? owedNow1 - debt1 : 0n;
+  const unRef0 = owedRef0 > debtRef0 ? owedRef0 - debtRef0 : 0n;
+  const unRef1 = owedRef1 > debtRef1 ? owedRef1 - debtRef1 : 0n;
+  const fee0 = dC0 + unNow0 - unRef0;
+  const fee1 = dC1 + unNow1 - unRef1;
+  if (fee0 < 0n || fee1 < 0n) return null;   // inconsistencia → no certificar
+  return { fee0, fee1 };
+}
 
 export const getPoolFees24h = action({
   args: { poolId: v.id("pools"), priceUsd: v.number() },
@@ -1122,16 +1176,7 @@ export const getPoolFees24h = action({
     const refAgeMs = nowSnap.at - refSnap.at;
     const windowHours = Math.round((refAgeMs / 3_600_000) * 10) / 10;
     if (refAgeMs > FEE24H_MAX_REF_AGE_MS) return fail("stale", refAgeMs, windowHours);
-    // Cambio estructural en la ventana → el delta de cobrable no es fee pura; lo certifica F4 con eventos.
-    if (nowSnap.snapshotKey !== refSnap.snapshotKey) return fail("partial", refAgeMs, windowHours);
-    // Delta de cobrable raw (key igual ⇒ = fees generadas). Defensa: negativo no debería ocurrir → partial.
-    let delta0: bigint, delta1: bigint;
-    try {
-      const d0 = BigInt(nowSnap.tokensOwed0Raw) - BigInt(refSnap.tokensOwed0Raw);
-      const d1 = BigInt(nowSnap.tokensOwed1Raw) - BigInt(refSnap.tokensOwed1Raw);
-      if (d0 < 0n || d1 < 0n) return { ...fail("partial", refAgeMs, windowHours) };
-      delta0 = d0; delta1 = d1;
-    } catch { return fail("unavailable", refAgeMs, windowHours); }
+
     // Metadata de tokens (decimales/símbolo) para valuar el delta a spot. Constante por pool.
     let posRaw: string;
     try { posRaw = (await rpcCallWithFallback(rpcs, nft, "0x99fbab88" + pad(BigInt(tokenId)))).slice(2); }
@@ -1142,7 +1187,25 @@ export const getPoolFees24h = action({
     let t1: { symbol: string; decimals: number; ok: boolean };
     try { [t0, t1] = await Promise.all([tokenInfo(rpcs[0], token0addr), tokenInfo(rpcs[0], token1addr)]); }
     catch { return fail("unavailable", refAgeMs, windowHours); }
-    const fees24hUsd = valueFeesUsd(delta0, delta1, t0, t1, priceUsd);
+
+    // Delta de fees RAW por token según haya o no cambio estructural en la ventana.
+    let fee0: bigint, fee1: bigint;
+    if (nowSnap.snapshotKey === refSnap.snapshotKey) {
+      // Sin cambios (sin collect/increase/decrease) ⇒ collected y principalDebt constantes, cancelan ⇒
+      // fees = owed_now − owed_ref (≥0 por crecimiento pasivo). Negativo no debería ocurrir → partial.
+      try {
+        const a0 = BigInt(nowSnap.tokensOwed0Raw) - BigInt(refSnap.tokensOwed0Raw);
+        const a1 = BigInt(nowSnap.tokensOwed1Raw) - BigInt(refSnap.tokensOwed1Raw);
+        if (a0 < 0n || a1 < 0n) return fail("partial", refAgeMs, windowHours);
+        fee0 = a0; fee1 = a1;
+      } catch { return fail("unavailable", refAgeMs, windowHours); }
+    } else {
+      // (F4) Hubo collect/increase/decrease → reconciliar con los eventos de la ventana (getLogs RPC público).
+      const r = await reconcileWindowFees(rpcs, nft, tokenId, refSnap, nowSnap);
+      if (!r) return fail("partial", refAgeMs, windowHours);   // sin agregados base / RPC incompleto → no certificar
+      fee0 = r.fee0; fee1 = r.fee1;
+    }
+    const fees24hUsd = valueFeesUsd(fee0, fee1, t0, t1, priceUsd);
     if (fees24hUsd == null) return fail("unavailable", refAgeMs, windowHours);
     return { fees24hUsd, status: "ok", refAgeMs, windowHours, hoursUntilReady: null };
   },

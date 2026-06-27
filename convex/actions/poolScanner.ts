@@ -1160,6 +1160,7 @@ export const getPoolFees24h = action({
     fees24hUsd: number | null; status: string; refAgeMs: number | null;
     windowHours: number | null; hoursUntilReady: number | null;
   }> => {
+    await requireAuth(ctx);   // (JAV-38 #8) action pública: no consumir RPC/getLogs sin auth (F4 reconcilia hasta 2000 getLogs)
     const fail = (status: string, refAgeMs: number | null = null, windowHours: number | null = null) =>
       ({ fees24hUsd: null, status, refAgeMs, windowHours, hoursUntilReady: null });
 

@@ -304,17 +304,10 @@ export default defineSchema({
     .index("by_timestamp", ["timestamp"])
     .index("by_user_timestamp", ["userId", "timestamp"]),
 
-  alerts: defineTable({
-    userId: v.id("users"),
-    alertType: v.union(v.literal("out_of_range"), v.literal("apy_below"), v.literal("price_cross")),
-    pair: v.string(),
-    network: v.optional(v.string()),
-    threshold: v.optional(v.number()),
-    active: v.boolean(),
-    lastTriggeredAt: v.optional(v.number()),
-  })
-    .index("by_userId", ["userId"]),
-
+  // (limpieza alertas) La tabla `alerts` se eliminó junto con convex/alerts.ts al quitar el panel de
+  // Alertas del portal (#134). Quitarla del schema orfanata docs existentes (no los borra) y no falla el
+  // deploy. Se CONSERVA `alert_history`: la usa emitSpotGridErrorAlert (JAV-94/JAV-122) para notificar
+  // errores del Spot Grid al dueño.
   alert_history: defineTable({
     userId: v.id("users"),
     alertType: v.string(),

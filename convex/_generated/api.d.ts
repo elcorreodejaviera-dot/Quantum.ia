@@ -39,6 +39,7 @@ import type * as spotDefenseBots from "../spotDefenseBots.js";
 import type * as spotDefenseEngine from "../spotDefenseEngine.js";
 import type * as spotGridActions from "../spotGridActions.js";
 import type * as spotGridBots from "../spotGridBots.js";
+import type * as spotGridConstants from "../spotGridConstants.js";
 import type * as spotGridEngine from "../spotGridEngine.js";
 import type * as spot_positions from "../spot_positions.js";
 import type * as subscriptions from "../subscriptions.js";
@@ -88,6 +89,7 @@ declare const fullApi: ApiFromModules<{
   spotDefenseEngine: typeof spotDefenseEngine;
   spotGridActions: typeof spotGridActions;
   spotGridBots: typeof spotGridBots;
+  spotGridConstants: typeof spotGridConstants;
   spotGridEngine: typeof spotGridEngine;
   spot_positions: typeof spot_positions;
   subscriptions: typeof subscriptions;

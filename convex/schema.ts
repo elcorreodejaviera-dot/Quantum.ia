@@ -616,6 +616,21 @@ export default defineSchema({
     liquidationSeq: v.optional(v.number()),
     fillCursor: v.optional(v.number()),        // cursor de fills procesados (reconcile PR3)
     errorMessage: v.optional(v.string()),
+    // (JAV-122) Resiliencia a errores transitorios de HL (502/timeout/red). Todos opcionales → legacy-safe.
+    // errorKind: clasificación del último `error`. "transient" = fallo de transporte de HL recuperable por
+    // el cron; "fatal" = determinista (validación/firma/rechazo HL/lógica). Se setea SIEMPRE con status:error.
+    errorKind: v.optional(v.union(v.literal("transient"), v.literal("fatal"))),
+    // transientFailCount: fallos transitorios CONSECUTIVOS con el bot activo (Parte 1). Reset a 0 en cada
+    // ronda exitosa y al escalar. errorRecoveryAttempts: contador SEPARADO de reintentos de recuperación
+    // desde `error` (Parte 2); arranca en 0 en la escalada. Independientes (un bot escalado tiene
+    // transientFailCount=0 pero SÍ debe ser recuperable). Ausentes = 0.
+    transientFailCount: v.optional(v.number()),
+    errorRecoveryAttempts: v.optional(v.number()),
+    // nextRetryAt: gate de backoff; hasta ese instante el claim no toma el bot. Ausente/0 = sin backoff.
+    nextRetryAt: v.optional(v.number()),
+    // recoverToStatus: estado al que vuelve la recuperación (capturado ATÓMICO con la escalada). Ausente →
+    // el bot NO es recuperable (excluido por query y claim); si se fuerza recovery, terminaliza a fatal.
+    recoverToStatus: v.optional(v.union(v.literal("running"), v.literal("paused"))),
     createdAt: v.number(),
     updatedAt: v.number(),
     lastReconciledAt: v.optional(v.number()),

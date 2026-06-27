@@ -8,15 +8,28 @@
 import { v } from "convex/values";
 import { action, internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
+import { TransportError } from "@nktkas/hyperliquid";
 import { decryptPrivateKey } from "./hlCredentialActions";
 import { hlIsTestnet, hlNetwork } from "./hlNetwork";
 import { elog, safeError } from "./log";
+import { SPOT_GRID_TRANSIENT_MSG } from "./spotGridConstants";
 import {
   makeSpotClients, resolveSpotAsset, getSpotPrice, getSpotBalance, getUserFees,
   getOpenSpotOrders, getSpotFills, getSpotOrderStatusByCloid,
   roundSpotPrice, floorSpotSize, roundAndValidateSpotOrder, MIN_SPOT_NOTIONAL_USD,
   placeSpotLimit, cancelSpotByCloid,
 } from "./hyperliquidSpot";
+
+// (JAV-122) Clasifica una excepción del reconcile/bootstrap/actions. "transient" = fallo de TRANSPORTE de
+// HL (5xx/timeout/red): `e instanceof TransportError` (el 502 es HttpRequestError extends TransportError) →
+// reintentar, NUNCA marcar error con el cuerpo HTML crudo. "fatal" = determinista (ValidationError, firma,
+// ApiRequestError = rechazo explícito, lógica del bot) → error terminal con mensaje corto. Espeja el
+// criterio canónico del repo (hyperliquid.ts). Vive en tierra node (usa el SDK); lo importan engine y
+// actions. Las mutations non-node NO clasifican: reciben el `message` ya limpio.
+export function classifySpotGridError(e: unknown): { kind: "transient" | "fatal"; message: string } {
+  if (e instanceof TransportError) return { kind: "transient", message: SPOT_GRID_TRANSIENT_MSG };
+  return { kind: "fatal", message: safeError(e) };
+}
 
 const SUBMIT_GRACE_MS = 30_000;     // (Codex BAJO#2) espera antes de reintentar un `submitting` colgado
 const MAX_SUBMIT_ATTEMPTS = 5;      // tras esto, la orden submitting → failed
@@ -597,7 +610,8 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
       await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, incAttempt: true });
       await gatedPlace(ctx, clients.exchange, botId, token, { assetId: o.assetId, isBuy: o.side === "buy", priceStr, sizeStr, cloid: o.cloid, openCloids });
     } catch (e) {
-      await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, errorMessage: safeError(e) });
+      // (JAV-122) Nunca persistir el cuerpo HTML de un 502 en spot_grid_orders.errorMessage: clasificar.
+      await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: o.cloid, errorMessage: classifySpotGridError(e).message });
     }
   }
 
@@ -672,7 +686,8 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
           const { priceStr, sizeStr } = roundAndValidateSpotOrder({ price: res.repostPrice, size: res.repostQuantity, szDecimals, isBuy: true });
           await gatedPlace(ctx, clients.exchange, botId, token, { assetId: res.repostAssetId, isBuy: true, priceStr, sizeStr, cloid: res.repostCloid, openCloids });
         } catch (e) {
-          await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: res.repostCloid, errorMessage: safeError(e) });
+          // (JAV-122) Idem: mensaje clasificado, nunca HTML crudo.
+          await ctx.runMutation(internal.spotGridBots.markSpotGridOrder, { botId, token, cloid: res.repostCloid, errorMessage: classifySpotGridError(e).message });
         }
       }
     }
@@ -686,7 +701,10 @@ async function reconcileOneBot(ctx: any, botId: any, token: string, clients: Cli
 export const reconcileAllSpotGrids = internalAction({
   args: {},
   handler: async (ctx): Promise<any> => {
-    const bots: any[] = await ctx.runQuery(internal.spotGridBots.listActiveSpotGridBotsInternal, {});
+    const active: any[] = await ctx.runQuery(internal.spotGridBots.listActiveSpotGridBotsInternal, {});
+    // (JAV-122) Además de los activos, retomar los `error` transitorios RECUPERABLES (Parte 2).
+    const recoverable: any[] = await ctx.runQuery(internal.spotGridBots.listRecoverableErrorSpotGridBotsInternal, {});
+    const bots: any[] = [...active, ...recoverable];
     // Agrupar por cuenta (Codex #5): una ronda de cliente por cuenta.
     const byAccount = new Map<string, any[]>();
     for (const b of bots) {
@@ -699,11 +717,19 @@ export const reconcileAllSpotGrids = internalAction({
         const claim = await ctx.runMutation(internal.spotGridBots.claimSpotGridReconcile, { botId: bot._id });
         if (!claim.ok) continue;
         const token = claim.token;
+        // (JAV-122, Codex r3) Origen AUTORITATIVO leído de DB al claimar (no el snapshot rancio de la lista):
+        // ¿esta ronda es una recuperación desde `error` o una reconciliación activa?
+        const wasError = claim.wasError === true;
         try {
           // (ALTO#2) Revalidar gate live ANTES de tocar HL.
           const gate: any = await ctx.runQuery(internal.spotGridBots.assertSpotGridLiveAdmissibleInternal, { botId: bot._id });
           if (!gate.ok) {
-            await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, { botId: bot._id, token, status: gate.policy, errorMessage: gate.reason });
+            // (JAV-122) policy:"error" = no-admisible NO transitorio → errorKind:"fatal" (no se re-recupera);
+            // policy:"paused" → errorKind undefined. setSpotGridStatus limpia los campos de recovery.
+            await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, {
+              botId: bot._id, token, status: gate.policy,
+              errorKind: gate.policy === "error" ? "fatal" : undefined, errorMessage: gate.reason,
+            });
             elog("spotgrid", "gate_blocked", { botId: String(bot._id), reason: gate.reason });
             continue;
           }
@@ -714,10 +740,27 @@ export const reconcileAllSpotGrids = internalAction({
           const address = credInfo.credential.tradingAccountAddress;
           const fees = await getUserFees(info, address);
           await reconcileOneBot(ctx, bot._id, token, { info, exchange, address }, fees);
+          // Éxito: si veníamos de `error`, restaurar el estado previo (running|paused); si activo, resetear
+          // contadores de transitorio en TODA ronda OK (con o sin fills).
+          if (wasError) await ctx.runMutation(internal.spotGridBots.recoverSpotGridFromError, { botId: bot._id, token });
+          else await ctx.runMutation(internal.spotGridBots.markSpotGridReconcileSuccess, { botId: bot._id, token });
           reconciled++;
         } catch (e) {
-          await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, { botId: bot._id, token, status: "error", errorMessage: safeError(e) });
-          elog("spotgrid", "reconcile_error", { botId: String(bot._id), err: safeError(e) });
+          // (JAV-122) Clasificar: transitorio de HL (502/timeout/red) NO mata el bot; fatal sí.
+          const { kind, message } = classifySpotGridError(e);
+          if (kind === "transient") {
+            if (wasError) {
+              // Reintento de recuperación fallido → sube errorRecoveryAttempts (NO transientFailCount), backoff largo.
+              await ctx.runMutation(internal.spotGridBots.bumpSpotGridErrorRecovery, { botId: bot._id, token });
+              elog("spotgrid", "recovery_transient_retry", { botId: String(bot._id) });
+            } else {
+              const r: any = await ctx.runMutation(internal.spotGridBots.bumpSpotGridTransient, { botId: bot._id, token, message });
+              elog("spotgrid", r.escalated ? "reconcile_transient_escalated" : "reconcile_transient_retry", { botId: String(bot._id), fails: r.count });
+            }
+          } else {
+            await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, { botId: bot._id, token, status: "error", errorKind: "fatal", errorMessage: message });
+            elog("spotgrid", "reconcile_error", { botId: String(bot._id), err: message });
+          }
         } finally {
           await ctx.runMutation(internal.spotGridBots.releaseSpotGridReconcile, { botId: bot._id, token });
         }
@@ -831,6 +874,10 @@ export const stopSpotGridBot = action({
       await ctx.runMutation(internal.spotGridBots.setSpotGridStatus, { botId, token, status: "stopped", clearLease: true });
       elog("spotgrid", "stopped", { botId: String(botId), cancelled: live.length });
       return { ok: true };
+    } catch (e) {
+      // (JAV-122) Nunca mostrar al usuario el cuerpo HTML de un 502: re-lanzar el mensaje CLASIFICADO. Los
+      // throws deterministas de arriba ("Liquidación incompleta…", etc.) se preservan (rama fatal = safeError).
+      throw new Error(classifySpotGridError(e).message);
     } finally {
       // setSpotGridStatus(stopped) ya limpió el lease; release es no-op si el token ya no aplica.
       await ctx.runMutation(internal.spotGridBots.releaseSpotGridReconcile, { botId, token });

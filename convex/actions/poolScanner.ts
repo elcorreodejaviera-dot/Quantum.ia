@@ -1095,7 +1095,7 @@ export const fetchPositionLiquidity = action({
 // gatea este valor real (Codex v2 MEDIO#2): una posición hoy fuera de rango pudo generar fees en la ventana.
 const FEE24H_WINDOW_MS = 24 * 60 * 60 * 1000;
 const FEE24H_MAX_REF_AGE_MS = 26 * 60 * 60 * 1000;   // ventana nowSnap−refSnap: 24h..26h; más → stale (hueco)
-const FEE24H_MAX_NOW_AGE_MS = 2 * 60 * 60 * 1000;    // frescura: nowSnap debe ser ≤2h viejo (cron horario)
+const FEE24H_MAX_NOW_AGE_MS = 2 * 60 * 60 * 1000;    // frescura: nowSnap ≤2h viejo (tolera fallos del cron 5 min)
 const FEE24H_GETLOGS_BUDGET = 2000;                   // tope de requests getLogs por reconciliación (one-off)
 
 // (JAV-120 F4) Reconcilia las fees de la ventana cuando la posición cambió (collect/increase/decrease):

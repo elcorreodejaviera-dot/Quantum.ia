@@ -16,15 +16,6 @@ const HL_NETWORK = IS_TESTNET ? 'testnet' : 'mainnet';
 const NETWORKS = ['Todas', 'Ethereum', 'Arbitrum', 'Base', 'Optimism'];
 const PAIRS = ['Todos', 'BTC/USDC', 'ETH/USDC'];
 
-const ALERT_COOLDOWN_MS = 60 * 60 * 1000;
-
-const ALERT_TYPE_LABELS = {
-  out_of_range: 'Fuera de rango',
-  apy_below: 'APY bajo umbral',
-  price_cross: 'Precio cruza nivel',
-  spot_grid_error: 'Spot Grid en error',   // (JAV-94) alertas de error del Spot Grid en el historial
-};
-
 // Campos UI de bots que no están en el schema de Convex (trading config extendida)
 const DEFAULT_BOT_UI = {
   hedge: '—', health: '—', poolTokenId: '—',
@@ -2003,99 +1994,6 @@ function AuditLogPanel({ isAdmin, mySignals }) {
   );
 }
 
-function AlertsPanel({ alerts, history, onCreate, onDelete }) {
-  const [alertType, setAlertType] = React.useState('out_of_range');
-  const [alertPair, setAlertPair] = React.useState('BTC/USDC');
-  const [alertNetwork, setAlertNetwork] = React.useState('');
-  const [alertThreshold, setAlertThreshold] = React.useState('');
-
-  function handleCreate(e) {
-    e.preventDefault();
-    const threshold = alertThreshold !== '' ? parseFloat(alertThreshold) : undefined;
-    onCreate({ alertType, pair: alertPair, network: alertNetwork || undefined, threshold });
-    setAlertThreshold('');
-  }
-
-  return (
-    <section className="panel">
-      <div className="section-head">
-        <h2>Alertas</h2>
-        <span className="pill">{alerts?.filter((a) => a.active).length ?? 0} activas</span>
-      </div>
-
-      <form className="alert-form" onSubmit={handleCreate}>
-        <select value={alertType} onChange={(e) => setAlertType(e.target.value)}>
-          <option value="out_of_range">Fuera de rango</option>
-          <option value="apy_below">APY bajo umbral</option>
-          <option value="price_cross">Precio cruza nivel</option>
-        </select>
-        <select value={alertPair} onChange={(e) => setAlertPair(e.target.value)}>
-          <option>BTC/USDC</option>
-          <option>ETH/USDC</option>
-        </select>
-        {alertType === 'out_of_range' && (
-          <select value={alertNetwork} onChange={(e) => setAlertNetwork(e.target.value)}>
-            <option value="">Todas las redes</option>
-            <option value="Ethereum">Ethereum</option>
-            <option value="Arbitrum">Arbitrum</option>
-            <option value="Base">Base</option>
-            <option value="Optimism">Optimism</option>
-          </select>
-        )}
-        {(alertType === 'apy_below' || alertType === 'price_cross') && (
-          <input
-            type="number"
-            placeholder={alertType === 'apy_below' ? 'APY % umbral' : 'Precio nivel'}
-            value={alertThreshold}
-            onChange={(e) => setAlertThreshold(e.target.value)}
-            min="0"
-            step="any"
-            required
-          />
-        )}
-        <button type="submit" className="mini-btn active">+ Añadir</button>
-      </form>
-
-      {alerts && alerts.length > 0 && (
-        <div className="alert-list">
-          {alerts.map((a) => (
-            <div key={a._id} className="alert-row">
-              <div className="alert-info">
-                <span className="pill amber">{ALERT_TYPE_LABELS[a.alertType]}</span>
-                <span>{a.pair}{a.network ? ` · ${a.network}` : ''}</span>
-                {a.threshold != null && (
-                  <span>→ {a.threshold}{a.alertType === 'apy_below' ? '%' : ''}</span>
-                )}
-              </div>
-              <button className="mini-btn" onClick={() => onDelete(a._id)}>×</button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {history && history.length > 0 && (
-        <>
-          <div className="section-sub">Historial de disparos</div>
-          <div className="signal-list">
-            {history.map((h) => (
-              <div key={h._id} className="signal-row">
-                <div className="signal-main">
-                  <span className="pill red">{ALERT_TYPE_LABELS[h.alertType] ?? h.alertType}</span>
-                  <span className="network">{h.pair}</span>
-                </div>
-                <div className="signal-meta">
-                  <span className="network">{h.message}</span>
-                  <span className="network">{new Date(h.timestamp).toLocaleString('es')}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-    </section>
-  );
-}
-
 const EVM_RE_PROTECTOR = /^0x[a-fA-F0-9]{40}$/;
 
 function ScanTokenIdModal({ onClose, onAdded }) {
@@ -3787,15 +3685,8 @@ function Dashboard({ user, onLogout, userId }) {
   const signals = useQuery(api.tradesHistory.listSignals, {});
   const signalCooldownRef = React.useRef({});
 
-  const userAlerts = useQuery(api.alerts.listAlerts, {});
-  const alertHistory = useQuery(api.alerts.listAlertHistory, {});
-  const createAlertMutation = useMutation(api.alerts.createAlert);
-  const deleteAlertMutation = useMutation(api.alerts.deleteAlert);
-  const recordAlertTriggerMutation = useMutation(api.alerts.recordAlertTrigger);
   const [toasts, setToasts] = React.useState([]);
   const [scanModalOpen, setScanModalOpen] = React.useState(false);
-  const alertCooldownRef = React.useRef({});
-  const alertDirectionRef = React.useRef({});
 
   const fetchPositionAction = useAction(api.actions.poolScanner.fetchPositionLiquidity);
   const [positionData, setPositionData] = React.useState({});
@@ -3954,14 +3845,6 @@ function Dashboard({ user, onLogout, userId }) {
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 5000);
   }
 
-  async function handleCreateAlert(args) {
-    try { await createAlertMutation(args); } catch (err) { console.error('createAlert failed', err); }
-  }
-
-  async function handleDeleteAlert(id) {
-    try { await deleteAlertMutation({ id }); } catch (err) { console.error('deleteAlert failed', err); }
-  }
-
   const filteredPools = pools.filter((pool) => {
     const networkOk = network === 'Todas' || pool.network === network;
     const pairOk = pair === 'Todos' || pool.pair === pair;
@@ -4043,63 +3926,6 @@ function Dashboard({ user, onLogout, userId }) {
     }
   }, [prices, bots, pools, simulationMode]);
 
-  React.useEffect(() => {
-    if (!userAlerts?.length || !pools.length) return;
-    const now = Date.now();
-    for (const alert of userAlerts) {
-      if (!alert.active) continue;
-      const lastFired = alertCooldownRef.current[alert._id] ?? 0;
-      if (now - lastFired < ALERT_COOLDOWN_MS) continue;
-
-      let triggered = false;
-      let message = '';
-
-      switch (alert.alertType) {
-        case 'out_of_range': {
-          const matched = pools.filter(
-            (p) => p.pair === alert.pair && (!alert.network || p.network === alert.network)
-          );
-          const offRange = matched.find((p) => p.price != null && (p.price < p.min || p.price > p.max));
-          if (offRange) {
-            triggered = true;
-            message = `Pool ${offRange.pair} (${offRange.network}) fuera de rango — precio $${formatPrice(offRange.pair, offRange.price)}`;
-          }
-          break;
-        }
-        case 'apy_below': {
-          const matched = pools.filter((p) => p.pair === alert.pair);
-          const low = matched.find((p) => p.apy != null && alert.threshold != null && p.apy < alert.threshold);
-          if (low) {
-            triggered = true;
-            message = `APY de ${low.pair} (${low.network}) en ${low.apy.toFixed(1)}% — umbral ${alert.threshold}%`;
-          }
-          break;
-        }
-        case 'price_cross': {
-          const asset = alert.pair.split('/')[0];
-          const price = prices[asset];
-          if (price != null && alert.threshold != null) {
-            const currentSide = price >= alert.threshold ? 'above' : 'below';
-            const prevSide = alertDirectionRef.current[alert._id];
-            alertDirectionRef.current[alert._id] = currentSide;
-            if (prevSide && prevSide !== currentSide) {
-              triggered = true;
-              message = `Precio de ${alert.pair} cruzó $${alert.threshold} — actual $${formatPrice(alert.pair, price)}`;
-            }
-          }
-          break;
-        }
-      }
-
-      if (triggered) {
-        alertCooldownRef.current[alert._id] = now;
-        addToast(message);
-        recordAlertTriggerMutation({ alertId: alert._id, message }).catch((err) =>
-          console.error('recordAlertTrigger failed', err)
-        );
-      }
-    }
-  }, [prices, pools, userAlerts]);
 
   return (
     <div className="app-shell">
@@ -4196,12 +4022,6 @@ function Dashboard({ user, onLogout, userId }) {
               canManageBots={canManageBots}
             />
             <AuditLogPanel isAdmin={isAdmin} mySignals={signals} />
-            <AlertsPanel
-              alerts={userAlerts}
-              history={alertHistory}
-              onCreate={handleCreateAlert}
-              onDelete={handleDeleteAlert}
-            />
           </div>
 
           <aside className="stack">

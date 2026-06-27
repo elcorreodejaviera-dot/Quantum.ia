@@ -531,7 +531,7 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
 
       {/* (JAV-117) Vida del pool (vida total). Visible aunque esté cerrado. */}
       {showLifetime && (
-        <div className="pool-metrics-header">
+        <div className="pool-metrics-header pool-lifetime-row">
           <Metric label="Tiempo de vida" title={lifeDateStr ? `Tiempo total que lleva viva la posición (desde ${lifeDateStr}).` : 'Tiempo total que lleva viva la posición.'}
             value={<span>{lifetimeStr}{lifeDateStr ? <span className="muted" style={{ fontWeight: 400 }}> · desde {lifeDateStr}</span> : null}</span>} />
         </div>

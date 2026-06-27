@@ -30,6 +30,7 @@ const get = (t: any, botId: Id<"spot_grid_bots">) => t.run((ctx: MutationCtx) =>
 describe("bumpSpotGridTransient — prevención (Parte 1)", () => {
   it("no escala bajo el tope: sube contador + backoff, NO toca status/errorMessage", async () => {
     const t = makeConvexTest();
+    const startedAt = Date.now();
     const { botId } = await t.run((ctx) => seedGridBot(ctx, { transientFailCount: 2 }));
     const { token } = await t.mutation(internal.spotGridBots.claimSpotGridReconcile, { botId });
     const r = await t.mutation(internal.spotGridBots.bumpSpotGridTransient, { botId, token: token!, message: "x" });
@@ -39,7 +40,8 @@ describe("bumpSpotGridTransient — prevención (Parte 1)", () => {
     expect(bot.status).toBe("running");
     expect(bot.errorMessage).toBeUndefined();
     expect(bot.transientFailCount).toBe(3);
-    expect(bot.nextRetryAt).toBeGreaterThan(Date.now() - 1000);
+    // (CodeRabbit) backoff EXACTO, no solo "futuro": protege SPOT_GRID_TRANSIENT_BACKOFF_MS.
+    expect(bot.nextRetryAt).toBeGreaterThanOrEqual(startedAt + SPOT_GRID_TRANSIENT_BACKOFF_MS - 5_000);
   });
 
   it("escala al tope: error+errorKind:transient, captura recoverToStatus=running, resetea contadores, alerta UNA vez", async () => {
@@ -136,17 +138,16 @@ describe("recoverSpotGridFromError — recuperación (Parte 2)", () => {
   it("recoverToStatus ausente → TERMINALIZA a fatal accionable (Codex r5), no no-op silencioso", async () => {
     const t = makeConvexTest();
     const botId = await seedErrored(t, { recoverToStatus: undefined });
-    const { token } = await t.mutation(internal.spotGridBots.claimSpotGridReconcile, { botId });
-    // claim NO debería haberlo tomado (predicate), pero si se fuerza la mutation, terminaliza:
-    const r = await t.mutation(internal.spotGridBots.recoverSpotGridFromError, { botId, token: token ?? "noop" });
+    // (CodeRabbit) El claim del cron lo RECHAZA (predicate sin recoverToStatus)...
+    expect((await t.mutation(internal.spotGridBots.claimSpotGridReconcile, { botId })).ok).toBe(false);
+    // ...pero forzando la mutation bajo un lease válido (claim de stop, que admite error), debe TERMINALIZAR.
+    const { token } = await t.mutation(internal.spotGridBots.claimSpotGridReconcileForStop, { botId });
+    const r = await t.mutation(internal.spotGridBots.recoverSpotGridFromError, { botId, token: token! });
     const bot = await get(t, botId);
-    if (token) {   // si el claim lo tomó por alguna razón, debe terminalizar
-      expect(r.terminalized).toBe(true);
-      expect(bot.errorKind).toBe("fatal");
-      expect(bot.errorMessage).toBe(SPOT_GRID_NO_RECOVER_STATUS_MSG);
-    }
-    // En cualquier caso, nunca quedó en running.
+    expect(r.terminalized).toBe(true);
     expect(bot.status).toBe("error");
+    expect(bot.errorKind).toBe("fatal");
+    expect(bot.errorMessage).toBe(SPOT_GRID_NO_RECOVER_STATUS_MSG);
   });
 });
 

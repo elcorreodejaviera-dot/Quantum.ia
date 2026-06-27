@@ -1,10 +1,12 @@
 # Auditoría de CÓDIGO (Codex) — JAV-122: Spot Grid resiliente a errores transitorios de HL (502)
 
-Eres un auditor senior de código money-path sobre Hyperliquid. Audita el **CÓDIGO** del commit `c070b49`
-(rama `spot-grid/jav122-transient-recovery`). Emite veredicto **GO / NO-GO** por hallazgo con severidad
-(ALTO / MEDIO / BAJO). El diseño ya tiene tu GO (Ronda 6, plan `docs/plan-jav122-spotgrid-transient-recovery.md`
-Rev.7; auditorías r1–r6 en `docs/audit-jav122-plan-codex-r*.md`). Aquí verificás que el código implementa
-ese diseño FIELMENTE y sin huecos nuevos.
+Eres un auditor senior de código money-path sobre Hyperliquid. Audita el **CÓDIGO** de la rama
+`spot-grid/jav122-transient-recovery` — auditoría inicial sobre `c070b49` y **re-auditoría sobre `895c6d8`**
+(fix ALTO-1, plan Rev.8; ver la nota "RE-AUDITORÍA" abajo). Emite veredicto **GO / NO-GO** por hallazgo con
+severidad (ALTO / MEDIO / BAJO). El diseño ya tiene tu GO (Ronda 6, plan
+`docs/plan-jav122-spotgrid-transient-recovery.md` Rev.7→Rev.8; auditorías r1–r6 en
+`docs/audit-jav122-plan-codex-r*.md`). Aquí verificás que el código implementa ese diseño FIELMENTE y sin
+huecos nuevos.
 
 > **RE-AUDITORÍA (tras tu GO-cond de código, ALTO-1).** ALTO-1 corregido en commit `895c6d8` (Rev.8 del
 > plan): los catches LOCALES de envío de orden (`placeOrder` y los inline de retry de `submitting`/repost)

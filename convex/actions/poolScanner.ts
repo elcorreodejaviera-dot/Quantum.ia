@@ -1477,21 +1477,30 @@ async function snapshotOnePoolFees(ctx: any, pool: any): Promise<"inserted" | "u
   if (!owed) return "unavailable";
   const snapshotKey = await readPositionSnapshotKey(rpcs, nft, pool.tokenId, blockTag);
   if (snapshotKey == null) return "unavailable";
-  // Agregados cacheados. Campos presentes no bastan: para certificar F4, la deuda base debe venir de un
-  // backfill histórico y estar calculada al menos hasta el safeHead exacto del snapshot.
-  const collected0Raw = pool.feesCollectedRaw0 ?? "";
-  const collected1Raw = pool.feesCollectedRaw1 ?? "";
-  const principalDebt0Raw = pool.principalDebt0 ?? "";
-  const principalDebt1Raw = pool.principalDebt1 ?? "";
-  const hasAggregateFields =
-    collected0Raw !== "" && collected1Raw !== "" && principalDebt0Raw !== "" && principalDebt1Raw !== "";
-  const aggregatesSafeThroughBlock =
-    hasAggregateFields &&
+  // Agregados base para certificar F4. El cache lifetime (pool.principalDebt*) vale a `feesLifetimeCursorBlock`,
+  // que solo se garantiza ≥ safeHead: si cursor > safeHead, un Decrease/Collect en (safeHead, cursor] ya está
+  // horneado en el cache y el replay de F4 (desde safeHead+1) lo contaría dos veces → deuda/atribución erróneas.
+  // Por eso, cuando el backfill cubre el safeHead exacto, RECOMPUTAMOS deuda/collected a esa altura DESDE la
+  // tabla de eventos (fuente de verdad) → el snapshot queda auto-consistente (deuda alineada con owed/ventana).
+  let collected0Raw = pool.feesCollectedRaw0 ?? "";
+  let collected1Raw = pool.feesCollectedRaw1 ?? "";
+  let principalDebt0Raw = pool.principalDebt0 ?? "";
+  let principalDebt1Raw = pool.principalDebt1 ?? "";
+  let aggregatesSafeThroughBlock: number | undefined = undefined;
+  const backfillCoversSafeHead =
     pool.feesLifetimeBackfilledAt != null &&
     typeof pool.feesLifetimeCursorBlock === "number" &&
-    pool.feesLifetimeCursorBlock >= safeHead
-      ? safeHead
-      : undefined;
+    pool.feesLifetimeCursorBlock >= safeHead;
+  if (backfillCoversSafeHead) {
+    const at = await ctx.runQuery(internal.pools.getPoolAggregatesAtBlockInternal, {
+      poolId: pool._id, throughBlock: safeHead,
+    });
+    if (at) {
+      collected0Raw = at.feesCollectedRaw0; collected1Raw = at.feesCollectedRaw1;
+      principalDebt0Raw = at.principalDebt0; principalDebt1Raw = at.principalDebt1;
+      aggregatesSafeThroughBlock = safeHead;   // deuda probada a ESTE safeHead exacto
+    }
+  }
   const aggregatesComplete = aggregatesSafeThroughBlock !== undefined;
   await ctx.runMutation(internal.pools.insertPoolFeeSnapshot, {
     poolId: pool._id,

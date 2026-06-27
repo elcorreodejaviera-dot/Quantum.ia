@@ -289,6 +289,24 @@ export const getPoolLifetimeStateInternal = internalQuery({
   },
 });
 
+// (JAV-120 F4) Agregados (collected/principalDebt) computados a una altura EXACTA desde la tabla de eventos
+// (fuente de verdad). El snapshot writer lo usa para guardar la deuda base AL safeHead exacto del snapshot,
+// NO la del cache lifetime (que vale a `feesLifetimeCursorBlock`, ≥ safeHead): si cursor > safeHead, un
+// Decrease/Collect en (safeHead, cursor] ya estaría horneado en el cache y el replay de F4 (que arranca en
+// safeHead+1) lo contaría dos veces. Requiere que el backfill cubra [inception, throughBlock] sin huecos
+// (lo garantiza el caller: backfilledAt != null && cursorBlock >= throughBlock). null si algún raw corrupto.
+export const getPoolAggregatesAtBlockInternal = internalQuery({
+  args: { poolId: v.id("pools"), throughBlock: v.number() },
+  handler: async (ctx, { poolId, throughBlock }) => {
+    const events = await ctx.db
+      .query("pool_fee_events")
+      .withIndex("by_pool_block", q => q.eq("poolId", poolId).lte("blockNumber", throughBlock))
+      .collect();
+    try { return computeLifetimeAggregates(events); }
+    catch { return null; }   // raw inválido → no certificar (igual que el recompute lifetime)
+  },
+});
+
 // (ALTO-1) Reemplazo ATÓMICO de una ventana de eventos + recompute. Se llama SOLO con eventos ya leídos
 // con éxito de `[fromBlock, toBlock]` (una sola transacción Convex): borra esa ventana, reinserta la rama
 // canónica (dedupe por lote), recomputa agregados DESDE LA TABLA y persiste cursor/estado. Como NUNCA se

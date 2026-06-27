@@ -100,6 +100,20 @@
 >    legacy-safe) → ahora coherente: no es recuperable; si se fuerza, terminaliza a `fatal`.
 > 4. **(BAJO) `setSpotGridBootstrap`** también limpia campos de recovery al setear `status:"error"` fatal
 >    (consistencia con la regla general).
+>
+> **Rev.8 (tras auditoría de CÓDIGO Codex, GO-cond — ALTO-1):** los envíos de orden con catch LOCAL
+> (`placeOrder` y los catches inline de retry de `submitting` y de repost) tragaban el `TransportError` y
+> devolvían `{ok:false}` → esos transitorios NO contaban para `transientFailCount`/backoff/escalada (el
+> plan asumía que "las órdenes llegan al catch central", falso para esos sitios). **Re-lanzar es inseguro:**
+> en el loop de fills el `fillCursor` se avanza al final, así que lanzar a mitad saltearía ese avance →
+> DOBLE-CONTEO de fills. Fix money-path-safe: `reconcileOneBot` acumula una bandera `transientPlace` (la
+> setean los catches locales si `classifySpotGridError(e).kind === "transient"`) y la DEVUELVE; el loop del
+> cron, con la bandera activa, convierte el desenlace de la ronda de éxito a **bump transitorio**
+> (`bumpSpotGridTransient` activo / `bumpSpotGridErrorRecovery` recuperación) en vez de
+> `markSpotGridReconcileSuccess`/`recoverSpotGridFromError`. Sin re-lanzar → fills intactos; con bandera →
+> el transitorio de orden cuenta igual que uno del catch central. El IOC de la semilla (bootstrap) NO tiene
+> catch local → ya re-lanza al catch central (sin cambio). Fatales de orden siguen locales (orden fallida,
+> no matan el bot).
 
 ## Causa raíz (confirmada, NO re-investigar)
 - Catch genérico del loop del cron en `convex/spotGridEngine.ts:718-719`:

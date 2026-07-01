@@ -51,6 +51,45 @@ function formatPrice(pair, value) {
   return value.toLocaleString('en-US', { maximumFractionDigits: max });
 }
 
+// (JAV-174) Dirección del último "tick" de precio, estilo TradingView: 'up' si
+// el precio subió respecto al valor anterior, 'down' si bajó; se limpia solo tras
+// ~700ms para que el destello dure lo que la animación CSS. No dispara en el
+// primer render ni con valores no finitos. `seq` incrementa en cada tick válido
+// para poder reiniciar la animación aunque la dirección se repita (up→up).
+function usePriceDirection(value) {
+  const prev = React.useRef(value);
+  const [state, setState] = React.useState({ dir: null, seq: 0 });
+  React.useEffect(() => {
+    if (!Number.isFinite(value)) return;
+    const p = prev.current;
+    prev.current = value;
+    if (Number.isFinite(p) && value !== p) {
+      setState((s) => ({ dir: value > p ? 'up' : 'down', seq: s.seq + 1 }));
+    }
+  }, [value]);
+  React.useEffect(() => {
+    if (!state.dir) return undefined;
+    const t = setTimeout(() => setState((s) => ({ ...s, dir: null })), 700);
+    return () => clearTimeout(t);
+  }, [state.dir, state.seq]);
+  return state;
+}
+
+// Precio grande "en vivo" de la tarjeta (BTC/ETH). Mantiene el pulso verde en el
+// <span> externo (.spot-live-price) y suma el destello direccional en un <span>
+// interno con key={seq}: al remontarse en cada tick, la animación price-tick-*
+// reinicia aunque la dirección se repita, sin cortar el pulso externo.
+function SpotLivePrice({ pair, value }) {
+  const { dir, seq } = usePriceDirection(value);
+  return (
+    <span className="spot-live-price">
+      <span key={seq} className={dir ? `price-tick price-${dir}` : undefined}>
+        ${formatPrice(pair, value)}
+      </span>
+    </span>
+  );
+}
+
 // (JAV-120) "Fees 24h" de una posición: REAL medido (Δ snapshots on-chain) si el backend lo certifica
 // `ok`; si no, ESTIMADO concentrado (fees1d · feeShareRatio), que respeta la concentración del rango.
 // NUNCA el prorrateo pool-wide (fees1d · liquidez/TVL), que era el bug original (subestimaba).
@@ -1604,9 +1643,7 @@ function SpotPositions({ prices, connected, userId, tradingEnabled, isAdmin, use
                 <div className="spot-card-identity">
                   <span className="pair">{position.asset}</span>
                   {hasPrice && (
-                    <span className="spot-live-price">
-                      ${formatPrice(`${position.asset}/USDC`, position.currentPrice)}
-                    </span>
+                    <SpotLivePrice pair={`${position.asset}/USDC`} value={position.currentPrice} />
                   )}
                 </div>
                 <div className="spot-card-actions">

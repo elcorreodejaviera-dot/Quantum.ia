@@ -650,10 +650,10 @@ button {
      rojo al bajar. Va en el <span> interno .price-tick (remontado por key en
      cada tick, así reinicia aunque la dirección se repita). Anima
      background/box-shadow, distinto del pulso externo (color/text-shadow). */
-  .price-tick.price-up {
+  .spot-live-price .price-tick.price-up {
     animation: price-tick-up 0.7s ease-out;
   }
-  .price-tick.price-down {
+  .spot-live-price .price-tick.price-down {
     animation: price-tick-down 0.7s ease-out;
   }
 }

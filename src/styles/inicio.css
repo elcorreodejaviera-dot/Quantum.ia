@@ -1,0 +1,187 @@
+/* Landing / portada pública (JAV-169). Siempre en tema oscuro (como la maqueta
+   mejoras/'Quantum Inicio - final standalone.html'). Prefijo .inicio para no
+   colisionar con los estilos globales del portal. Reusa var(--green) de marca. */
+
+.inicio {
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: #000;
+  color: #fff;
+  font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* glow verde superior */
+.inicio-glow {
+  position: absolute;
+  top: -260px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(900px, 130vw);
+  height: 540px;
+  background: radial-gradient(
+    ellipse at center,
+    color-mix(in srgb, var(--green) 16%, transparent),
+    transparent 68%
+  );
+  pointer-events: none;
+}
+
+/* nav */
+.inicio-nav {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: clamp(16px, 3vw, 26px) clamp(18px, 5vw, 48px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.inicio-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  color: #fff;
+  font-weight: 800;
+  font-size: clamp(16px, 2.2vw, 18px);
+}
+
+.inicio-brand em {
+  color: #6b6b73;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.inicio-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.inicio-btn {
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 9px 16px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.inicio-btn-ghost {
+  color: #c9c9cf;
+  border: 1px solid #26262c;
+}
+
+.inicio-btn-primary {
+  color: #04120a;
+  background: var(--green);
+  font-weight: 700;
+  padding: 10px 18px;
+}
+
+.inicio-btn:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
+/* hero */
+.inicio-hero {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: clamp(40px, 8vw, 80px);
+}
+
+.inicio-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 6px 14px;
+  border: 1px solid color-mix(in srgb, var(--green) 35%, transparent);
+  border-radius: 999px;
+  margin-bottom: clamp(24px, 4vw, 34px);
+}
+
+.inicio-badge-text {
+  color: var(--green);
+  font-size: clamp(11px, 1.5vw, 12px);
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.inicio-title-row {
+  display: flex;
+  align-items: center;
+  gap: clamp(12px, 3vw, 24px);
+}
+
+.inicio-title {
+  margin: 0;
+  color: #fff;
+  font-size: clamp(48px, 13vw, 92px);
+  font-weight: 800;
+  line-height: 1;
+}
+
+.inicio-title em {
+  color: #5c5c64;
+  font-style: normal;
+}
+
+/* puntos verdes "en vivo" */
+.inicio-dot {
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.inicio-dot-nav { width: 9px; height: 9px; }
+.inicio-dot-badge { width: 7px; height: 7px; }
+.inicio-dot-title {
+  width: clamp(16px, 3vw, 26px);
+  height: clamp(16px, 3vw, 26px);
+}
+
+@keyframes inicio-qblink {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 32px 8px color-mix(in srgb, var(--green) 95%, transparent),
+                0 0 0 0 color-mix(in srgb, var(--green) 60%, transparent);
+  }
+  50% {
+    opacity: 0.3;
+    box-shadow: 0 0 10px 2px color-mix(in srgb, var(--green) 40%, transparent),
+                0 0 0 26px color-mix(in srgb, var(--green) 0%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .inicio-dot {
+    animation: inicio-qblink 1.6s ease-in-out infinite;
+  }
+}
+
+/* en pantallas chicas, nav centrado y CTAs a lo ancho */
+@media (max-width: 480px) {
+  .inicio-nav {
+    justify-content: center;
+    text-align: center;
+  }
+  .inicio-actions {
+    width: 100%;
+    justify-content: center;
+  }
+}

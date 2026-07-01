@@ -174,7 +174,7 @@
   }
 }
 
-/* en pantallas chicas, nav centrado y CTAs a lo ancho */
+/* en pantallas chicas, nav centrado y CTAs apilados a lo ancho */
 @media (max-width: 480px) {
   .inicio-nav {
     justify-content: center;
@@ -182,6 +182,18 @@
   }
   .inicio-actions {
     width: 100%;
-    justify-content: center;
+    flex-direction: column;
+    align-items: stretch;
   }
+  .inicio-btn {
+    width: 100%;
+    text-align: center;
+  }
+}
+
+/* estado de carga mientras Clerk resuelve la sesión (HomeRoute) */
+.inicio-loading {
+  margin: auto;
+  color: #c9c9cf;
+  font-size: 14px;
 }

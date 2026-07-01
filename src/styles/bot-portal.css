@@ -647,15 +647,14 @@ button {
   }
 
   /* Destello direccional por tick, estilo TradingView (JAV-174): verde al subir,
-     rojo al bajar. Anima background/box-shadow (distinto del pulso que anima
-     color/text-shadow) para convivir con la animación price-live-blink. */
-  .spot-live-price.price-up {
-    animation: price-live-blink 1.8s ease-in-out infinite,
-               price-tick-up 0.7s ease-out;
+     rojo al bajar. Va en el <span> interno .price-tick (remontado por key en
+     cada tick, así reinicia aunque la dirección se repita). Anima
+     background/box-shadow, distinto del pulso externo (color/text-shadow). */
+  .price-tick.price-up {
+    animation: price-tick-up 0.7s ease-out;
   }
-  .spot-live-price.price-down {
-    animation: price-live-blink 1.8s ease-in-out infinite,
-               price-tick-down 0.7s ease-out;
+  .price-tick.price-down {
+    animation: price-tick-down 0.7s ease-out;
   }
 }
 

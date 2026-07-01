@@ -54,32 +54,40 @@ function formatPrice(pair, value) {
 // (JAV-174) Dirección del último "tick" de precio, estilo TradingView: 'up' si
 // el precio subió respecto al valor anterior, 'down' si bajó; se limpia solo tras
 // ~700ms para que el destello dure lo que la animación CSS. No dispara en el
-// primer render ni con valores no finitos.
+// primer render ni con valores no finitos. `seq` incrementa en cada tick válido
+// para poder reiniciar la animación aunque la dirección se repita (up→up).
 function usePriceDirection(value) {
   const prev = React.useRef(value);
-  const [dir, setDir] = React.useState(null);
+  const [state, setState] = React.useState({ dir: null, seq: 0 });
   React.useEffect(() => {
     if (!Number.isFinite(value)) return;
     const p = prev.current;
     prev.current = value;
     if (Number.isFinite(p) && value !== p) {
-      setDir(value > p ? 'up' : 'down');
+      setState((s) => ({ dir: value > p ? 'up' : 'down', seq: s.seq + 1 }));
     }
   }, [value]);
   React.useEffect(() => {
-    if (!dir) return undefined;
-    const t = setTimeout(() => setDir(null), 700);
+    if (!state.dir) return undefined;
+    const t = setTimeout(() => setState((s) => ({ ...s, dir: null })), 700);
     return () => clearTimeout(t);
-  }, [dir]);
-  return dir;
+  }, [state.dir, state.seq]);
+  return state;
 }
 
-// Precio grande "en vivo" de la tarjeta (BTC/ETH). Mantiene el pulso verde
-// (.spot-live-price) y le suma el destello direccional verde/rojo por tick.
+// Precio grande "en vivo" de la tarjeta (BTC/ETH). Mantiene el pulso verde en el
+// <span> externo (.spot-live-price) y suma el destello direccional en un <span>
+// interno con key={seq}: al remontarse en cada tick, la animación price-tick-*
+// reinicia aunque la dirección se repita, sin cortar el pulso externo.
 function SpotLivePrice({ pair, value }) {
-  const dir = usePriceDirection(value);
-  const cls = dir ? `spot-live-price price-${dir}` : 'spot-live-price';
-  return <span className={cls}>${formatPrice(pair, value)}</span>;
+  const { dir, seq } = usePriceDirection(value);
+  return (
+    <span className="spot-live-price">
+      <span key={seq} className={dir ? `price-tick price-${dir}` : undefined}>
+        ${formatPrice(pair, value)}
+      </span>
+    </span>
+  );
 }
 
 // (JAV-120) "Fees 24h" de una posición: REAL medido (Δ snapshots on-chain) si el backend lo certifica

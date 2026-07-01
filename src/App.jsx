@@ -21,7 +21,13 @@ function ProtectedRoute({ children }) {
 // primer login, JAV-82). Autenticado → dashboard; visitante → landing.
 function HomeRoute() {
   const { isLoaded, isSignedIn } = useAuth()
-  if (!isLoaded) return <div className="inicio" aria-hidden="true" />
+  if (!isLoaded) {
+    return (
+      <div className="inicio" role="status" aria-live="polite">
+        <span className="inicio-loading">Cargando…</span>
+      </div>
+    )
+  }
   if (isSignedIn) return <Navigate to="/dashboard" replace />
   return <Inicio />
 }

@@ -51,6 +51,37 @@ function formatPrice(pair, value) {
   return value.toLocaleString('en-US', { maximumFractionDigits: max });
 }
 
+// (JAV-174) Dirección del último "tick" de precio, estilo TradingView: 'up' si
+// el precio subió respecto al valor anterior, 'down' si bajó; se limpia solo tras
+// ~700ms para que el destello dure lo que la animación CSS. No dispara en el
+// primer render ni con valores no finitos.
+function usePriceDirection(value) {
+  const prev = React.useRef(value);
+  const [dir, setDir] = React.useState(null);
+  React.useEffect(() => {
+    if (!Number.isFinite(value)) return;
+    const p = prev.current;
+    prev.current = value;
+    if (Number.isFinite(p) && value !== p) {
+      setDir(value > p ? 'up' : 'down');
+    }
+  }, [value]);
+  React.useEffect(() => {
+    if (!dir) return undefined;
+    const t = setTimeout(() => setDir(null), 700);
+    return () => clearTimeout(t);
+  }, [dir]);
+  return dir;
+}
+
+// Precio grande "en vivo" de la tarjeta (BTC/ETH). Mantiene el pulso verde
+// (.spot-live-price) y le suma el destello direccional verde/rojo por tick.
+function SpotLivePrice({ pair, value }) {
+  const dir = usePriceDirection(value);
+  const cls = dir ? `spot-live-price price-${dir}` : 'spot-live-price';
+  return <span className={cls}>${formatPrice(pair, value)}</span>;
+}
+
 // (JAV-120) "Fees 24h" de una posición: REAL medido (Δ snapshots on-chain) si el backend lo certifica
 // `ok`; si no, ESTIMADO concentrado (fees1d · feeShareRatio), que respeta la concentración del rango.
 // NUNCA el prorrateo pool-wide (fees1d · liquidez/TVL), que era el bug original (subestimaba).
@@ -1604,9 +1635,7 @@ function SpotPositions({ prices, connected, userId, tradingEnabled, isAdmin, use
                 <div className="spot-card-identity">
                   <span className="pair">{position.asset}</span>
                   {hasPrice && (
-                    <span className="spot-live-price">
-                      ${formatPrice(`${position.asset}/USDC`, position.currentPrice)}
-                    </span>
+                    <SpotLivePrice pair={`${position.asset}/USDC`} value={position.currentPrice} />
                   )}
                 </div>
                 <div className="spot-card-actions">

@@ -645,6 +645,44 @@ button {
   .spot-live-price {
     animation: price-live-blink 1.8s ease-in-out infinite;
   }
+
+  /* Destello direccional por tick, estilo TradingView (JAV-174): verde al subir,
+     rojo al bajar. Anima background/box-shadow (distinto del pulso que anima
+     color/text-shadow) para convivir con la animación price-live-blink. */
+  .spot-live-price.price-up {
+    animation: price-live-blink 1.8s ease-in-out infinite,
+               price-tick-up 0.7s ease-out;
+  }
+  .spot-live-price.price-down {
+    animation: price-live-blink 1.8s ease-in-out infinite,
+               price-tick-down 0.7s ease-out;
+  }
+}
+
+@keyframes price-tick-up {
+  0% {
+    background-color: color-mix(in srgb, var(--green) 42%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 28%, transparent);
+    border-radius: 4px;
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: 0 0 0 0 transparent;
+    border-radius: 4px;
+  }
+}
+
+@keyframes price-tick-down {
+  0% {
+    background-color: color-mix(in srgb, var(--red) 42%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 28%, transparent);
+    border-radius: 4px;
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: 0 0 0 0 transparent;
+    border-radius: 4px;
+  }
 }
 
 /* C: línea de "Entrada $X" — precio al que se abrió el LP (ámbar), misma mecánica

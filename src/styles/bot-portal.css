@@ -277,6 +277,28 @@ button {
   box-shadow: 0 0 0 5px rgba(0, 200, 5, 0.12);
 }
 
+/* Parpadeo "en vivo" (JAV-168). Acotado a los dots de topbar y hero para no
+   animar cualquier .status-dot futuro que sea solo indicador estático. */
+@keyframes qblink {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 12px 3px color-mix(in srgb, var(--green) 55%, transparent),
+                0 0 0 0 color-mix(in srgb, var(--green) 45%, transparent);
+  }
+  50% {
+    opacity: 0.35;
+    box-shadow: 0 0 5px 1px color-mix(in srgb, var(--green) 30%, transparent),
+                0 0 0 9px color-mix(in srgb, var(--green) 0%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .topbar .status-dot,
+  .hero-brand .status-dot {
+    animation: qblink 1.6s ease-in-out infinite;
+  }
+}
+
 .main {
   width: min(1440px, 100%);
   margin: 0 auto;

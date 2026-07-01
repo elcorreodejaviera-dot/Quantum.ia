@@ -599,6 +599,25 @@ button {
   padding: 0 2px;
 }
 
+/* Precio spot "en vivo" (JAV-171): titila en verde para señalar dato en tiempo
+   real. Pulsa color + glow; acotado a este precio, no a otros <strong>. */
+@keyframes price-live-blink {
+  0%, 100% {
+    color: var(--text);
+    text-shadow: none;
+  }
+  50% {
+    color: var(--green);
+    text-shadow: 0 0 8px color-mix(in srgb, var(--green) 55%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .range-chart-price-line strong {
+    animation: price-live-blink 1.8s ease-in-out infinite;
+  }
+}
+
 /* C: línea de "Entrada $X" — precio al que se abrió el LP (ámbar), misma mecánica
    de posición que la línea de precio pero con pool.entryPrice. */
 .range-chart-entry-line {

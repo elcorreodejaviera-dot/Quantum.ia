@@ -641,7 +641,8 @@ button {
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .range-chart-price-line strong {
+  .range-chart-price-line strong,
+  .spot-live-price {
     animation: price-live-blink 1.8s ease-in-out infinite;
   }
 }

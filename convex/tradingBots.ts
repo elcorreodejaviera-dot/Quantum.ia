@@ -258,14 +258,19 @@ export const reserveTradingArm = internalMutation({
       if (!triggerSeparationOk(lo as number, hi as number, args.tickSize)) {
         throw new Error("[blocked_config] Separación de triggers < 1 tick (pre-trigger colapsa/invierte el rango).");
       }
-      if (!rangeWidthOk(lo as number, hi as number, args.markPx, bot.stopLossPct as number)) {
-        throw new Error("[blocked_config] Rango demasiado angosto: ancho < RANGE_MIN_K×(SL+slippage) — riesgo de double-fill.");
-      }
-      // Mark FUERA del rango ⇒ resultado TIPADO (no throw): la action re-bifurca a marketEntry EN EL
-      // MISMO tick (cierra la carrera bifurcación→OCC sin alerta falsa de config — coherencia v2).
+      // (JAV-178-C1) TOPOLOGÍA PRIMERO: mark FUERA del rango ⇒ resultado TIPADO (no throw) — la
+      // action re-bifurca a marketEntry EN EL MISMO tick (cierra la carrera bifurcación→OCC sin
+      // alerta falsa de config). Debe clasificarse ANTES del rango mínimo: rangeWidthOk usa el mark
+      // como denominador, y un mark MUY lejos del rango encoge el ancho relativo — un rango de
+      // config válida caería como [blocked_config] (bloqueo 5 min + alerta) en vez de entrar a
+      // mercado: el caso Benjamin extremo que la decisión 6 cubre.
       const topo = resolveEntryTopology(args.markPx, lo as number, hi as number, direction);
       if (topo.kind === "market") {
         return { ok: false as const, reason: "out_of_range" as const, side: topo.side };
+      }
+      // Rango mínimo SOLO con el mark DENTRO (denominador sano): mitiga el double-fill por whipsaw.
+      if (!rangeWidthOk(lo as number, hi as number, args.markPx, bot.stopLossPct as number)) {
+        throw new Error("[blocked_config] Rango demasiado angosto: ancho < RANGE_MIN_K×(SL+slippage) — riesgo de double-fill.");
       }
       legsFactor = direction === "long_short" ? 1 : 2;
     }

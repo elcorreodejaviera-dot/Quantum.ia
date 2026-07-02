@@ -138,6 +138,17 @@ describe("reserveTradingArm — market-entry (decisión 6) y out_of_range tipado
     expect(arms).toHaveLength(0);
   });
 
+  it("(JAV-178-C1) mark MUY lejos del rango ⇒ out_of_range tipado, NUNCA [blocked_config] por rango angosto", async () => {
+    // rangeWidthOk usa el mark como denominador: con mark 50000 el rango 2020–2980 mide 1.92% (<6%).
+    // La topología debe clasificarse ANTES — este caso es entrada a mercado, no error de config.
+    const t = makeConvexTest();
+    const { botId } = await t.run((ctx) => seedTradingBot(ctx));
+    const far = await t.mutation(internal.tradingBots.reserveTradingArm, reserveArgs(botId, { markPx: 50000 }));
+    expect(far).toEqual({ ok: false, reason: "out_of_range", side: "Long" });
+    const below = await t.mutation(internal.tradingBots.reserveTradingArm, reserveArgs(botId, { markPx: 10 }));
+    expect(below).toEqual({ ok: false, reason: "out_of_range", side: "Short" });
+  });
+
   it("separación < 1 tick y rango angosto ⇒ [blocked_config]", async () => {
     const t = makeConvexTest();
     const { botId } = await t.run((ctx) => seedTradingBot(ctx));

@@ -1,6 +1,28 @@
 import { describe, it, expect } from "vitest";
 import { nextTrailAnchor, computeDesiredSlTrigger } from "../convex/tradingMath";
-import { decideSlReplacement, beLatchReached, hlPriceTick, SL_REPLACE_MIN_INTERVAL_MS } from "../convex/tradingReconcileCore";
+import { decideSlReplacement, beLatchReached, hlPriceTick, SL_REPLACE_MIN_INTERVAL_MS, preHlGateCheck } from "../convex/tradingReconcileCore";
+
+// (JAV-179-C1) Contrato de ORDEN del money-path: los gates son la PRIMERA barrera antes de tocar HL.
+describe("preHlGateCheck — kill-switch/canLive/gate-mainnet bloquean ANTES de cualquier lectura HL", () => {
+  const base = { tradingEnabled: true, simulationOff: true, canLive: true, network: "mainnet", mainnetApproved: true };
+
+  it("gate mainnet cerrado ⇒ [blocked_config] (barrera total, sin descifrar clave ni tocar HL)", () => {
+    const r = preHlGateCheck({ ...base, mainnetApproved: false });
+    expect(r.ok).toBe(false);
+    if (r.ok === false) expect(r.error).toMatch(/^\[blocked_config\] mainnetTradingApproved OFF/);
+  });
+
+  it("kill-switch / simulación ⇒ [cancel]; canLive revocado ⇒ [blocked_config]", () => {
+    expect((preHlGateCheck({ ...base, tradingEnabled: false }) as any).error).toMatch(/^\[cancel\]/);
+    expect((preHlGateCheck({ ...base, simulationOff: false }) as any).error).toMatch(/^\[cancel\]/);
+    expect((preHlGateCheck({ ...base, canLive: false }) as any).error).toMatch(/^\[blocked_config\] canTradeLive/);
+  });
+
+  it("testnet no exige el gate mainnet; todo ok ⇒ ok", () => {
+    expect(preHlGateCheck({ ...base, network: "testnet", mainnetApproved: false })).toEqual({ ok: true });
+    expect(preHlGateCheck(base)).toEqual({ ok: true });
+  });
+});
 
 // (JAV-179 / PR3) Trailing del motor de trading: anchor direccional (P4) + ratchet + histéresis de
 // REPLACE. Property tests con secuencias reales (reinicio, rebote adverso) para AMBOS lados.
@@ -102,5 +124,32 @@ describe("secuencia integrada: anchor + ratchet + replace — el SL JAMÁS retro
     const { slPx: sl2, anchor: a2 } = runPath("Long", 1000, [1050, 1010, 1005, 1002]);
     expect(a2).toBe(a1);
     expect(sl2).toBe(sl1);
+  });
+
+  it("(JAV-179-C2) contrato de la rotación real (rotateSl): con currentSlPx del MISMO lado, el trigger " +
+     "recomputado JAMÁS es peor — incluso en el resize donde el deseado crudo quedó por detrás", () => {
+    // Escenario resize: la hermana llenó tarde (posición 2×), el mark CAYÓ desde el anchor y el
+    // deseado crudo (sin clamp) queda por DEBAJO del SL vivo. rotateSl recomputa con
+    // currentSlPx = trigger viejo del mismo lado ⇒ el clamp monotónico lo usa como piso.
+    const oldSl = 1060;
+    const raw = computeDesiredSlTrigger({
+      side: "Long", entryPx: 1000, stopLossPct: 1, beMoved: true,
+      trailingEnabled: true, trailAnchorPx: 1100, trailingPct: 1,
+      currentSlPx: undefined, markPx: 1050, tickSize: 0.5,
+    });
+    expect(raw).toBeLessThan(oldSl);   // el crudo SERÍA peor (clamp a mark−tick = 1049.5)
+    const clamped = computeDesiredSlTrigger({
+      side: "Long", entryPx: 1000, stopLossPct: 1, beMoved: true,
+      trailingEnabled: true, trailAnchorPx: 1100, trailingPct: 1,
+      currentSlPx: oldSl, markPx: 1050, tickSize: 0.5,   // la llamada REAL de rotateSl
+    });
+    expect(clamped).toBe(oldSl);       // jamás retrocede para el mismo lado
+    // Espejo Short.
+    const clampedS = computeDesiredSlTrigger({
+      side: "Short", entryPx: 1000, stopLossPct: 1, beMoved: true,
+      trailingEnabled: true, trailAnchorPx: 900, trailingPct: 1,
+      currentSlPx: 940, markPx: 950, tickSize: 0.5,
+    });
+    expect(clampedS).toBe(940);
   });
 });

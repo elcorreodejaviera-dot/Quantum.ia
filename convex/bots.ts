@@ -411,14 +411,16 @@ export const getOrCreatePoolBot = mutation({
       // DURABLE (rearmStatus="pending") → el cron lo arma con reintento/backoff y deja el estado
       // visible ("Armando"/"bloqueado: motivo"). Se llega aquí solo SIN arm vivo (línea de arriba
       // lanza si hay arm y willBeActive). No tocar si ya está "running" (claim del cron en curso).
-      // (JAV-178) La rama trading NO agenda runAfter: processTradingRearms llega con el motor (PR3);
-      // hasta entonces el pending queda inerte y visible (el gate mainnetTradingApproved está OFF).
+      // (JAV-179-C3) Cada kind agenda SU cron de rearm inmediato (runAfter 0): il → processRearms,
+      // trading → processTradingRearms (el motor PR3 ya existe; el plan pide el primer armado sin
+      // esperar el tick de 1 min del cron).
       if ((kind === "il" || kind === "trading") && willBeActive && resultMode === false && !pausingActive && existingBot.rearmStatus !== "running") {
         await ctx.db.patch(existingBot._id, {
           rearmStatus: "pending", nextRearmAt: Date.now(), rearmAttempts: 0,
           lastRearmError: undefined, lastRearmErrorKind: undefined,
         });
         if (kind === "il") await ctx.scheduler.runAfter(0, internal.triggerEngine.processRearms, {});
+        else await ctx.scheduler.runAfter(0, internal.tradingEngine.processTradingRearms, {});
       }
       return existingBot._id;
     }
@@ -437,7 +439,11 @@ export const getOrCreatePoolBot = mutation({
       ...config,
       ...(armNow ? { rearmStatus: "pending", nextRearmAt: Date.now(), rearmAttempts: 0 } : {}),
     });
-    if (armNow && kind === "il") await ctx.scheduler.runAfter(0, internal.triggerEngine.processRearms, {});
+    if (armNow) {
+      // (JAV-179-C3) Kick inmediato del rearm por kind (espejo de la rama de update).
+      if (kind === "il") await ctx.scheduler.runAfter(0, internal.triggerEngine.processRearms, {});
+      else await ctx.scheduler.runAfter(0, internal.tradingEngine.processTradingRearms, {});
+    }
     return newBotId;
   },
 });

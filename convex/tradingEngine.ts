@@ -20,7 +20,7 @@ import {
 import {
   hlPriceTick, netEntryFills, resolveOcoRaceResolution, revalidateTopology,
   classifyEntryIocStatus, pickCloseReason, beLatchReached, decideSlReplacement, tradingRearmDelayMs,
-  positionSideFromSzi, decideSisterOutcome, decideDeadEntriesOutcome,
+  positionSideFromSzi, decideSisterOutcome, decideDeadEntriesOutcome, preHlGateCheck,
 } from "./tradingReconcileCore";
 import type { NetEntryFills } from "./tradingReconcileCore";
 
@@ -107,6 +107,21 @@ export const armTradingInternal = internalAction({
     const credential = await ctx.runQuery(internal.hlCredentials.getAccountByIdInternal, { id: bot.hlAccountId });
     if (!credential) throw new Error("[blocked_config] Cuenta HL no encontrada");
     if (credential.userId !== bot.userId) throw new Error("[blocked_config] La cuenta no pertenece al dueño del bot");
+
+    // (JAV-179-C1) Gates PRIMERA BARRERA: kill-switch/simulación/canLive/gate-mainnet ANTES de
+    // descifrar la clave, crear clientes o tocar cualquier endpoint HL/LP (contrato de orden del
+    // money-path — decisión pura preHlGateCheck, testeada). La reserva/CAS/gate lo revalidan después.
+    const [tradingConfig0, simConfig0] = await Promise.all([
+      ctx.runQuery(internal.systemConfig.getConfigInternal, { key: "tradingEnabled" }),
+      ctx.runQuery(internal.systemConfig.getConfigInternal, { key: "simulationMode" }),
+    ]);
+    const canLive0 = bot.userId ? await ctx.runQuery(internal.users.hasTradeLiveForUserInternal, { userId: bot.userId }) : false;
+    const mainnetGate0 = await ctx.runQuery(internal.tradingBots.getMainnetTradingApprovedInternal, {});
+    const gate0 = preHlGateCheck({
+      tradingEnabled: tradingConfig0?.value === true, simulationOff: simConfig0?.value === false,
+      canLive: canLive0 === true, network: hlNetwork(), mainnetApproved: mainnetGate0.approved,
+    });
+    if (gate0.ok === false) throw new Error(gate0.error);
 
     const pool = await ctx.runQuery(internal.pools.getPoolByIdInternal, { id: bot.poolId });
     if (!pool) throw new Error("[cancel] Pool no encontrado");
@@ -408,28 +423,28 @@ export const reconcileTradingArm = internalAction({
         return { skipped: "arming_too_recent" };
       }
 
-      const credential = await ctx.runQuery(internal.hlCredentials.getAccountByIdInternal, { id: data.arm.hlAccountId });
-      if (!credential) return { skipped: "no_credential" };
-      const user = credential.tradingAccountAddress as `0x${string}`;
-      const { info, exchange } = makeClients(decryptPrivateKey(credential), data.arm.network === "testnet");
-      const { assetId, szDecimals, markPx } = await getAssetMeta(info, data.arm.asset.toUpperCase());
-      const tickSize = hlPriceTick(markPx, szDecimals);
-
+      // (JAV-179-C1) Gates y BARRERA mainnet ANTES de descifrar la clave / crear clientes / tocar HL:
+      // con el gate cerrado, este reconcile NO alcanza ningún endpoint (barrera total literal).
       const [tradingConfig, simConfig] = await Promise.all([
         ctx.runQuery(internal.systemConfig.getConfigInternal, { key: "tradingEnabled" }),
         ctx.runQuery(internal.systemConfig.getConfigInternal, { key: "simulationMode" }),
       ]);
       const bot = await ctx.runQuery(internal.bots.getBotByIdInternal, { id: data.arm.botId });
       const canLive = await ctx.runQuery(internal.users.hasTradeLiveForUserInternal, { userId: data.arm.userId });
-      // Gate mainnet = BARRERA TOTAL: con el gate cerrado NO se toca HL (ni colocar ni cancelar/cerrar).
       const mainnetGate = await ctx.runQuery(internal.tradingBots.getMainnetTradingApprovedInternal, {});
       if (data.arm.network === "mainnet" && !mainnetGate.approved) return { skipped: "mainnet_trading_not_approved" };
+      const credential = await ctx.runQuery(internal.hlCredentials.getAccountByIdInternal, { id: data.arm.hlAccountId });
+      if (!credential) return { skipped: "no_credential" };
       const killed =
         tradingConfig?.value !== true || simConfig?.value === true ||
         !bot || !bot.active || bot.disarmPending === true || bot.simulationMode !== false ||
         hlNetwork() !== data.arm.network || (bot && bot.hlAccountId !== data.arm.hlAccountId) ||
         !canLive || credential.userId !== data.arm.userId;
       const wantDisarm = killed || data.arm.desiredState === "disarmed";
+      const user = credential.tradingAccountAddress as `0x${string}`;
+      const { info, exchange } = makeClients(decryptPrivateKey(credential), data.arm.network === "testnet");
+      const { assetId, szDecimals, markPx } = await getAssetMeta(info, data.arm.asset.toUpperCase());
+      const tickSize = hlPriceTick(markPx, szDecimals);
 
       // --- (P1) Relectura de fills de TODOS los cloids de entrada, SIEMPRE, antes de clasificar ---
       const entryRows = data.orders.filter((o: any) => o.role === "entry_upper" || o.role === "entry_lower" || o.role === "entry_market");
@@ -638,33 +653,46 @@ export const reconcileTradingArm = internalAction({
         // ROTACIÓN compartida place-antes-de-cancel vía slPendingCloid (revisión PR3: el resize/lado
         // usaba una recolocación plana que HUÉRFANABA el SL viejo vivo — fuera de tracking para
         // siempre). attempt SIEMPRE desde el arm FRESCO re-leído (jamás del snapshot del tick).
-        const rotateSl = async (oldCloid: string | undefined): Promise<"rotated" | "old_still_live" | "pending" | "lease_lost" | "collision"> => {
+        // (JAV-179-C2) El trigger se recomputa DENTRO con `currentSlPx` del SL vivo del MISMO lado:
+        // computeDesiredSlTrigger lo clampa monotónico ⇒ por construcción jamás se coloca un SL peor
+        // para el mismo lado (incluye el path de resize, que no pasa por decideSlReplacement).
+        const rotateSl = async (o: {
+          oldCloid?: string; side: "Long" | "Short"; size: number;
+          currentSlPxSameSide?: number; bare?: boolean;   // bare: solo SL base (3b — sin BE/trailing)
+        }): Promise<"rotated" | "old_still_live" | "pending" | "lease_lost" | "collision"> => {
           const freshData = await ctx.runQuery(internal.tradingBots.getTradingArmInternal, { armId });
           if (!freshData) return "lease_lost";
           const newAttempt = (freshData.arm.slAttempts ?? 0) + 1;
           const newCloid = await toHlCloid(tradingCloidInput(String(armId), arm.generation, "sl", newAttempt));
           // Guard anti-colisión (bloqueante #1): si el cloid "nuevo" ES el SL vivo actual (attempt
           // stale), abortar — jamás cancelar el único SL creyendo que es el viejo.
-          if (oldCloid && newCloid.toLowerCase() === oldCloid.toLowerCase()) return "collision";
+          if (o.oldCloid && newCloid.toLowerCase() === o.oldCloid.toLowerCase()) return "collision";
+          const trigger = computeDesiredSlTrigger({
+            side: o.side, entryPx: posEntryPx, stopLossPct: arm.stopLossPct,
+            beMoved: o.bare ? false : beMovedNow,
+            trailingEnabled: o.bare ? false : trailingEnabled,
+            trailAnchorPx: anchorNow, trailingPct: arm.trailingPct ?? 0,
+            currentSlPx: o.currentSlPxSameSide, markPx, tickSize,
+          });
           let placed = await openByCloid(info, user, newCloid);
           if (!placed) {
             const renewT = await ctx.runMutation(internal.tradingBots.renewTradingReconcile, { armId, token });
             if (!renewT.ok) return "lease_lost";
             await ctx.runMutation(internal.tradingBots.setTradingSlPendingCloid, { armId, token, cloid: newCloid });
             try {
-              const rt = await placeStopLoss(exchange, assetId, szDecimals, side, sizeToProtect, posEntryPx, arm.stopLossPct, newCloid as `0x${string}`, desiredNow);
+              const rt = await placeStopLoss(exchange, assetId, szDecimals, o.side, o.size, posEntryPx, arm.stopLossPct, newCloid as `0x${string}`, trigger);
               placed = rt.state === "resting" || rt.state === "filled";
             } catch { placed = false; }
           }
           if (!placed) return "pending";   // slPendingCloid trackea el intento; reintento próximo ciclo
-          if (oldCloid) {
-            await cancelOwnByCloid(exchange, assetId, [oldCloid]);
-            const oldDead = !(await openByCloid(info, user, oldCloid));
+          if (o.oldCloid) {
+            await cancelOwnByCloid(exchange, assetId, [o.oldCloid]);
+            const oldDead = !(await openByCloid(info, user, o.oldCloid));
             if (!oldDead) return "old_still_live";   // el nuevo queda trackeado vía slPendingCloid
           }
           await ctx.runMutation(internal.tradingBots.recordTradingSlOrder, {
-            armId, token, cloid: newCloid, triggerPx: desiredNow, size: sizeToProtect,
-            isBuy: side === "Short", observedStatus: "open", markSubmitted: true, attempt: newAttempt,
+            armId, token, cloid: newCloid, triggerPx: trigger, size: o.size,
+            isBuy: o.side === "Short", observedStatus: "open", markSubmitted: true, attempt: newAttempt,
           });
           await ctx.runMutation(internal.tradingBots.setTradingSlPendingCloid, { armId, token, cloid: null });
           // SL resting confirmado ⇒ ventana de protección CERRADA (deadline fuera).
@@ -684,7 +712,11 @@ export const reconcileTradingArm = internalAction({
             // (jamás recolocación plana que huérfana al vivo — revisión PR3 high #2).
             const wrongSide = slOrder.isBuy !== (side === "Short");
             if ((realSize > slOrder.size * 1.02 || wrongSide) && desiredNow > 0) {
-              const r = await rotateSl(slOrder.cloid);
+              // (C2) mismo lado ⇒ el trigger viejo entra como piso monotónico; lado invertido ⇒ no aplica.
+              const r = await rotateSl({
+                oldCloid: slOrder.cloid, side, size: sizeToProtect,
+                currentSlPxSameSide: wrongSide ? undefined : slOrder.triggerPx,
+              });
               if (r === "rotated") { slPlacedThisTick = true; }
               else if (r === "lease_lost") return { skipped: "lease_lost" };
               // pending/old_still_live/collision: el viejo sigue protegiendo (o pendiente trackeado);
@@ -724,7 +756,7 @@ export const reconcileTradingArm = internalAction({
             return { result: "emergency_closing" };
           }
           if (desiredNow > 0) {
-            const r = await rotateSl(undefined);   // colocación fresca (sin viejo que cancelar)
+            const r = await rotateSl({ side, size: sizeToProtect });   // colocación fresca (sin viejo)
             if (r === "rotated") { slProtected = true; slPlacedThisTick = true; }
             else if (r === "lease_lost") return { skipped: "lease_lost" };
             else {
@@ -785,7 +817,12 @@ export const reconcileTradingArm = internalAction({
             && freshSlRow.size >= res.size * 0.98
             && await openByCloid(info, user, freshSlRow.cloid);
           if (!slCovers && !slPlacedThisTick) {
-            const r = await rotateSl(freshSlRow?.cloid);
+            // (C2) SL de PROTECCIÓN pura (bare: sin BE/trailing) al lado/size del szi FRESCO del 3b.
+            const r = await rotateSl({
+              oldCloid: freshSlRow?.cloid, side: res.side, size: floorToDecimals(res.size, szDecimals),
+              currentSlPxSameSide: (freshSlRow && freshSlRow.isBuy === (res.side === "Short")) ? freshSlRow.triggerPx : undefined,
+              bare: true,
+            });
             if (r === "lease_lost") return { skipped: "lease_lost" };
             if (r !== "rotated") return { result: "oco_race_protecting" };   // primero proteger; IOC el próximo paso/ciclo
           }
@@ -888,7 +925,7 @@ export const reconcileTradingArm = internalAction({
           if (freshSl && freshSl.observedStatus === "open") {
             const dec = decideSlReplacement({ side, desiredPx: desiredNow, currentSlPx: freshSl.triggerPx, tickSize, lastSlReplaceAt: arm.lastSlReplaceAt, now: Date.now() });
             if (dec.replace) {
-              const r = await rotateSl(freshSl.cloid);
+              const r = await rotateSl({ oldCloid: freshSl.cloid, side, size: sizeToProtect, currentSlPxSameSide: freshSl.triggerPx });
               if (r === "lease_lost") return { skipped: "lease_lost" };
               if (r === "rotated") return { result: "sl_ratcheted" };
               if (r === "old_still_live") return { result: "sl_rotation_old_still_live" };

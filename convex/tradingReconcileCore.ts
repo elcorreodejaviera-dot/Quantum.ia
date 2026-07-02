@@ -168,6 +168,26 @@ export function decideSlReplacement(params: {
   return { replace: true, reason: "ratchet avanza" };
 }
 
+// --- (JAV-179-C1) Gates PRIMERA BARRERA antes de tocar HL --------------------------------------------
+// El orden del money-path exige kill-switch/simulación/canLive/gate-mainnet ANTES de descifrar la
+// clave, crear clientes o leer HL/LP. Pura para que el contrato de ORDEN tenga test (la node action
+// no entra al harness). El caller lanza/skipea con el error devuelto.
+export function preHlGateCheck(input: {
+  tradingEnabled: boolean; simulationOff: boolean; canLive: boolean;
+  network: string; mainnetApproved: boolean;
+}): { ok: true } | { ok: false; error: string } {
+  if (!input.tradingEnabled || !input.simulationOff) {
+    return { ok: false, error: "[cancel] Kill-switch global apagado o simulación activa: el motor no opera." };
+  }
+  if (!input.canLive) {
+    return { ok: false, error: "[blocked_config] canTradeLive revocado: armado bloqueado." };
+  }
+  if (input.network === "mainnet" && !input.mainnetApproved) {
+    return { ok: false, error: "[blocked_config] mainnetTradingApproved OFF: barrera total de mainnet." };
+  }
+  return { ok: true };
+}
+
 // --- Lado REAL de la posición: el SIGNO del szi manda (P1) -------------------------------------------
 // Un neteo por fill tardío puede INVERTIR el lado: el SL jamás se deriva del filledSide previo.
 export function positionSideFromSzi(szi: number): TradingSide {

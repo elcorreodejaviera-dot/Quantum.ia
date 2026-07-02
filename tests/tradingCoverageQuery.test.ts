@@ -100,10 +100,13 @@ describe("getMyCoverageUsage — verdad server-side (P5)", () => {
     expect(res!.cap).toBe(50_000);   // el cap se conserva; la barra muestra "revisión requerida"
   });
 
-  it("(JAV-180-C1) fila viva no cuantificable ⇒ quantifiable:false; NINGÚN otro error se traga", async () => {
+  it("(JAV-180-C1) un dato cuantificable NO se degrada a quantifiable:false (el catch no dispara de más)", async () => {
     // El único degrade permitido es el [blocked_config] de consumedCoverageByKey (fila viva sin dato
-    // fiable). Ese caso ⇒ quantifiable:false (ya cubierto arriba). Aquí se afirma el contrario: un
-    // total normal NO es quantifiable:false, garantizando que el catch no lo dispara de más.
+    // fiable), ya cubierto arriba. Aquí se afirma el complemento: con datos cuantificables la query
+    // devuelve quantifiable:true. La PROPAGACIÓN de errores no-[blocked_config] la garantiza el regex
+    // del catch en subscriptions.ts (no es forzable con datos sembrados: consumedCoverageByKey solo
+    // lanza [blocked_config] por diseño; cualquier otra excepción vendría de un fallo real de
+    // query/schema que no se puede inyectar limpio en convex-test).
     const t = makeConvexTest();
     await t.run(async (ctx) => {
       const userId = await seedUserWithPlan(ctx, "pro");

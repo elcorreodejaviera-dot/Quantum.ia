@@ -211,11 +211,15 @@ export default defineSchema({
     rearmAttempts: v.optional(v.number()),
     lastRearmError: v.optional(v.string()),
     lastRearmErrorKind: v.optional(v.union(
-      v.literal("transient"), v.literal("blocked_margin"),
+      v.literal("transient"), v.literal("blocked_margin"), v.literal("blocked_cap"),
       v.literal("blocked_config"), v.literal("retry_incompatible"))),
     rearmLeaseToken: v.optional(v.string()),
     rearmLeaseUntil: v.optional(v.number()),
     consecutiveStops: v.optional(v.number()),     // SL consecutivos → alerta de whipsaw a los 5
+    // (JAV-178, decisión 6b) Re-entradas a MERCADO consecutivas del bot de trading (fuera de rango,
+    // espejo JAV-111): escala el cooldown del rearm 5→15→30→60 min; reset al reservar por camino OCO
+    // (mark dentro del rango) o al cerrar por TP. Solo kind:"trading".
+    marketReentryStreak: v.optional(v.number()),
     stopAlertSentAt: v.optional(v.number()),      // último envío de alerta de stops
     lastStopAlertLevel: v.optional(v.number()),   // nivel de stops ya alertado (solo se sube tras Resend OK)
     // Órdenes trigger/límit colocadas en HL (Fase 3). oids para modificar/cancelar.
@@ -742,7 +746,7 @@ export default defineSchema({
     rearmAttempts: v.optional(v.number()),
     lastRearmError: v.optional(v.string()),
     lastRearmErrorKind: v.optional(v.union(
-      v.literal("transient"), v.literal("blocked_margin"),
+      v.literal("transient"), v.literal("blocked_margin"), v.literal("blocked_cap"),
       v.literal("blocked_config"), v.literal("retry_incompatible"))),
     rearmLeaseToken: v.optional(v.string()),
     rearmLeaseUntil: v.optional(v.number()),

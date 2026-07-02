@@ -394,6 +394,19 @@ export const closeBotPosition = action({
     if (!bot.hlAccountId) throw new Error("El bot no tiene cuenta HL vinculada.");
     if (!bot.baseAsset) throw new Error("El bot no tiene activo base.");
 
+    // (JAV-178 / JAV-176-P2) Política PROPIA para bots de TRADING: esta ruta NO pasa por
+    // reserveExecution (llama closePositionEmergency directo, que aplana Y cancela TODAS las órdenes
+    // del coin) — con un arm de trading vivo cancelaría entradas/SL/TPs del motor por fuera de su
+    // máquina de estados y el rearm re-entraría tras un cierre manual. Con arm vivo ⇒ RECHAZO: la vía
+    // correcta es PAUSAR el bot (el disarm del motor cierra ordenado: IOC reduce-only + SL vivo hasta
+    // flat). Los bots IL conservan su comportamiento actual (convivir con trigger_arms es por diseño).
+    if (bot.kind === "trading") {
+      const tr = await ctx.runQuery(internal.tradingBots.hasNonTerminalTradingArmForBotInternal, { botId });
+      if (tr?.live) {
+        throw new Error("El bot de trading tiene un armado vivo; pausá el bot para cerrar de forma ordenada (el motor cancela y cierra con SL activo hasta quedar flat).");
+      }
+    }
+
     // (CodeRabbit #3) closePositionEmergency aplana TODA la posición del activo de la cuenta. Sigue
     // siendo seguro tras JAV-102: aunque una cuenta puede tener varias coberturas, getOrCreatePoolBot
     // garantiza UN ÚNICO bot por (cuenta, baseAsset) → la posición de ESTE activo en esta cuenta

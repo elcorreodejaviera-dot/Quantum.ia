@@ -624,6 +624,8 @@ export const settleSpotDefenseRearm = internalMutation({
     // un diagnóstico (espeja el `lastRearmErrorKind` del motor de pools). Sin prefijo conocido → transient.
     const errorKind = !error ? undefined
       : error.includes("[blocked_margin]") ? "blocked_margin" as const
+      // (JAV-178) blocked_cap ANTES del catch-all "[blocked": el tope de plan conserva su kind propio.
+      : error.includes("[blocked_cap]") ? "blocked_cap" as const
       : error.includes("[blocked_config]") || error.includes("[blocked") ? "blocked_config" as const
       : error.includes("[retry_incompatible]") ? "retry_incompatible" as const
       : "transient" as const;

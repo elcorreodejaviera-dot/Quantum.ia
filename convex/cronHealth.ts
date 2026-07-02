@@ -120,6 +120,21 @@ export const processRearmsWithHealth = internalAction({
     () => ctx.runAction(internal.triggerEngine.processRearms, {})),
 });
 
+// (JAV-179) Crons del 4º motor (Bot Trading): reconcile de arms + auto-rearm durable.
+// Promise<any>: corta el ciclo de inferencia TS2589 (tradingEngine se auto-referencia vía
+// internal.* — reconcileAll→reconcileArm, arm→arm stale-retry — y este wrapper añade otra arista).
+export const reconcileTradingArmsWithHealth = internalAction({
+  args: {},
+  handler: async (ctx): Promise<any> => withCronHealth(ctx, "reconcile trading arms",
+    () => ctx.runAction(internal.tradingEngine.reconcileAllTrading, {})),
+});
+
+export const processTradingRearmsWithHealth = internalAction({
+  args: {},
+  handler: async (ctx): Promise<any> => withCronHealth(ctx, "process trading rearms",
+    () => ctx.runAction(internal.tradingEngine.processTradingRearms, {})),
+});
+
 // (JAV-92) Reconcile del motor Spot Grid (money-path): coloca/mantiene órdenes reales bajo lease.
 export const reconcileSpotGridWithHealth = internalAction({
   args: {},

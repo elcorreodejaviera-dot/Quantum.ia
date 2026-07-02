@@ -432,14 +432,22 @@ export const reconcileTradingArm = internalAction({
       const bot = await ctx.runQuery(internal.bots.getBotByIdInternal, { id: data.arm.botId });
       const canLive = await ctx.runQuery(internal.users.hasTradeLiveForUserInternal, { userId: data.arm.userId });
       const mainnetGate = await ctx.runQuery(internal.tradingBots.getMainnetTradingApprovedInternal, {});
-      if (data.arm.network === "mainnet" && !mainnetGate.approved) return { skipped: "mainnet_trading_not_approved" };
+      // (CodeRabbit #145 Major / JAV-179-C1) GATES DUROS = PRIMERA barrera: kill-switch / simulación /
+      // canLive / red / gate-mainnet cortan ANTES de descifrar la clave, crear clientes o tocar HL —
+      // ni siquiera para desarmar (con la barrera cerrada NO se opera en HL; una pausa espera a que
+      // reabra). Nada de esto puede depender de `wantDisarm`.
+      const hardGateClosed =
+        tradingConfig?.value !== true || simConfig?.value === true ||
+        !canLive || hlNetwork() !== data.arm.network ||
+        (data.arm.network === "mainnet" && !mainnetGate.approved);
+      if (hardGateClosed) return { skipped: "trading_gate_closed" };
       const credential = await ctx.runQuery(internal.hlCredentials.getAccountByIdInternal, { id: data.arm.hlAccountId });
       if (!credential) return { skipped: "no_credential" };
+      if (credential.userId !== data.arm.userId) return { skipped: "credential_owner_mismatch" };
+      // `killed` (blando): estado del bot que motiva un DESARME ordenado (sí toca HL para cerrar/cancelar).
       const killed =
-        tradingConfig?.value !== true || simConfig?.value === true ||
         !bot || !bot.active || bot.disarmPending === true || bot.simulationMode !== false ||
-        hlNetwork() !== data.arm.network || (bot && bot.hlAccountId !== data.arm.hlAccountId) ||
-        !canLive || credential.userId !== data.arm.userId;
+        bot.hlAccountId !== data.arm.hlAccountId;
       const wantDisarm = killed || data.arm.desiredState === "disarmed";
       const user = credential.tradingAccountAddress as `0x${string}`;
       const { info, exchange } = makeClients(decryptPrivateKey(credential), data.arm.network === "testnet");
@@ -704,23 +712,29 @@ export const reconcileTradingArm = internalAction({
         let slAlive = false, slProtected = false, slPlacedThisTick = false;
         if (slOrder) {
           if (await openByCloid(info, user, slOrder.cloid)) {
-            slAlive = true; slProtected = true;
+            slAlive = true;
             if (slOrder.observedStatus !== "open") {
               await ctx.runMutation(internal.tradingBots.setTradingOrderObserved, { armId, token, role: "sl", observedStatus: "open" });
             }
+            // (CodeRabbit #145 Critical) slProtected SOLO si el SL vivo cubre lado Y tamaño reales: un
+            // SL del lado equivocado o menor que la posición NO protege ⇒ no marcar protected ni cerrar
+            // el deadline hasta que la rotación coloque el correcto.
+            const wrongSide = slOrder.isBuy !== (side === "Short");
+            const undersized = realSize > slOrder.size * 1.02;
+            slProtected = !wrongSide && !undersized;
             // SL nunca menor que la posición ni del lado equivocado ⇒ ROTACIÓN place-antes-de-cancel
             // (jamás recolocación plana que huérfana al vivo — revisión PR3 high #2).
-            const wrongSide = slOrder.isBuy !== (side === "Short");
-            if ((realSize > slOrder.size * 1.02 || wrongSide) && desiredNow > 0) {
+            if ((undersized || wrongSide) && desiredNow > 0) {
               // (C2) mismo lado ⇒ el trigger viejo entra como piso monotónico; lado invertido ⇒ no aplica.
               const r = await rotateSl({
                 oldCloid: slOrder.cloid, side, size: sizeToProtect,
                 currentSlPxSameSide: wrongSide ? undefined : slOrder.triggerPx,
               });
-              if (r === "rotated") { slPlacedThisTick = true; }
+              if (r === "rotated") { slProtected = true; slPlacedThisTick = true; }
               else if (r === "lease_lost") return { skipped: "lease_lost" };
-              // pending/old_still_live/collision: el viejo sigue protegiendo (o pendiente trackeado);
-              // el próximo ciclo completa el swap.
+              // pending/old_still_live/collision: el SL correcto aún NO está resting ⇒ NO avanzar a
+              // protected/TPs/3b este tick con un SL insuficiente vivo; reintento el próximo ciclo.
+              else return { result: "sl_reprotecting" };
             }
           } else if (slOrder.observedStatus === "pending" && slOrder.submittedAt != null
             && Date.now() - slOrder.submittedAt <= ORDER_SUBMIT_GRACE_MS) {
@@ -816,7 +830,12 @@ export const reconcileTradingArm = internalAction({
             && freshSlRow.isBuy === (res.side === "Short")
             && freshSlRow.size >= res.size * 0.98
             && await openByCloid(info, user, freshSlRow.cloid);
-          if (!slCovers && !slPlacedThisTick) {
+          if (!slCovers) {
+            // (CodeRabbit #145 Critical) Si el SL vivo NO cubre el residuo/lado FRESCO, JAMÁS avanzar
+            // al IOC — aunque se haya colocado un SL este mismo tick (podría ser del size/lado viejos):
+            // proteger primero, cerrar después. Sin esto, un IOC que falla deja la posición oco_race
+            // con un SL insuficiente o del lado anterior.
+            if (slPlacedThisTick) return { result: "oco_race_protecting" };
             // (C2) SL de PROTECCIÓN pura (bare: sin BE/trailing) al lado/size del szi FRESCO del 3b.
             const r = await rotateSl({
               oldCloid: freshSlRow?.cloid, side: res.side, size: floorToDecimals(res.size, szDecimals),

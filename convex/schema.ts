@@ -848,4 +848,120 @@ export default defineSchema({
     .index("by_arm_role", ["armId", "role"])
     .index("by_arm_role_index", ["armId", "role", "tpIndex"])
     .index("by_cloid", ["cloid"]),
+
+  // (JAV-177) Un "armado" del bot de TRADING (breakout OCO sobre el rango LP, kind:"trading" en
+  // `bots`). Modelo spot_defense_arms generalizado a 2 entradas OCO Long/Short + trailing + camino
+  // entry_market (decisión 6). Snapshot inmutable de la intención + lease/fencing. El motor llega
+  // en PR2/PR3; estas tablas son inertes hasta entonces.
+  trading_arms: defineTable({
+    botId: v.id("bots"),
+    userId: v.id("users"),
+    hlAccountId: v.id("hl_api_credentials"),
+    poolId: v.id("pools"),
+    asset: v.string(),
+    network: v.string(),                       // INMUTABLE — el cliente de cancelación se construye de aquí
+    generation: v.number(),                    // +1 por arranque/re-arm (idempotencia de cloids)
+    status: v.union(
+      v.literal("arming"), v.literal("submitting"), v.literal("armed"), v.literal("disarming"),
+      v.literal("disarmed"), v.literal("filled"), v.literal("protecting"), v.literal("protected"),
+      v.literal("closed"), v.literal("failed"), v.literal("unknown"),
+      v.literal("manual_intervention")),
+    desiredState: v.union(v.literal("armed"), v.literal("disarmed")),
+    // Snapshot de config/rango al armar (la config viva sigue en `bots`).
+    direction: v.union(v.literal("long_short"), v.literal("long"), v.literal("short")),
+    lowerEdge: v.number(),
+    upperEdge: v.number(),
+    preTriggerPct: v.optional(v.number()),
+    // Triggers normalizados al tick. OPCIONALES (V2-P2): un arm entry_market no tiene triggers —
+    // los bordes leídos quedan arriba como dato informativo.
+    lowerTriggerPx: v.optional(v.number()),
+    upperTriggerPx: v.optional(v.number()),
+    // Sizing/reserva. legsFactor: reserva worst-case por modo (long_short=1; long/short=2 hasta
+    // confirmar OCO; entry_market=1 SIEMPRE). coverageNotionalUsd = effectiveNotionalUsd×legsFactor
+    // VIVO (consumo del cap del plan; reduceTradingReservation lo baja a 1× al confirmar OCO).
+    size: v.number(),
+    appliedLeverage: v.number(),
+    legsFactor: v.number(),
+    reservedNotional: v.number(),
+    marginReserved: v.number(),
+    requestedNotionalUsd: v.optional(v.number()),
+    effectiveNotionalUsd: v.optional(v.number()),
+    coverageNotionalUsd: v.optional(v.number()),
+    reservationReduced: v.optional(v.boolean()),
+    ocoConfirmed: v.optional(v.boolean()),
+    // Fill de entrada. filledEntryRole incluye entry_market (decisión 6); filledSide es la fuente
+    // del LADO (en long_short el neto puede requerir SL del lado del SIGNO releído — P1).
+    filledEntryRole: v.optional(v.union(
+      v.literal("entry_upper"), v.literal("entry_lower"), v.literal("entry_market"))),
+    filledSide: v.optional(v.union(v.literal("Long"), v.literal("Short"))),
+    filledSize: v.optional(v.number()),
+    entryPrice: v.optional(v.number()),
+    filledAt: v.optional(v.number()),
+    // SL / breakeven / trailing (pieza nueva). slPendingCloid generaliza bePendingCloid: rotación
+    // place-antes-de-cancel de CUALQUIER recolocación del SL (BE y trailing).
+    stopLossPct: v.number(),
+    breakevenPct: v.optional(v.number()),
+    beMoved: v.optional(v.boolean()),
+    trailingPct: v.optional(v.number()),
+    trailAnchorPx: v.optional(v.number()),
+    lastSlReplaceAt: v.optional(v.number()),
+    slPendingCloid: v.optional(v.string()),
+    tps: v.optional(v.array(v.object({ gainPct: v.number(), closePct: v.number() }))),
+    slAttempts: v.optional(v.number()),
+    slSubmittedAt: v.optional(v.number()),
+    protectDeadline: v.optional(v.number()),
+    // Confirmaciones de cierre/drift (2 lecturas + grace, patrón spot defense).
+    closeConfirmSince: v.optional(v.number()),
+    driftConfirmSince: v.optional(v.number()),
+    closeReason: v.optional(v.union(
+      v.literal("sl"), v.literal("tp"), v.literal("oco_race"), v.literal("manual"),
+      v.literal("emergency"), v.literal("disarm"))),
+    emergencyClosing: v.optional(v.union(v.literal("emergency"), v.literal("disarm"))),
+    // ciclo de vida / lease / fencing
+    submittedAt: v.optional(v.number()),
+    error: v.optional(v.string()),
+    fromRearm: v.optional(v.boolean()),
+    reconcileLeaseToken: v.optional(v.string()),
+    reconcileLeaseUntil: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_bot_generation", ["botId", "generation"])
+    .index("by_bot_status", ["botId", "status"])
+    .index("by_status_updated", ["status", "updatedAt"])
+    .index("by_user_status", ["userId", "status"])   // coverage (consumedCoverageByKey)
+    .index("by_account", ["hlAccountId"])            // margen comprometido por cuenta
+    .index("by_updated", ["updatedAt"]),
+
+  // (JAV-177) Cada orden nativa de un arm de trading. CLOID = identidad primaria determinista
+  // (tradingCloidInput). Precios por SEMÁNTICA (V2-P2): triggerPx SOLO en roles trigger
+  // (entry_upper/entry_lower/sl/tp); limitPx = el límite realmente enviado (banda agresiva de las
+  // entradas trigger y de la IOC en entry_market/close, que NO llevan triggerPx).
+  trading_orders: defineTable({
+    armId: v.id("trading_arms"),
+    role: v.union(
+      v.literal("entry_upper"), v.literal("entry_lower"), v.literal("entry_market"),
+      v.literal("sl"), v.literal("tp"), v.literal("close")),
+    tpIndex: v.optional(v.number()),           // solo role:"tp" (0..N-1) — unicidad por (armId,"tp",tpIndex)
+    isBuy: v.boolean(),
+    cloid: v.string(),
+    oid: v.optional(v.string()),
+    triggerPx: v.optional(v.number()),
+    limitPx: v.optional(v.number()),
+    size: v.number(),
+    reduceOnly: v.boolean(),
+    attempt: v.optional(v.number()),
+    observedStatus: v.union(
+      v.literal("pending"), v.literal("open"), v.literal("triggered"), v.literal("filled"),
+      v.literal("canceled"), v.literal("rejected"), v.literal("unknown")),
+    submittedAt: v.optional(v.number()),
+    // Marca de "PREPARADO" (justo antes del RPC) — mismo grace de recovery que spot_defense_orders:
+    // una fila pending sin submittedAt pudo aceptarse en HL; no rotar el cloid hasta muerte estable.
+    preparedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_arm_role", ["armId", "role"])
+    .index("by_arm_role_index", ["armId", "role", "tpIndex"])
+    .index("by_cloid", ["cloid"]),
 });

@@ -87,3 +87,41 @@ export function spotDefenseCloidInput(
   const idx = kind === "tp" ? `:${tpIndex}` : "";
   return `spot-defense:${botId}:${generation}:${kind}${idx}:${attempt}`;
 }
+
+// (JAV-177) ROL de la orden del bot de TRADING (breakout OCO sobre rango LP). `entry_upper`/
+// `entry_lower` = par OCO de triggers; `entry_market` = entrada IOC a mercado cuando el mark ya está
+// fuera del rango (decisión 6, espejo JAV-111); `sl` = stop loss post-fill (rota por attempt vía
+// slPendingCloid); `tp` = take-profits parciales; `close` = cierre IOC reduce-only (emergencia /
+// oco_race / disarm) — con cloid determinista, mejora vs spot defense.
+export type TradingCloidKind = "entry_upper" | "entry_lower" | "entry_market" | "sl" | "tp" | "close";
+
+/**
+ * Cloid determinista de una orden del bot de trading. Namespace `trading:` DISJUNTO de los otros
+ * motores (spot-defense:/grid/pool). El input incluye `armId` + `generation` (sube por re-arm) para
+ * que un re-arm nunca colisione por `by_cloid` con órdenes del arm anterior; `attempt` rota SL/TP/
+ * close al recolocar (confirmar-antes-de-rotar); `tpIndex` solo con `kind="tp"` (unicidad por TP),
+ * con el mismo endurecimiento que spotDefenseCloidInput.
+ */
+export function tradingCloidInput(
+  armId: string,
+  generation: number,
+  kind: TradingCloidKind,
+  attempt: number = 0,
+  tpIndex?: number,
+): string {
+  if (kind === "tp") {
+    if (tpIndex === undefined || !Number.isInteger(tpIndex) || tpIndex < 0) {
+      throw new Error(`tradingCloidInput: role "tp" requiere tpIndex entero ≥ 0 (recibido ${tpIndex}).`);
+    }
+  } else if (tpIndex !== undefined) {
+    throw new Error(`tradingCloidInput: tpIndex solo aplica a role "tp" (recibido para "${kind}").`);
+  }
+  if (!Number.isInteger(generation) || generation < 0) {
+    throw new Error(`tradingCloidInput: generation debe ser entero ≥ 0 (recibido ${generation}).`);
+  }
+  if (!Number.isInteger(attempt) || attempt < 0) {
+    throw new Error(`tradingCloidInput: attempt debe ser entero ≥ 0 (recibido ${attempt}).`);
+  }
+  const idx = kind === "tp" ? `:${tpIndex}` : "";
+  return `trading:${armId}:${generation}:${kind}${idx}:${attempt}`;
+}

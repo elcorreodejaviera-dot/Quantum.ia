@@ -2,7 +2,8 @@ import { internalQuery, mutation, query } from "./_generated/server";
 import type { MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { v } from "convex/values";
-import { requireAdmin, writeAdminLog } from "./helpers";
+import { requireAdmin, writeAdminLog, getUserOrNull } from "./helpers";
+import { consumedCoverageByKey } from "./coverageUsage";
 
 // --- Planes de cobertura (JAV-73) — FUENTE ÚNICA de verdad ---
 //
@@ -46,6 +47,43 @@ function viewFor(user: { subscriptionPlan?: string; suspended?: boolean }): Subs
 export const listPlans = query({
   args: {},
   handler: async () => PLANS.map((p) => ({ ...p })),
+});
+
+// (JAV-180 / P5) Uso de cobertura REAL server-side, la MISMA verdad que el enforcement
+// (consumedCoverageByKey + cap del plan). SubscriptionBar lo consume en vez de estimar en cliente
+// deduplicando por poolId (que ignoraba la clave `trading:<botId>` y mostraba headroom mientras el
+// server bloqueaba). `quantifiable:false` cuando una fila viva no es cuantificable
+// (assertWithinPlanCoverageForKey lanza [blocked_config]) ⇒ la barra muestra "revisión requerida",
+// NUNCA un 0 engañoso. Admin = acceso total (cap Infinity, sin bloqueo).
+export const getMyCoverageUsage = query({
+  args: {},
+  handler: async (ctx): Promise<{
+    total: number; cap: number; quantifiable: boolean;
+    byKey: { key: string; usd: number }[]; suspended: boolean; hasPlan: boolean; isAdmin: boolean;
+  } | null> => {
+    const user = await getUserOrNull(ctx);
+    if (!user) return null;
+    if (user.role === "admin") {
+      return { total: 0, cap: Infinity, quantifiable: true, byKey: [], suspended: false, hasPlan: true, isAdmin: true };
+    }
+    const suspended = user.suspended === true;
+    const plan = getPlan(user.subscriptionPlan);
+    const cap = plan?.coverageCapUsd ?? 0;
+    try {
+      const map = await consumedCoverageByKey(ctx, user._id);
+      const byKey = [...map.entries()].map(([key, usd]) => ({ key, usd }));
+      const total = byKey.reduce((s, e) => s + e.usd, 0);
+      return { total, cap, quantifiable: true, byKey, suspended, hasPlan: plan !== null, isAdmin: false };
+    } catch (e) {
+      // (JAV-180-C1) SOLO el [blocked_config] de una fila viva no cuantificable (requiere backfill/
+      // drain) se degrada a quantifiable:false — la barra lo muestra explícito. Cualquier OTRO error
+      // (regresión de query/schema/índice) se PROPAGA: taparlo como "revisión requerida" ocultaría
+      // un bug real de cobertura.
+      const msg = String((e as Error)?.message ?? e);
+      if (!/\[blocked_config\]/.test(msg)) throw e;
+      return { total: 0, cap, quantifiable: false, byKey: [], suspended, hasPlan: plan !== null, isAdmin: false };
+    }
+  },
 });
 
 // Suscripción del usuario AUTENTICADO (para SubscriptionBar, JAV-76). Null SOLO si no hay sesión o

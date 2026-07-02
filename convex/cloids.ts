@@ -48,6 +48,29 @@ export function spotGridCloidInput(
   return kind === "grid" ? base : `${kind}:${base}`;
 }
 
+// (JAV-177, nitpick CodeRabbit #143) Validaciones COMPARTIDAS de los generadores de cloid con roles
+// tp/generation/attempt (spot-defense y trading). Son críticas para evitar colisiones de `by_cloid`
+// entre motores: un endurecimiento futuro se aplica aquí UNA vez, no por generador. `prefix` = nombre
+// de la función que valida (mensajes byte-idénticos a los históricos).
+function validateCloidRoleIndex(prefix: string, kind: string, tpIndex: number | undefined): void {
+  if (kind === "tp") {
+    if (tpIndex === undefined || !Number.isInteger(tpIndex) || tpIndex < 0) {
+      throw new Error(`${prefix}: role "tp" requiere tpIndex entero ≥ 0 (recibido ${tpIndex}).`);
+    }
+  } else if (tpIndex !== undefined) {
+    throw new Error(`${prefix}: tpIndex solo aplica a role "tp" (recibido para "${kind}").`);
+  }
+}
+
+function validateGenerationAttempt(prefix: string, generation: number, attempt: number): void {
+  if (!Number.isInteger(generation) || generation < 0) {
+    throw new Error(`${prefix}: generation debe ser entero ≥ 0 (recibido ${generation}).`);
+  }
+  if (!Number.isInteger(attempt) || attempt < 0) {
+    throw new Error(`${prefix}: attempt debe ser entero ≥ 0 (recibido ${attempt}).`);
+  }
+}
+
 // (JAV-107) ROL de la orden del bot de defensa SPOT. `entry` = la única orden trigger SELL que abre el
 // short de cobertura; `sl` = stop loss post-fill; `tp` = take-profits parciales (reduceOnly). Mismo
 // patrón que el motor de triggers de pool, pero con UNA sola entrada.
@@ -71,19 +94,8 @@ export function spotDefenseCloidInput(
   attempt: number = 0,
   tpIndex?: number,
 ): string {
-  if (kind === "tp") {
-    if (tpIndex === undefined || !Number.isInteger(tpIndex) || tpIndex < 0) {
-      throw new Error(`spotDefenseCloidInput: role "tp" requiere tpIndex entero ≥ 0 (recibido ${tpIndex}).`);
-    }
-  } else if (tpIndex !== undefined) {
-    throw new Error(`spotDefenseCloidInput: tpIndex solo aplica a role "tp" (recibido para "${kind}").`);
-  }
-  if (!Number.isInteger(generation) || generation < 0) {
-    throw new Error(`spotDefenseCloidInput: generation debe ser entero ≥ 0 (recibido ${generation}).`);
-  }
-  if (!Number.isInteger(attempt) || attempt < 0) {
-    throw new Error(`spotDefenseCloidInput: attempt debe ser entero ≥ 0 (recibido ${attempt}).`);
-  }
+  validateCloidRoleIndex("spotDefenseCloidInput", kind, tpIndex);
+  validateGenerationAttempt("spotDefenseCloidInput", generation, attempt);
   const idx = kind === "tp" ? `:${tpIndex}` : "";
   return `spot-defense:${botId}:${generation}:${kind}${idx}:${attempt}`;
 }
@@ -109,19 +121,8 @@ export function tradingCloidInput(
   attempt: number = 0,
   tpIndex?: number,
 ): string {
-  if (kind === "tp") {
-    if (tpIndex === undefined || !Number.isInteger(tpIndex) || tpIndex < 0) {
-      throw new Error(`tradingCloidInput: role "tp" requiere tpIndex entero ≥ 0 (recibido ${tpIndex}).`);
-    }
-  } else if (tpIndex !== undefined) {
-    throw new Error(`tradingCloidInput: tpIndex solo aplica a role "tp" (recibido para "${kind}").`);
-  }
-  if (!Number.isInteger(generation) || generation < 0) {
-    throw new Error(`tradingCloidInput: generation debe ser entero ≥ 0 (recibido ${generation}).`);
-  }
-  if (!Number.isInteger(attempt) || attempt < 0) {
-    throw new Error(`tradingCloidInput: attempt debe ser entero ≥ 0 (recibido ${attempt}).`);
-  }
+  validateCloidRoleIndex("tradingCloidInput", kind, tpIndex);
+  validateGenerationAttempt("tradingCloidInput", generation, attempt);
   const idx = kind === "tp" ? `:${tpIndex}` : "";
   return `trading:${armId}:${generation}:${kind}${idx}:${attempt}`;
 }

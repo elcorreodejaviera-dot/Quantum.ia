@@ -6,6 +6,7 @@ import { requireAdmin, getUserOrNull, writeAdminLog, hasPermission } from "./hel
 import { elog } from "./log";
 import { tradingCloidInput, toHlCloid } from "./cloids";
 import { hlNetwork } from "./hlNetwork";
+import { armErrorKind } from "./triggerRearm";
 import {
   committedMarginForAccount, liveManualExecutionForAccountAsset, liveArmForAccountAssetExcept,
 } from "./executions";
@@ -67,9 +68,14 @@ async function scheduleTradingRearmAfterFailed(
   const bot = await ctx.db.get(botId);
   if (!bot || bot.disarmPending || !bot.active || bot.autoRearm !== true) return;
   if (bot.rearmStatus !== undefined) return;
+  // (CodeRabbit #144 Major) Persistir TAMBIÉN el kind clasificado: sin él, la UI/backoff verían un
+  // kind viejo o vacío para un error nuevo (p.ej. [blocked_cap]). armErrorKind es la clasificación
+  // canónica; "cancel" no es un kind persistible del schema → undefined.
+  const kind = error ? armErrorKind(error) : undefined;
   await ctx.db.patch(botId, {
     rearmStatus: "pending", nextRearmAt: now + TR_REARM_COOLDOWN_MS, rearmAttempts: 0,
-    lastRearmError: error, rearmLeaseToken: undefined, rearmLeaseUntil: undefined,
+    lastRearmError: error, lastRearmErrorKind: kind === "cancel" ? undefined : kind,
+    rearmLeaseToken: undefined, rearmLeaseUntil: undefined,
   });
 }
 
@@ -125,7 +131,9 @@ async function assertTradingLiveAdmissible(
   ]);
   if (trading?.value !== true || sim?.value !== false) return false;
   if (!(await hasPermission(ctx, user, "canTradeLive"))) return false;
-  if (!bot.active || bot.disarmPending || bot.simulationMode) return false;
+  // (CodeRabbit #144 Major) Fail-closed: el modo real exige `false` EXPLÍCITO — un legacy/migrado
+  // con simulationMode undefined jamás debe alcanzar el money-path.
+  if (!bot.active || bot.disarmPending || bot.simulationMode !== false) return false;
   if (hlNetwork() === "mainnet" && !(await isMainnetTradingApproved(ctx))) return false;
   const cred = await ctx.db.get(bot.hlAccountId);
   if (!cred || cred.userId !== bot.userId) return false;
@@ -293,15 +301,16 @@ export const reserveTradingArm = internalMutation({
     if (!(usableReal > 0)) {
       throw new Error("[blocked_margin] Sin colateral usable para armar el trading (fondea la cuenta o espera a que HL libere el margen).");
     }
+    // (CodeRabbit #144 Major) resolveLeverage recibe el máximo SANEADO (fallback AUTO_LEVERAGE_CAP
+    // ante un assetMaxLeverage corrupto), no el crudo.
     const maxLevForCap = Number.isInteger(args.assetMaxLeverage) && args.assetMaxLeverage >= 1
       ? args.assetMaxLeverage : AUTO_LEVERAGE_CAP;
-    void maxLevForCap;
     const { appliedLeverage, marginRequired: marginReserved } = resolveLeverage({
       autoLeverage: bot.autoLeverage === true,
       manualLeverage: bot.leverage,
       reservedNotional,
       availableCollateral: args.availableCollateral,
-      marginCommitted, assetMaxLeverage: args.assetMaxLeverage,
+      marginCommitted, assetMaxLeverage: maxLevForCap,
     });
     if ((marginCommitted + marginReserved) > args.availableCollateral * (1 - MARGIN_SAFETY_BUFFER)) {
       throw new Error(

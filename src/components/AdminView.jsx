@@ -436,6 +436,12 @@ export default function AdminView() {
   const setSdGate = useMutation(api.spotDefenseBots.setMainnetSpotDefenseApproval);
   const sdGateOn = sdGate?.enabled === true;
   const [sdGatePending, setSdGatePending] = React.useState(false);
+  // (JAV-180) Gate de aprobación mainnet del Bot Trading (espejo del de Defensa Spot). CERRADO por
+  // defecto: sin esto el motor money-path (tradingEngine) no arma ni reconcilia en mainnet.
+  const trGate = useQuery(api.tradingBots.getMainnetTradingApproval, isAdmin ? {} : 'skip');
+  const setTrGate = useMutation(api.tradingBots.setMainnetTradingApproval);
+  const trGateOn = trGate?.enabled === true;
+  const [trGatePending, setTrGatePending] = React.useState(false);
   // (JAV-94) Feature flag GLOBAL del módulo Spot Grid (testnet+mainnet). Ausente = encendido.
   const sgModule = useQuery(api.spotGridBots.getSpotGridModuleEnabled, isAdmin ? {} : 'skip');
   const setSgModule = useMutation(api.spotGridBots.setSpotGridModuleEnabled);
@@ -476,6 +482,7 @@ export default function AdminView() {
         <span className={`av-pill ${tradingOn ? 'green' : 'faint'}`}>{tradingOn ? 'Trading LIVE' : 'Trading OFF'}</span>
         <span className={`av-pill ${sgGateOn ? 'green' : 'faint'}`}>{sgGateOn ? 'Spot Grid mainnet ✓' : 'Spot Grid mainnet ✗'}</span>
         <span className={`av-pill ${sdGateOn ? 'green' : 'faint'}`}>{sdGateOn ? 'Defensa Spot mainnet ✓' : 'Defensa Spot mainnet ✗'}</span>
+        <span className={`av-pill ${trGateOn ? 'green' : 'faint'}`}>{trGateOn ? 'Bot Trading mainnet ✓' : 'Bot Trading mainnet ✗'}</span>
         <span className={`av-pill ${sgModuleOn ? 'green' : 'amber'}`}>{sgModuleOn ? 'Módulo Spot Grid ON' : 'Módulo Spot Grid OFF'}</span>
         <div className="av-actions">
           <button className="av-mini" onClick={() => setTrading({ enabled: !tradingOn })}>{tradingOn ? 'Desactivar LIVE' : 'Activar LIVE'}</button>
@@ -507,6 +514,20 @@ export default function AdminView() {
               }
             }}
           >{sdGatePending ? 'Aplicando…' : (sdGateOn ? 'Revocar Defensa Spot mainnet' : 'Aprobar Defensa Spot mainnet')}</button>
+          <button
+            className="av-mini"
+            disabled={trGatePending}
+            onClick={async () => {
+              if (trGatePending) return;
+              if (!trGateOn && !window.confirm('Aprobar el Bot Trading en mainnet permite crear bots que abren posiciones LONG/SHORT con DINERO REAL en Hyperliquid. ¿Continuar?')) return;
+              setTrGatePending(true);
+              try {
+                await setTrGate({ enabled: !trGateOn });
+              } finally {
+                setTrGatePending(false);
+              }
+            }}
+          >{trGatePending ? 'Aplicando…' : (trGateOn ? 'Revocar Bot Trading mainnet' : 'Aprobar Bot Trading mainnet')}</button>
           <button
             className="av-mini"
             disabled={sgModulePending || sgModule === undefined}

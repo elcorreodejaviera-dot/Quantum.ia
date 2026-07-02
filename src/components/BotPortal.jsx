@@ -677,6 +677,14 @@ function PoolCard({ pool, canManage, canTradeLive, armsByBot, accountById, hlBal
         <CoberturaViva bot={ilBot} arm={ilArm} pool={pool} accountById={accountById} hlBalance={ilHlBal} />
       )}
 
+      {/* (JAV-180) Tarjeta viva del Bot Trading (fetch propio de getTradingDetail). Se monta cuando el
+          bot está activo o tiene un rearm en curso — igual criterio que la Defensa Spot. */}
+      {(tradingBot?.active || tradingBot?.rearmStatus) && (
+        <TradingViva botId={tradingBot._id} bot={tradingBot} accountById={accountById}
+          balancesByAddress={hlBalanceByAddress} currentPrice={pool.price ?? null}
+          canManageBots={canManage} />
+      )}
+
       <div className="pool-info">
         <span><span className="pool-info-label">Chain:</span> {pool.network}</span>
         <span><span className="pool-info-label">DEX:</span> {dexName(pool.defillamaId)}</span>
@@ -772,6 +780,10 @@ function Metric({ label, value, title }) {
 // backend (subscriptions.ts) se trata en JAV-77; aquí es solo display, no bloquea nada.
 function SubscriptionBar({ pools = [], bots = [], loading = false }) {
   const sub = useQuery(api.subscriptions.getMySubscription);
+  // (JAV-180 / P5) Uso REAL server-side: la MISMA verdad del enforcement (consumedCoverageByKey), que
+  // SUMA pool:/spot-defense:/trading: sin el dedupe-por-poolId que hacía la barra vieja (ocultaba el
+  // consumo del bot de trading ⇒ headroom falso mientras el server bloqueaba).
+  const usage = useQuery(api.subscriptions.getMyCoverageUsage);
   const [mobileOpen, setMobileOpen] = React.useState(false);
 
   // Liquidez por pool (id = pool._id, expuesto como `id` en el array normalizado del padre).
@@ -804,8 +816,8 @@ function SubscriptionBar({ pools = [], bots = [], loading = false }) {
     return sum;
   }, [bots, liquidityByPool]);
 
-  // Placeholder neutro mientras no tengamos sub + bots + pools: NUNCA mostrar uso 0 engañoso.
-  if (loading || sub === undefined) {
+  // Placeholder neutro mientras no tengamos sub + uso: NUNCA mostrar uso 0 engañoso.
+  if (loading || sub === undefined || usage === undefined) {
     return (
       <div className="sub-bar-inline">
         <span className="sub-plan-badge" style={{ opacity: 0.6 }}>Cargando…</span>
@@ -815,15 +827,24 @@ function SubscriptionBar({ pools = [], bots = [], loading = false }) {
   // No autenticado / usuario inexistente: el portal no debería verse, render mínimo.
   if (sub === null) return null;
 
-  const suspended = sub.suspended === true;
-  const hasPlan = sub.plan !== null && !suspended;
-  const cap = hasPlan ? sub.coverageCapUsd : 0;
-  const pct = cap > 0 ? Math.min(100, (poolCoverage / cap) * 100) : 0;
+  // (JAV-180-C2) La cobertura (total/cap/hasPlan/isAdmin) sale de `usage` server-side — la MISMA
+  // fuente que el enforcement — no de `sub` (que un admin sin plan normaliza a cap 0). Así el caso
+  // admin (cap Infinity = acceso total) llega a la UI, coherente con assertWithinPlanCoverageForKey.
+  const isAdmin = usage?.isAdmin === true;
+  const suspended = usage?.suspended === true || sub.suspended === true;
+  const hasPlan = (usage?.hasPlan ?? sub.plan !== null) && !suspended;
+  const quantifiable = usage?.quantifiable !== false;
+  const usedCoverage = usage?.quantifiable ? usage.total : poolCoverage;
+  const cap = usage?.cap ?? (hasPlan ? sub.coverageCapUsd : 0);
+  const capUnlimited = !Number.isFinite(cap);   // admin: acceso total
+  const pct = (!capUnlimited && cap > 0) ? Math.min(100, (usedCoverage / cap) * 100) : 0;
   const pctStr = `${pct.toFixed(pct < 10 ? 1 : 0)}%`;
 
-  // Badge: "{plan} Online" / "Suspendido" / "Sin plan".
-  const noPlan = !suspended && sub.plan === null;
-  const badgeLabel = suspended ? 'Suspendido' : (sub.plan !== null ? `${sub.label} Online` : 'Sin plan');
+  // Badge: "Acceso total (admin)" / "{plan} Online" / "Suspendido" / "Sin plan".
+  const noPlan = !suspended && !isAdmin && sub.plan === null;
+  const badgeLabel = suspended ? 'Suspendido'
+    : isAdmin ? 'Acceso total (admin)'
+    : (sub.plan !== null ? `${sub.label} Online` : 'Sin plan');
   const badgeTitle = noPlan ? 'Pídele al admin que te asigne un plan' : undefined;
 
   return (
@@ -838,12 +859,23 @@ function SubscriptionBar({ pools = [], bots = [], loading = false }) {
             <div className="sub-progress-fill" style={{ width: '0%' }} />
           </div>
         </div>
+      ) : !quantifiable ? (
+        // (P5) Una fila viva no cuantificable (requiere backfill/drain): NUNCA un 0 engañoso.
+        <div className="sub-stat">
+          <span className="sub-stat-label">Cobertura: revisión requerida (contactá al admin)</span>
+          <div className="sub-progress-track">
+            <div className="sub-progress-fill" style={{ width: '0%' }} />
+          </div>
+        </div>
       ) : (
         <>
           <div className="sub-stat">
-            <span className="sub-stat-label">Cobertura de pools: {formatUsdCompact(poolCoverage)} / {hasPlan ? formatUsdCompact(cap) : '—'}</span>
+            <span className="sub-stat-label">
+              Cobertura usada: {formatUsdCompact(usedCoverage)} / {capUnlimited ? '∞ (admin)' : (hasPlan ? formatUsdCompact(cap) : '—')}
+            </span>
             <div className="sub-progress-track">
-              <div className="sub-progress-fill active" style={{ width: pctStr }} />
+              {/* Admin (cap ∞): sin barra de progreso — el acceso es total, no hay tope que llenar. */}
+              <div className="sub-progress-fill active" style={{ width: capUnlimited ? '0%' : pctStr }} />
             </div>
           </div>
           <div className="sub-stat">
@@ -2836,6 +2868,195 @@ function DefensaSpotViva({ botId, bot: botFromList, accountById, balancesByAddre
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+// (JAV-180) Etiquetas de estado del arm de TRADING (los mismos status del schema trading_arms).
+const TR_ARM_LABEL = {
+  arming: 'Armando', submitting: 'Enviando', armed: 'Armado (triggers vivos)', filled: 'Entrada llena',
+  protecting: 'Colocando SL', protected: 'Protegido (SL vivo)', disarming: 'Deteniendo',
+  disarmed: 'Detenido', closed: 'Cerrado', failed: 'Falló', manual_intervention: 'Intervención manual',
+  unknown: 'Estado incierto',
+};
+const TR_DIRECTION_LABEL = { long_short: 'LONG + SHORT', long: 'Solo LONG', short: 'Solo SHORT' };
+
+// (JAV-180) Tarjeta VIVA del Bot Trading — clonada de DefensaSpotViva/CoberturaViva con la paleta
+// `cv-*`, generalizada a 2 entradas OCO (o entrada a mercado, decisión 6). Datos vía getTradingDetail
+// (bot + arm vivo + órdenes). Paleta propia: TP verde, SL rojo, BE/trailing AZUL (--trading-blue).
+// El modal TradingBotModal NO se toca (config); esta tarjeta es lo copiado del amigo (avaro 2.png).
+function TradingViva({ botId, bot: botFromList, accountById, balancesByAddress, currentPrice, canManageBots }) {
+  const detail = useQuery(api.tradingBots.getTradingDetail, { botId });
+  const pause = useMutation(api.bots.getOrCreatePoolBot);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState('');
+
+  const bot = detail?.bot ?? botFromList;
+  const arm = detail?.arm ?? null;
+  const orders = detail?.orders ?? [];
+  if (!bot) return null;
+
+  const asset = bot.baseAsset;
+  const pair = `${asset}/USDC`;
+  const direction = arm?.direction ?? bot.direction ?? 'long_short';
+
+  // Estado/tono: disarmPending manda (tras pausar el arm sigue vivo hasta que el reconcile cierra).
+  let estado, tone;
+  if (bot.disarmPending) {
+    estado = 'Deteniendo'; tone = 'amber';
+  } else if (arm) {
+    // Distinción viva del lado abierto en fase de posición.
+    if ((arm.status === 'filled' || arm.status === 'protecting' || arm.status === 'protected') && arm.filledSide) {
+      estado = `${arm.filledSide === 'Long' ? 'LONG' : 'SHORT'} ${arm.status === 'protected' ? 'PROTEGIDO' : 'ABIERTO'}`;
+    } else {
+      estado = TR_ARM_LABEL[arm.status] ?? arm.status;
+    }
+    tone = arm.status === 'failed' || arm.status === 'manual_intervention' ? 'red'
+      : (arm.status === 'protected' || arm.status === 'filled') ? 'green'
+      : arm.status === 'armed' ? 'green'
+      : arm.status === 'disarming' ? 'amber' : 'faint';
+  } else if (bot.rearmStatus === 'blocked') {
+    estado = `Bloqueado${bot.lastRearmErrorKind ? ': ' + rearmKindLabel(bot.lastRearmErrorKind) : ''}`; tone = 'red';
+  } else if (bot.rearmStatus === 'pending' || bot.rearmStatus === 'running') {
+    estado = bot.lastRearmErrorKind === 'blocked_margin' ? 'Reabriendo (esperando margen HL)' : 'Armando'; tone = 'amber';
+  } else if (bot.active) {
+    estado = 'Esperando ruptura'; tone = 'faint';
+  } else { estado = 'Pausado'; tone = 'faint'; }
+
+  const isMarketEntry = arm?.filledEntryRole === 'entry_market';
+  const capital = arm?.effectiveNotionalUsd ?? null;
+  const levText = arm?.appliedLeverage ? `${arm.appliedLeverage}x` : (bot.leverage ? `${bot.leverage}x` : '');
+  const capitalPct = bot.capitalPct != null ? `${bot.capitalPct}%` : '';
+
+  const acc = bot.hlAccountId ? accountById?.[bot.hlAccountId] : null;
+  const walletLabel = acc?.label
+    || (acc?.tradingAccountAddress ? `${acc.tradingAccountAddress.slice(0, 6)}…${acc.tradingAccountAddress.slice(-4)}` : '—');
+  const hlBalance = acc?.tradingAccountAddress ? balancesByAddress?.[acc.tradingAccountAddress] : null;
+  const pos = hlBalance?.openPositions?.find((p) => p.coin === asset) ?? null;
+
+  // Triggers de entrada armados (pre-fill) con distancia al mark; o entrada a mercado ya llena.
+  const entryOrders = orders.filter((o) => (o.role === 'entry_upper' || o.role === 'entry_lower') && (o.observedStatus === 'open' || o.observedStatus === 'pending'));
+  const slOrder = orders.find((o) => o.role === 'sl' && (o.observedStatus === 'open' || o.observedStatus === 'pending')) ?? null;
+  const liveTps = orders.filter((o) => o.role === 'tp' && (o.observedStatus === 'open' || o.observedStatus === 'pending' || o.observedStatus === 'triggered'));
+
+  // Resumen SL/trailing/TPs (avaro 2.png). Trailing y BE en AZUL; SL en rojo; TPs en verde.
+  const tps = arm?.tps ?? bot.tps ?? [];
+  const tpsSummary = tps.length ? tps.map((t) => `${t.gainPct}%`).join(' / ') : '';
+  const trailingTxt = bot.trailingStop && bot.trailingPct ? `Trailing ${bot.trailingPct}%` : '';
+
+  async function handlePause() {
+    setBusy(true); setError('');
+    try {
+      // Pausa = reconfigurar el mismo bot a active:false (getOrCreatePoolBot desarma vía disarmPending).
+      // (Revisión PR4 HIGH) serializePoolBotConfig OMITE las claves undefined — Convex rechaza
+      // `undefined` como valor, así que un objeto a mano con campos opcionales sin setear (lo normal en
+      // un bot de trading: sin trailing/BE/preTrigger) reventaba la serialización y el botón fallaba en
+      // silencio. Es el mismo helper que usa togglePoolBot.
+      await pause(serializePoolBotConfig(bot, { active: false }));
+    } catch (e) { setError(e?.message ?? 'No se pudo pausar.'); } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="cobertura-viva">
+      <div className="cobertura-head">
+        <strong>{asset} {TR_DIRECTION_LABEL[direction] ?? direction}</strong>
+        <span className={`pill ${tone}`}>{estado}</span>
+        {bot.autoRearm && <span className="pill faint" title="Reabre tras cerrar">AUTO-REARM</span>}
+      </div>
+
+      {/* SL vivo (rojo) + resumen trailing (azul) + TPs (verde). */}
+      {/* (Revisión PR4) Resumen SL/trailing/TPs. El SL vivo (rojo) solo existe post-fill; el resumen
+          de trailing/TPs sale de la CONFIG del bot y se muestra SIEMPRE (también pre-fill, "Esperando
+          ruptura") — así el usuario ve su plan de salida antes de que dispare (plan PR4). */}
+      {(slOrder || trailingTxt || tpsSummary) && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '6px 0', fontSize: 13, flexWrap: 'wrap' }}>
+          <span className="cv-label">Stop Loss</span>
+          <strong className="negative">{slOrder ? `$${formatPrice(pair, slOrder.triggerPx)}` : `${bot.stopLossPct ?? '—'}%`}</strong>
+          {arm?.beMoved && <span className="pill cv-chip--be">BE</span>}
+          {trailingTxt && <span className="pill cv-chip--trail">{trailingTxt}</span>}
+          {tpsSummary && <span className="pill cv-chip--tp">TPs {tpsSummary}</span>}
+          {pos && (
+            <strong className={pos.unrealizedPnl >= 0 ? 'positive' : 'negative'} style={{ marginLeft: 'auto' }}>
+              {pos.unrealizedPnl >= 0 ? '+' : ''}{formatUsd2(pos.unrealizedPnl)}
+            </strong>
+          )}
+        </div>
+      )}
+
+      <div className="cobertura-tiles">
+        <div className="cv-tile">
+          <span className="cv-label">Dirección</span>
+          <strong>{TR_DIRECTION_LABEL[direction] ?? direction}</strong>
+          {isMarketEntry && <span className="cv-dist">entrada a mercado</span>}
+        </div>
+        <div className="cv-tile">
+          <span className="cv-label">Capital</span>
+          <strong>{capital != null ? formatUsdCompact(capital) : '—'}</strong>
+          <span className="cv-dist">{[capitalPct, levText].filter(Boolean).join(' · ')}</span>
+        </div>
+        <div className="cv-tile">
+          <span className="cv-label">Wallet</span>
+          <strong className="cv-wallet" title={acc?.tradingAccountAddress ?? ''}>{walletLabel}</strong>
+        </div>
+      </div>
+
+      {/* Triggers armados con distancia al mark (pre-fill). */}
+      {entryOrders.length > 0 && (
+        <div className="cobertura-tiles" style={{ marginTop: 6 }}>
+          {entryOrders.map((o) => {
+            const d = (o.triggerPx != null && currentPrice) ? ((o.triggerPx - currentPrice) / currentPrice) * 100 : null;
+            return (
+              <div className="cv-tile" key={o.cloid}>
+                <span className="cv-label">{o.role === 'entry_upper' ? 'Ruptura ▲' : 'Ruptura ▼'}</span>
+                <strong>${o.triggerPx != null ? formatPrice(pair, o.triggerPx) : '—'}</strong>
+                <span className="cv-dist">{d == null ? '—' : `${d > 0 ? '+' : ''}${d.toFixed(2)}%`}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {hlBalance && pos && (
+        <div className="cv-hl">
+          <div className="cv-hl-pos">
+            <div className="cv-hl-pnl">
+              <span className="cv-label">PNL ({pos.coin})</span>
+              <strong className={pos.unrealizedPnl >= 0 ? 'positive' : 'negative'}>
+                {pos.unrealizedPnl >= 0 ? '+' : ''}{formatUsd2(pos.unrealizedPnl)}
+              </strong>
+              <span className="cv-sub">{(pos.roe * 100).toFixed(1)}% ROE</span>
+            </div>
+            <span className="cv-sub cv-hl-meta">
+              entry ${formatPrice(pair, pos.entryPx)} · {pos.leverage}x{pos.liquidationPx ? ` · liq $${formatPrice(pair, pos.liquidationPx)}` : ''}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {liveTps.length > 0 && (
+        <details className="cobertura-oids">
+          <summary>Take-profits en Hyperliquid ({liveTps.length})</summary>
+          <ul>
+            {liveTps.map((o) => (
+              <li key={o.cloid}>
+                <span className="cv-role cv-chip--tp">TP {o.tpIndex != null ? o.tpIndex + 1 : ''}</span>
+                <span className="cv-oid">${formatPrice(pair, o.triggerPx)}</span>
+                <span className={`pill ${o.observedStatus === 'open' ? 'green' : 'faint'}`}>{o.observedStatus}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
+      {error && <p style={{ color: 'var(--red)', fontSize: 12, marginTop: 6 }}>{error}</p>}
+
+      {bot.active && !bot.disarmPending && canManageBots && (
+        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          <button className="mini-btn" onClick={handlePause} disabled={busy}>
+            {busy ? '…' : 'Pausar bot'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

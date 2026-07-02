@@ -14,6 +14,9 @@
   --amber: #ffdc00;
   --red: #ff5000;
   --blue: #00c805;
+  /* (JAV-180) Azul REAL del Bot Trading para BE/trailing. NO reutiliza --blue (aliaseado a verde a
+     propósito en todo el portal); token propio brillante sobre fondo oscuro. */
+  --trading-blue: #2f8bff;
   /* Verde del pulso "en vivo" del precio (JAV-171): brillante sobre fondo
      oscuro; en tema claro se sustituye por uno legible (ver [data-theme]). */
   --price-live-color: #00c805;
@@ -36,6 +39,8 @@
   --amber: #b58c00;
   --red: #ff5000;
   --blue: #007a03;
+  /* (JAV-180) Azul del Bot Trading, variante accesible en tema claro. */
+  --trading-blue: #1f6fe0;
   /* Verde oscuro accesible para el pulso del precio en tema claro
      (contraste >=4.5:1 a 13px sobre fondo claro). */
   --price-live-color: #007a03;
@@ -2716,3 +2721,14 @@ details[open] > .pool-pnl-toggle::before {
 .hl-acct-api.green { color: var(--green); }
 .hl-acct-api.amber { color: var(--amber); }
 .hl-acct-api.red { color: var(--red); }
+
+/* (JAV-180) Chips de la tarjeta viva del Bot Trading. Paleta propia: TP verde, SL rojo, BE/trailing
+   AZUL (--trading-blue, token nuevo — NO --blue, que está aliaseado a verde a propósito). */
+.pill.cv-chip--tp { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
+.pill.cv-chip--be,
+.pill.cv-chip--trail {
+  color: var(--trading-blue);
+  border-color: color-mix(in srgb, var(--trading-blue) 50%, transparent);
+  background: color-mix(in srgb, var(--trading-blue) 10%, transparent);
+}
+.cv-role.cv-chip--tp { color: var(--green); }

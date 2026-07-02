@@ -568,7 +568,14 @@ export const settleTradingArm = internalMutation({
       if (args[k] !== undefined) patch[k] = args[k];
     }
     if (args.status === "closed" && args.closeReason !== undefined) patch.closeReason = args.closeReason;
-    if (args.status === "filled" && arm.filledAt == null) patch.filledAt = now;
+    if (args.status === "filled" && arm.filledAt == null) {
+      patch.filledAt = now;
+      // (Revisión PR3) Ventana de PROTECCIÓN de 4 min desde el fill (plan: SL_PROTECT_DEADLINE_MS ⇒
+      // cierre de emergencia). El motor la LIMPIA al confirmar el SL resting y la REFRESCA al
+      // necesitar recolocar (ventana fresca, patrón triggerArms) — sin esto el deadline era código
+      // muerto y la escalada dependía del contador de cloids (roto por las rotaciones de trailing).
+      patch.protectDeadline = now + 4 * 60_000;
+    }
     await ctx.db.patch(args.armId, patch);
     elog("trading", "transition", { armId: String(args.armId), from: arm.status, to: args.status, closeReason: args.closeReason ?? null });
 
@@ -801,6 +808,42 @@ export const recordTradingCloseOrder = internalMutation({
   },
 });
 
+// (Revisión PR3) Ventana de protección del SL: null = protegido (SL resting confirmado); número =
+// deadline para lograr protección, vencido ⇒ cierre de emergencia. La fija el settle a filled y la
+// gestiona el motor (refresh al recolocar, clear al confirmar resting). Bajo lease.
+export const setTradingProtectDeadline = internalMutation({
+  args: { armId: v.id("trading_arms"), token: v.string(), value: v.union(v.number(), v.null()) },
+  handler: async (ctx, { armId, token, value }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    await ctx.db.patch(armId, { protectDeadline: value === null ? undefined : value, updatedAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
+// (Revisión PR3, bloqueante #2) Actualiza los datos de fill EN FASE DE POSICIÓN (plan POST-FILL (1):
+// "actualizar filledSize" con el neto releído — un remanente de la entrada que llena tarde crece la
+// posición LEGÍTIMAMENTE; sin esto el drift comparaba contra el snapshot stale y CANCELABA el SL).
+// Solo crece (nunca reduce: las reducciones son TPs/closes) y solo en estados de posición. Bajo lease.
+export const setTradingFillData = internalMutation({
+  args: {
+    armId: v.id("trading_arms"), token: v.string(),
+    filledSize: v.number(), entryPrice: v.optional(v.number()),
+  },
+  handler: async (ctx, { armId, token, filledSize, entryPrice }) => {
+    const arm = await ctx.db.get(armId);
+    if (!arm || arm.reconcileLeaseToken !== token || (arm.reconcileLeaseUntil ?? 0) <= Date.now()) return { ok: false as const };
+    if (arm.status !== "filled" && arm.status !== "protecting" && arm.status !== "protected") return { ok: false as const };
+    if (!Number.isFinite(filledSize) || filledSize <= (arm.filledSize ?? 0)) return { ok: true as const, unchanged: true as const };
+    await ctx.db.patch(armId, {
+      filledSize,
+      ...(entryPrice !== undefined && Number.isFinite(entryPrice) && entryPrice > 0 ? { entryPrice } : {}),
+      updatedAt: Date.now(),
+    });
+    return { ok: true as const };
+  },
+});
+
 // Latch one-way del break-even (no se revierte).
 export const setTradingBeMoved = internalMutation({
   args: { armId: v.id("trading_arms"), token: v.string() },
@@ -894,6 +937,25 @@ export const listLiveTradingArmIdsInternal = internalQuery({
       }
     }
     return ids;
+  },
+});
+
+// (PR3) Anti-loop del rearm: si el bot YA tiene un arm vivo (un stale-retry inmediato que armó, o un
+// armado manual durante el cooldown), el rearm encolado quedó OBSOLETO — limpiarlo en vez de que el
+// cron lo reclame y choque contra la unicidad para siempre. Espejo del claim de spotDefense.
+export const clearTradingRearmIfArmedInternal = internalMutation({
+  args: { botId: v.id("bots") },
+  handler: async (ctx, { botId }) => {
+    const bot = await ctx.db.get(botId);
+    if (!bot || bot.kind !== "trading") return { ok: false as const };
+    if (bot.rearmStatus === undefined) return { ok: true as const, already: true as const };
+    const live = await hasNonTerminalTradingArmForBot(ctx, botId);
+    if (!live) return { ok: false as const, reason: "no_live_arm" as const };
+    await ctx.db.patch(botId, {
+      rearmStatus: undefined, nextRearmAt: undefined, rearmAttempts: 0,
+      rearmLeaseToken: undefined, rearmLeaseUntil: undefined,
+    });
+    return { ok: true as const };
   },
 });
 

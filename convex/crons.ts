@@ -91,4 +91,17 @@ crons.interval(
   internal.cronHealth.pruneEngineEventsWithHealth,
 );
 
+// (JAV-179) 4º motor money-path (Bot Trading): reconcile por arm (lease/fencing) + rearm durable.
+crons.interval(
+  "reconcile trading arms",
+  { minutes: 1 },
+  internal.cronHealth.reconcileTradingArmsWithHealth,
+);
+
+crons.interval(
+  "process trading rearms",
+  { minutes: 1 },
+  internal.cronHealth.processTradingRearmsWithHealth,
+);
+
 export default crons;

@@ -47,7 +47,9 @@ async function markRearmBlockedIfEligible(
   if (!bot.poolId) return false;
   const pool = await ctx.db.get(bot.poolId);
   if (!pool || pool.closed) return false;
-  const k = (kind === "blocked_margin" || kind === "blocked_config") ? kind : "blocked_config";
+  // (JAV-178) blocked_cap incluido: el tope de plan persiste su PROPIO kind (la UI muestra "tope del
+  // plan" en vez de un blocked_config genérico); la política es la misma (blocked + recheck 5 min).
+  const k = (kind === "blocked_margin" || kind === "blocked_config" || kind === "blocked_cap") ? kind : "blocked_config";
   await ctx.db.patch(botId, {
     rearmStatus: "blocked", nextRearmAt: Date.now() + REARM_BLOCKED_RECHECK_MS,
     rearmAttempts: (bot.rearmAttempts ?? 0) + 1,
@@ -98,15 +100,23 @@ function isArmTerminal(status: string): boolean {
 // --- Helpers planos (invocables DIRECTAMENTE desde otras mutations; no via runMutation) ---
 
 // ¿El bot tiene algún arm NO terminal? (bloquea borrados/pausas destructivas — H1/R4).
+// (JAV-178) Consulta TAMBIÉN trading_arms: un bot kind:"trading" vive en la misma tabla `bots` y sus
+// arms comparten los mismos invariantes de borrado seguro (mismos estados terminales).
 export async function hasNonTerminalArmForBot(ctx: MutationCtx, botId: Id<"bots">): Promise<boolean> {
   const arms = await ctx.db.query("trigger_arms").withIndex("by_bot_generation", (q) => q.eq("botId", botId)).collect();
-  return arms.some((a) => !isArmTerminal(a.status));
+  if (arms.some((a) => !isArmTerminal(a.status))) return true;
+  const trArms = await ctx.db.query("trading_arms").withIndex("by_bot_generation", (q) => q.eq("botId", botId)).collect();
+  return trArms.some((a) => !isArmTerminal(a.status));
 }
 
 // ¿La cuenta HL tiene algún arm NO terminal? (bloquea revocación de credencial — R4).
+// (JAV-178) trading_arms incluido: revocar la credencial con un arm de trading vivo dejaría órdenes/
+// posición sin motor que las gestione (fail-closed, mismo criterio que los trigger_arms).
 export async function hasNonTerminalArmForAccount(ctx: MutationCtx, hlAccountId: Id<"hl_api_credentials">): Promise<boolean> {
   const arms = await ctx.db.query("trigger_arms").withIndex("by_account", (q) => q.eq("hlAccountId", hlAccountId)).collect();
-  return arms.some((a) => !isArmTerminal(a.status));
+  if (arms.some((a) => !isArmTerminal(a.status))) return true;
+  const trArms = await ctx.db.query("trading_arms").withIndex("by_account", (q) => q.eq("hlAccountId", hlAccountId)).collect();
+  return trArms.some((a) => !isArmTerminal(a.status));
 }
 
 // Pausa segura (N2 + H1): si no hay arm vivo → desactiva YA; si lo hay → desiredState=disarmed +
@@ -122,12 +132,20 @@ export async function requestDisarmAndDeactivateImpl(ctx: MutationCtx, botId: Id
   } as const;
   const arms = await ctx.db.query("trigger_arms").withIndex("by_bot_generation", (q) => q.eq("botId", botId)).collect();
   const live = arms.filter((a) => !isArmTerminal(a.status));
-  if (live.length === 0) {
+  // (JAV-178) Rama trading: los arms del 4º motor también se desarman por desiredState + disarmPending
+  // (el reconcile de tradingEngine — PR3 — cancela en HL, cierra reduce-only si hay posición y completa
+  // la pausa al llegar a terminal, igual que el motor IL con los trigger_arms).
+  const trArms = await ctx.db.query("trading_arms").withIndex("by_bot_generation", (q) => q.eq("botId", botId)).collect();
+  const trLive = trArms.filter((a) => !isArmTerminal(a.status));
+  if (live.length === 0 && trLive.length === 0) {
     // Desactivación inmediata (sin arm vivo): limpiar también el ancla del contador.
     await ctx.db.patch(botId, { active: false, disarmPending: false, disarmRequestedAt: undefined, ...clearRearm });
     return { deactivated: true };
   }
   for (const a of live) {
+    if (a.desiredState !== "disarmed") await ctx.db.patch(a._id, { desiredState: "disarmed", updatedAt: Date.now() });
+  }
+  for (const a of trLive) {
     if (a.desiredState !== "disarmed") await ctx.db.patch(a._id, { desiredState: "disarmed", updatedAt: Date.now() });
   }
   // (Codex) NO reiniciar el contador: setear disarmRequestedAt solo en la PRIMERA solicitud

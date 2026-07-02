@@ -6,7 +6,7 @@ import HLAccountSelect from './HLAccountSelect'
 import { useConvexAuth, useQuery, useMutation, useAction } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useHyperliquidPrices, useHyperliquidFunding, useHyperliquidAllMids, useHyperliquidSpotState, useWalletBalances, useHLAccountBalance, useHLAccountsBalances, useHLAgentExpiry, useMetaMaskSigner, executeHLTestnetOrder } from '../hooks/useHyperliquid'
-import { capitalPerPosition, leverageText, slOrderOpen, beState as beStateOf, explainBot } from '../lib/armView'
+import { capitalPerPosition, leverageText, slOrderOpen, beState as beStateOf, explainBot, rearmKindLabel } from '../lib/armView'
 
 const IS_TESTNET = import.meta.env.VITE_HL_NETWORK === 'testnet';
 // Red que el frontend CREE estar usando; el backend la revalida (assertExpectedNetwork) y rechaza si
@@ -237,7 +237,7 @@ function CoberturaViva({ bot, arm, pool, accountById, hlBalance }) {
   } else if (bot.disarmPending) {
     estado = 'Deteniéndose'; tone = 'amber';
   } else if (bot.rearmStatus === 'blocked') {
-    estado = `Bloqueado${bot.lastRearmErrorKind ? ': ' + bot.lastRearmErrorKind : ''}`; tone = 'red';
+    estado = `Bloqueado${bot.lastRearmErrorKind ? ': ' + rearmKindLabel(bot.lastRearmErrorKind) : ''}`; tone = 'red';
   } else if (bot.rearmStatus === 'pending' || bot.rearmStatus === 'running') {
     estado = 'Armando'; tone = 'amber';
   } else { estado = bot.active ? 'Esperando' : 'Pausado'; tone = 'faint'; }
@@ -2348,7 +2348,7 @@ function BotActionButton({ label, bot, busy, onConfig, onToggle, onDelete }) {
           intento, tanto en pending como en blocked. Se limpia el prefijo [kind] del mensaje crudo. */}
       {bot && bot.rearmStatus && (() => {
         const errMsg = bot.lastRearmError ? String(bot.lastRearmError).replace(/^\[[a-z_]+\]\s*/, '') : '';
-        const kind = bot.lastRearmErrorKind ? ` (${bot.lastRearmErrorKind})` : '';
+        const kind = bot.lastRearmErrorKind ? ` (${rearmKindLabel(bot.lastRearmErrorKind)})` : '';
         const blocked = bot.rearmStatus === 'blocked';
         return (
           <div style={{ fontSize: 10, lineHeight: 1.35, color: blocked ? 'var(--red,#f44)' : 'var(--muted,#999)' }}>
@@ -2702,7 +2702,7 @@ function DefensaSpotViva({ botId, bot: botFromList, accountById, balancesByAddre
       : (arm.status === 'protected' || arm.status === 'filled' || arm.status === 'armed') ? 'green'
       : arm.status === 'disarming' ? 'amber' : 'faint';
   } else if (bot.rearmStatus === 'blocked') {
-    estado = `Bloqueado${bot.lastRearmErrorKind ? ': ' + bot.lastRearmErrorKind : ''}`; tone = 'red';
+    estado = `Bloqueado${bot.lastRearmErrorKind ? ': ' + rearmKindLabel(bot.lastRearmErrorKind) : ''}`; tone = 'red';
   } else if (bot.rearmStatus === 'pending' || bot.rearmStatus === 'running') {
     estado = 'Armando'; tone = 'amber';
   } else if (bot.active) {

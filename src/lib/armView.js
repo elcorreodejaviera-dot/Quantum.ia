@@ -37,6 +37,13 @@ export function beState(arm, slOrder) {
 const money = (v) => (v == null || !Number.isFinite(v) ? null : `$${Math.round(v).toLocaleString('en-US')}`);
 const px = (v) => (v == null || !Number.isFinite(v) ? null : `$${v.toLocaleString('en-US', { maximumFractionDigits: 2 })}`);
 
+// (JAV-178) Etiqueta legible del lastRearmErrorKind. Solo se traduce blocked_cap ("tope del plan",
+// JAV-176-P6 — el usuario debe distinguir cap de plan de margen HL); el resto conserva el kind crudo
+// (los textos existentes de la UI/tests dependen de él).
+export function rearmKindLabel(kind) {
+  return kind === 'blocked_cap' ? 'tope del plan' : kind;
+}
+
 // (Fase 6-D) Explica en lenguaje simple qué está haciendo el bot. Devuelve un array de frases (string[]).
 // Deriva 1:1 del estado del backend; NUNCA inventa estado ni SL teórico; no maquilla blocked/failed.
 export function explainBot(bot, arm, pool, hlBalance) {
@@ -82,7 +89,7 @@ export function explainBot(bot, arm, pool, hlBalance) {
   } else if (bot.disarmPending) {
     lines.push('Deteniéndose…');
   } else if (bot.rearmStatus === 'blocked') {
-    lines.push(`Bloqueado${bot.lastRearmErrorKind ? `: ${bot.lastRearmErrorKind}` : ''}. Revisa margen o plan.`);
+    lines.push(`Bloqueado${bot.lastRearmErrorKind ? `: ${rearmKindLabel(bot.lastRearmErrorKind)}` : ''}. Revisa margen o plan.`);
   } else if (bot.rearmStatus === 'pending' || bot.rearmStatus === 'running') {
     lines.push('Reabriendo la cobertura tras un cierre…');
   } else if (!bot.active) {

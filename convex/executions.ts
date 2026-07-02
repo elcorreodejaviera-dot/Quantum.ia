@@ -71,6 +71,11 @@ export const ARM_OPEN_MARGIN_STATES = new Set([
 export const SPOT_DEFENSE_OPEN_MARGIN_STATES = new Set([
   "arming", "submitting", "armed", "disarming", "filled", "protecting", "protected", "unknown", "manual_intervention",
 ]);
+// (JAV-178) Estados del arm de TRADING que mantienen margen comprometido (todos menos disarmed/closed/
+// failed; `manual_intervention` incluido, fail-closed — mismo criterio que la defensa spot).
+export const TRADING_OPEN_MARGIN_STATES = new Set([
+  "arming", "submitting", "armed", "disarming", "filled", "protecting", "protected", "unknown", "manual_intervention",
+]);
 
 // Margen comprometido en una cuenta HL sumando AMBOS motores (IOC manual + triggers automáticos),
 // para que ninguna reserva pueda gastar dos veces el mismo colateral. Helper plano reutilizado por
@@ -102,7 +107,70 @@ export async function committedMarginForAccount(
   const sdMargin = sdArms
     .filter((a) => SPOT_DEFENSE_OPEN_MARGIN_STATES.has(a.status))
     .reduce((sum, a) => sum + (a.marginReserved ?? a.reservedNotional), 0);
-  return execMargin + armMargin + sdMargin;
+  // (JAV-178) 4º motor: margen comprometido por los arms de TRADING de la misma cuenta (la reserva
+  // worst-case por modo ya viene en marginReserved; se reduce 2×→1× al confirmar OCO).
+  const trArms = await ctx.db
+    .query("trading_arms")
+    .withIndex("by_account", (q) => q.eq("hlAccountId", hlAccountId))
+    .collect();
+  const trMargin = trArms
+    .filter((a) => TRADING_OPEN_MARGIN_STATES.has(a.status))
+    .reduce((sum, a) => sum + (a.marginReserved ?? a.reservedNotional), 0);
+  return execMargin + armMargin + sdMargin + trMargin;
+}
+
+// --- (JAV-178 / JAV-176-P2 + V2-P3) GUARD SIMÉTRICO manual ↔ arm ---------------------------------
+// DOS helpers con NOMBRE (contrato sin ambigüedad): detectan intents VIVOS por (cuenta, coin) y se
+// aplican DENTRO de las OCC de ambos lados (no en actions — TOCTOU). Ambos lados escriben DB-intent
+// ANTES de tocar HL y las mutations Convex son serializables ⇒ dos reservas concurrentes no pueden
+// ignorarse mutuamente. `asset` se normaliza a MAYÚSCULAS en ambos extremos (los escritores ya
+// normalizan — hyperliquid.ts/triggerEngine.ts — pero el guard no debe depender de eso).
+
+type LiveIntentHit = { table: string; status: string };
+
+// (a) Ejecución MANUAL viva (execution_requests) del mismo coin. La consultan reserveTradingArm y
+// gateTradingArmBeforeOrder: una manual pending/submitting/... aún no visible en HL cuenta ⇒ el
+// trading espera [transient] (la manual termina sola).
+export async function liveManualExecutionForAccountAsset(
+  ctx: { db: MutationCtx["db"] }, hlAccountId: Id<"hl_api_credentials">, asset: string,
+): Promise<LiveIntentHit | null> {
+  const target = asset.toUpperCase();
+  const exec = await ctx.db
+    .query("execution_requests")
+    .withIndex("by_account", (q) => q.eq("hlAccountId", hlAccountId))
+    .collect();
+  const hit = exec.find((r) => OPEN_MARGIN_STATES.has(r.status) && r.asset?.toUpperCase() === target);
+  return hit ? { table: "execution_requests", status: hit.status } : null;
+}
+
+// (b) Arm vivo de CUALQUIER motor (trigger_arms + spot_defense_arms + trading_arms) del mismo coin.
+// Lado manual (reserveExecution): SIN exclusión — hoy una manual netearía contra el fill futuro del
+// trigger. Lado trading (reserveTradingArm/gate): CON exclusión del propio armId (V2-P3: sin scope el
+// gate se auto-bloquearía) — fail-closed contra arms legacy/drift aunque JAV-102 debería impedirlos.
+export async function liveArmForAccountAssetExcept(
+  ctx: { db: MutationCtx["db"] }, hlAccountId: Id<"hl_api_credentials">, asset: string,
+  opts: { exceptTradingArmId?: Id<"trading_arms"> },
+): Promise<LiveIntentHit | null> {
+  const target = asset.toUpperCase();
+  const arms = await ctx.db
+    .query("trigger_arms")
+    .withIndex("by_account", (q) => q.eq("hlAccountId", hlAccountId))
+    .collect();
+  const armHit = arms.find((a) => ARM_OPEN_MARGIN_STATES.has(a.status) && a.asset?.toUpperCase() === target);
+  if (armHit) return { table: "trigger_arms", status: armHit.status };
+  const sd = await ctx.db
+    .query("spot_defense_arms")
+    .withIndex("by_account", (q) => q.eq("hlAccountId", hlAccountId))
+    .collect();
+  const sdHit = sd.find((a) => SPOT_DEFENSE_OPEN_MARGIN_STATES.has(a.status) && a.asset?.toUpperCase() === target);
+  if (sdHit) return { table: "spot_defense_arms", status: sdHit.status };
+  const tr = await ctx.db
+    .query("trading_arms")
+    .withIndex("by_account", (q) => q.eq("hlAccountId", hlAccountId))
+    .collect();
+  const trHit = tr.find((a) => a._id !== opts.exceptTradingArmId
+    && TRADING_OPEN_MARGIN_STATES.has(a.status) && a.asset?.toUpperCase() === target);
+  return trHit ? { table: "trading_arms", status: trHit.status } : null;
 }
 
 // D (JAV-UI): ¿el bot tiene alguna ejecución JAV-37 (IOC manual) ABIERTA? Solo `closed` (SL
@@ -186,6 +254,16 @@ export const reserveExecution = internalMutation({
       // (OBS-3) Hit de idempotencia: la solicitud ya existía (reintento). Solo ids/estado.
       elog("exec", "reserve_dedupe", { requestId: String(existing._id), botId: String(args.botId), status: existing.status });
       return { requestId: existing._id, status: existing.status, alreadyExists: true as const, appliedLeverage: existing.appliedLeverage };
+    }
+    // (1.5) GUARD SIMÉTRICO (JAV-178 / JAV-176-P2): solo para reserva NUEVA (después del dedupe — un
+    // reintento de reconciliación de una ejecución en vuelo NO se bloquea, patrón "(b) Gates solo para
+    // reserva NUEVA"). Con un arm vivo de CUALQUIER motor en (cuenta, coin), la manual netearía contra
+    // el fill futuro del trigger ⇒ RECHAZO dentro de la misma OCC que reserva.
+    const liveArm = await liveArmForAccountAssetExcept(ctx, args.hlAccountId, args.asset, {});
+    if (liveArm) {
+      throw new Error(
+        `Ejecución manual bloqueada: hay un armado automático vivo (${liveArm.table}: ${liveArm.status}) ` +
+        `en esta cuenta para ${args.asset.toUpperCase()}. Pausá el bot antes de operar a mano.`);
     }
     // (2) Hard-cap por plan (JAV-77, Modelo B): la cobertura de POOLS del usuario (Σ hedgeNotionalUsd
     // sin buffer, dedupe por pool) + este pool no puede superar el tope del plan. Sin plan/suspendido →

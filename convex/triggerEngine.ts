@@ -1100,8 +1100,10 @@ export const processRearms = internalAction({
         if (kind === "cancel") {
           // pausa/kill/pool cerrado → el bot no debe operar: cancelar definitivamente el rearm.
           await ctx.runMutation(internal.triggerRearm.recordRearmOutcome, { botId, token: claim.token, outcome: "cancel", error: msg });
-        } else if (kind === "blocked_margin" || kind === "blocked_config") {
-          // bloqueo corregible (margen/config/credencial): blocked, reevaluable + alerta visible.
+        } else if (kind === "blocked_margin" || kind === "blocked_cap" || kind === "blocked_config") {
+          // bloqueo corregible (margen/cap de plan/config/credencial): blocked, reevaluable + alerta
+          // visible. (JAV-178) blocked_cap incluido: sin él, un cap de plan en IL caería al else
+          // `transient` (reintento silencioso indefinido) — REGRESIÓN del comportamiento actual.
           await ctx.runMutation(internal.triggerRearm.recordRearmOutcome, {
             botId, token: claim.token, outcome: "blocked", kind, error: msg, nextRearmAt: Date.now() + REARM_BLOCKED_RECHECK_MS,
           });

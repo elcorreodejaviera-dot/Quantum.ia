@@ -230,6 +230,18 @@ function validatePoolBotConfig(kind: PoolBotKind, c: PoolBotConfig) {
   if (c.breakevenPct !== undefined && c.breakevenPct > 50) {
     throw new Error("breakevenPct no puede superar 50.");
   }
+  // (JAV-178) Reglas del bot de TRADING (plan JAV-176 PR2): con trailing activo el % es obligatorio y
+  // acotado (0,50]; el pre-trigger se capa a 10 (% del ANCHO del rango — tradingMath capa la cota
+  // matemática dura en 50, esta es la cota de PRODUCTO).
+  if (kind === "trading") {
+    if (c.trailingStop === true
+      && (c.trailingPct === undefined || c.trailingPct <= 0 || c.trailingPct > 50)) {
+      throw new Error("Con trailing stop activo, trailingPct debe estar en (0, 50].");
+    }
+    if (c.preTriggerPct !== undefined && c.preTriggerPct > 10) {
+      throw new Error("preTriggerPct no puede superar 10 (% del ancho del rango).");
+    }
+  }
   if (c.tps) {
     let sum = 0;
     for (const tp of c.tps) {
@@ -395,22 +407,24 @@ export const getOrCreatePoolBot = mutation({
       } else if (willBeActive && existingBot.disarmPending) {
         await ctx.db.patch(existingBot._id, { disarmPending: false, disarmRequestedAt: undefined });
       }
-      // (G1) Auto-arm: un bot IL que queda ACTIVO en modo REAL entra en el motor de rearm DURABLE
-      // (rearmStatus="pending") → el cron processRearms lo arma con reintento/backoff y deja el
-      // estado visible ("Armando"/"bloqueado: motivo"). Se llega aquí solo SIN arm vivo (línea de
-      // arriba lanza si hay arm y willBeActive). No tocar si ya está "running" (claim del cron en curso).
-      if (kind === "il" && willBeActive && resultMode === false && !pausingActive && existingBot.rearmStatus !== "running") {
+      // (G1) Auto-arm: un bot IL o TRADING que queda ACTIVO en modo REAL entra en el motor de rearm
+      // DURABLE (rearmStatus="pending") → el cron lo arma con reintento/backoff y deja el estado
+      // visible ("Armando"/"bloqueado: motivo"). Se llega aquí solo SIN arm vivo (línea de arriba
+      // lanza si hay arm y willBeActive). No tocar si ya está "running" (claim del cron en curso).
+      // (JAV-178) La rama trading NO agenda runAfter: processTradingRearms llega con el motor (PR3);
+      // hasta entonces el pending queda inerte y visible (el gate mainnetTradingApproved está OFF).
+      if ((kind === "il" || kind === "trading") && willBeActive && resultMode === false && !pausingActive && existingBot.rearmStatus !== "running") {
         await ctx.db.patch(existingBot._id, {
           rearmStatus: "pending", nextRearmAt: Date.now(), rearmAttempts: 0,
           lastRearmError: undefined, lastRearmErrorKind: undefined,
         });
-        await ctx.scheduler.runAfter(0, internal.triggerEngine.processRearms, {});
+        if (kind === "il") await ctx.scheduler.runAfter(0, internal.triggerEngine.processRearms, {});
       }
       return existingBot._id;
     }
     const name = `${kind === "il" ? "IL" : "Trading"} ${baseAsset} ${pool.network}`;
-    // (G1) Bot IL NUEVO activo en real → encolar el armado durable desde el alta.
-    const armNow = kind === "il" && willBeActive && resultMode === false;
+    // (G1) Bot NUEVO (IL o trading) activo en real → encolar el armado durable desde el alta.
+    const armNow = willBeActive && resultMode === false;
     const newBotId = await ctx.db.insert("bots", {
       name,
       userId: user._id,
@@ -423,7 +437,7 @@ export const getOrCreatePoolBot = mutation({
       ...config,
       ...(armNow ? { rearmStatus: "pending", nextRearmAt: Date.now(), rearmAttempts: 0 } : {}),
     });
-    if (armNow) await ctx.scheduler.runAfter(0, internal.triggerEngine.processRearms, {});
+    if (armNow && kind === "il") await ctx.scheduler.runAfter(0, internal.triggerEngine.processRearms, {});
     return newBotId;
   },
 });

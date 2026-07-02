@@ -9,6 +9,7 @@ describe("armErrorKind — prefijos reconocidos", () => {
   it.each([
     ["[transient] timeout de red", "transient"],
     ["[blocked_margin] sin colateral", "blocked_margin"],
+    ["[blocked_cap] Supera el tope de cobertura del plan", "blocked_cap"],   // (JAV-178) tope de plan ≠ margen HL
     ["[blocked_config] pool sin tokenId", "blocked_config"],
     ["[retry_incompatible] orden residual", "retry_incompatible"],
     ["[cancel] bot pausado", "cancel"],

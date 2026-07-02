@@ -31,6 +31,8 @@ type ExecStatus = Doc<"execution_requests">["status"];
 // (JAV-107) Arms del bot de defensa spot. `manual_intervention` NO es terminal → cuenta como vivo
 // (fail-closed: la cobertura/margen sigue comprometido hasta que el usuario resuelva el drift).
 type SpotDefenseArmStatus = Doc<"spot_defense_arms">["status"];
+// (JAV-178) Arms del bot de TRADING. `manual_intervention` NO es terminal → vivo (fail-closed).
+type TradingArmStatus = Doc<"trading_arms">["status"];
 
 const ARM_ALL_STATUSES = [
   "arming", "submitting", "armed", "disarming", "disarmed", "filled", "protecting",
@@ -43,19 +45,27 @@ const SPOT_DEFENSE_ALL_STATUSES = [
   "arming", "submitting", "armed", "disarming", "disarmed", "filled", "protecting",
   "protected", "closed", "failed", "unknown", "manual_intervention",
 ] as const satisfies readonly SpotDefenseArmStatus[];
+const TRADING_ALL_STATUSES = [
+  "arming", "submitting", "armed", "disarming", "disarmed", "filled", "protecting",
+  "protected", "closed", "failed", "unknown", "manual_intervention",
+] as const satisfies readonly TradingArmStatus[];
 
 // Guards de EXHAUSTIVIDAD: si el schema añade un estado no listado arriba, esto NO compila.
 type _ArmExhaustive = Exclude<ArmStatus, typeof ARM_ALL_STATUSES[number]> extends never ? true : never;
 type _ExecExhaustive = Exclude<ExecStatus, typeof EXEC_ALL_STATUSES[number]> extends never ? true : never;
 type _SdExhaustive = Exclude<SpotDefenseArmStatus, typeof SPOT_DEFENSE_ALL_STATUSES[number]> extends never ? true : never;
+type _TrExhaustive = Exclude<TradingArmStatus, typeof TRADING_ALL_STATUSES[number]> extends never ? true : never;
 const _armCheck: _ArmExhaustive = true; void _armCheck;
 const _execCheck: _ExecExhaustive = true; void _execCheck;
 const _sdCheck: _SdExhaustive = true; void _sdCheck;
+const _trCheck: _TrExhaustive = true; void _trCheck;
 
 const ARM_LIVE: readonly ArmStatus[] = ARM_ALL_STATUSES.filter((s) => !ARM_TERMINAL.has(s));
 const EXEC_LIVE: readonly ExecStatus[] = EXEC_ALL_STATUSES.filter((s) => !EXEC_TERMINAL.has(s));
 const SPOT_DEFENSE_LIVE: readonly SpotDefenseArmStatus[] =
   SPOT_DEFENSE_ALL_STATUSES.filter((s) => !ARM_TERMINAL.has(s));
+const TRADING_LIVE: readonly TradingArmStatus[] =
+  TRADING_ALL_STATUSES.filter((s) => !ARM_TERMINAL.has(s));
 
 // Cobertura consumida por pool sobre TODOS los compromisos vivos del usuario (arms IL + ejecuciones
 // legacy). Por pool se toma el MÁXIMO hedgeNotionalUsd (un pool cuenta una vez; lecturas distintas del
@@ -68,6 +78,9 @@ const SPOT_DEFENSE_LIVE: readonly SpotDefenseArmStatus[] =
 // pools ni entre sí). Así no hay colisión ni doble-conteo entre los dos motores.
 export function poolCoverageKey(poolId: Id<"pools">): string { return `pool:${poolId}`; }
 export function spotDefenseCoverageKey(botId: Id<"spot_defense_bots">): string { return `spot-defense:${botId}`; }
+// (JAV-178) El bot de TRADING consume el cap compartido con clave propia (un bot = un compromiso,
+// SIN dedupe con `pool:` — decisión 1 del plan JAV-176: IL + Trading del mismo pool SUMAN).
+export function tradingCoverageKey(botId: Id<"bots">): string { return `trading:${botId}`; }
 
 export async function consumedCoverageByKey(
   ctx: ReadCtx, userId: Id<"users">,
@@ -127,6 +140,24 @@ export async function consumedCoverageByKey(
     }
   }
 
+  // (JAV-178) Trading: el consumo VIVO es `coverageNotionalUsd` (= efectivo × legsFactor mientras la
+  // reserva sea 2× en modo solo; reduceTradingReservation lo baja a 1× al confirmar OCO). Fila viva
+  // sin el dato fiable → fail-closed (bloquea nuevas reservas del usuario hasta backfill/drain).
+  for (const st of TRADING_LIVE) {
+    const arms = await ctx.db
+      .query("trading_arms")
+      .withIndex("by_user_status", (q) => q.eq("userId", userId).eq("status", st))
+      .collect();
+    for (const a of arms) {
+      const h = a.coverageNotionalUsd;
+      if (!(typeof h === "number" && Number.isFinite(h) && h > 0)) {
+        throw new Error("[blocked_config] Cobertura no cuantificable: arm de trading vivo sin coverageNotionalUsd (requiere backfill/drain).");
+      }
+      const key = tradingCoverageKey(a.botId);
+      map.set(key, Math.max(map.get(key) ?? 0, h));
+    }
+  }
+
   return map;
 }
 
@@ -166,8 +197,15 @@ export async function assertWithinPlanCoverageForKey(
     elog("coverage", "cap_rejected", {
       key, total: Number(total.toFixed(2)), cap: plan.coverageCapUsd, plan: plan.label,
     });
+    // (JAV-178 / JAV-176-P6) Tag PROPIO del tope de plan: NO depende del settlement de HL y no debe
+    // disparar backoffs de margen (el trading acelera blocked_margin a 90s — un cap con el tag viejo
+    // entraría a ese backoff). Política cross-motor: blocked_cap = blocked_config (blocked, 5 min +
+    // alerta) — cableada en armErrorKind/recordRearmOutcome/processRearms IL/markRearmBlockedIfEligible
+    // /sniffer spotDefense. Los strings de gates LEGACY ("[blocked_margin] cap/plan/suspensión") se
+    // conservan por decisión explícita (V2-P4): sin cambio de comportamiento, solo esta reserva
+    // compartida cambia de etiqueta.
     throw new Error(
-      `[blocked_margin] Supera el tope de cobertura del plan: ${total.toFixed(2)} > ${plan.coverageCapUsd} (${plan.label}).`);
+      `[blocked_cap] Supera el tope de cobertura del plan: ${total.toFixed(2)} > ${plan.coverageCapUsd} (${plan.label}).`);
   }
 }
 

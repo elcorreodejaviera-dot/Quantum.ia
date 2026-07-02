@@ -79,6 +79,10 @@ describe("explainBot", () => {
   it("sin arm: blocked / pausado / esperando (no maquilla)", () => {
     expect(explainBot(bot({ rearmStatus: "blocked", lastRearmErrorKind: "blocked_margin" }), null, null, null))
       .toContain("Bloqueado: blocked_margin. Revisa margen o plan.");
+    // (JAV-178) blocked_cap se traduce a "tope del plan" (rearmKindLabel) — el usuario debe distinguir
+    // el cap del plan del margen HL.
+    expect(explainBot(bot({ rearmStatus: "blocked", lastRearmErrorKind: "blocked_cap" }), null, null, null))
+      .toContain("Bloqueado: tope del plan. Revisa margen o plan.");
     expect(explainBot(bot({ active: false }), null, null, null)).toContain("Pausado.");
     expect(explainBot(bot(), null, null, null)).toContain("Esperando para armar la cobertura.");
   });

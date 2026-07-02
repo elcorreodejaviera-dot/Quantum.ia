@@ -24,7 +24,10 @@ export const REARM_BLOCKED_RECHECK_MS = 5 * 60_000; // reevaluación de un bloqu
 export const REARM_LEASE_MS = 5 * 60_000;
 export const STOP_ALERT_THRESHOLD = 5;              // SL consecutivos → alerta de whipsaw
 
-export type RearmErrorKind = "transient" | "blocked_margin" | "blocked_config" | "retry_incompatible" | "cancel";
+// (JAV-178) `blocked_cap` = tope de cobertura del PLAN (assertWithinPlanCoverageForKey): corregible
+// como blocked_config (recheck 5 min + alerta), NUNCA con el backoff acelerado de blocked_margin —
+// el cap no depende del settlement de HL (JAV-176-P6).
+export type RearmErrorKind = "transient" | "blocked_margin" | "blocked_cap" | "blocked_config" | "retry_incompatible" | "cancel";
 
 // Extrae el [kind] del prefijo del mensaje de error de armBotInternal/reserveArm. Sin prefijo conocido
 // → "transient" (default SEGURO: un error no clasificado nunca abandona el rearm, solo reintenta).
@@ -33,7 +36,7 @@ export type RearmErrorKind = "transient" | "blocked_margin" | "blocked_config" |
 // determinista caía a "transient" y se reintentaba para siempre en vez de marcarse blocked + alerta.
 // Anclamos permitiendo SOLO ese wrapper antes del token (no un \[…\] embebido más adelante).
 export function armErrorKind(message: string): RearmErrorKind {
-  const m = /^(?:Uncaught Error:\s*)*\[(transient|blocked_margin|blocked_config|retry_incompatible|cancel)\]/.exec(message);
+  const m = /^(?:Uncaught Error:\s*)*\[(transient|blocked_margin|blocked_cap|blocked_config|retry_incompatible|cancel)\]/.exec(message);
   return (m?.[1] as RearmErrorKind | undefined) ?? "transient";
 }
 
@@ -66,7 +69,7 @@ export const recordRearmOutcome = internalMutation({
     botId: v.id("bots"), token: v.string(),
     outcome: v.union(v.literal("success"), v.literal("transient"), v.literal("blocked"), v.literal("cancel")),
     kind: v.optional(v.union(
-      v.literal("transient"), v.literal("blocked_margin"),
+      v.literal("transient"), v.literal("blocked_margin"), v.literal("blocked_cap"),
       v.literal("blocked_config"), v.literal("retry_incompatible"))),
     error: v.optional(v.string()),
     nextRearmAt: v.optional(v.number()),
@@ -175,6 +178,9 @@ export const listRearmReadyBots = internalQuery({
         .query("bots")
         .withIndex("by_rearm_status", (q) => q.eq("rearmStatus", status).lte("nextRearmAt", now))
         .order("asc")) {
+        // (JAV-178) Separación por kind: el cron IL NO reclama bots de TRADING (los procesa
+        // processTradingRearms vía listDueTradingRearmsInternal). Legacy `undefined` = IL.
+        if (b.kind === "trading") continue;
         if ((b.rearmLeaseUntil ?? 0) <= now) out.push(b._id);
         if (out.length >= max) return out;
       }
